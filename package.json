@@ -1,0 +1,45 @@
+{
+  "name": "agentwallet-sdk",
+  "version": "2.0.1",
+  "description": "TypeScript SDK for Agent Wallet — autonomous crypto spending for AI agents with user-set limits",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "clean": "rm -rf dist",
+    "test": "vitest run"
+  },
+  "keywords": [
+    "agent-wallet",
+    "ai-agent",
+    "crypto",
+    "web3",
+    "erc-6551",
+    "x402",
+    "agentic-wallet",
+    "base",
+    "non-custodial",
+    "spend-limits",
+    "machine-payments",
+    "agent-payments",
+    "autonomous-agent",
+    "token-bound-account"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/agentnexus/agent-wallet-sdk"
+  },
+  "author": "AgentNexus",
+  "dependencies": {
+    "viem": "2.46.0"
+  },
+  "devDependencies": {
+    "typescript": "5.3.3",
+    "vitest": "4.0.18"
+  }
+}

@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent Wallet — Let your agent spend. Stay in control.</title>
+<style>
+  :root {
+    --bg: #0a0a0f;
+    --surface: #12121a;
+    --border: #1e1e2e;
+    --text: #e4e4ef;
+    --muted: #8888a0;
+    --accent: #6c5ce7;
+    --accent2: #a29bfe;
+    --green: #00d2a0;
+    --red: #ff6b6b;
+    --code-bg: #1a1a2e;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+  }
+  .container { max-width: 900px; margin: 0 auto; padding: 0 24px; }
+
+  /* Nav */
+  nav {
+    padding: 20px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  nav .container { display: flex; justify-content: space-between; align-items: center; }
+  .logo { font-weight: 700; font-size: 1.2rem; }
+  .logo span { color: var(--accent2); }
+  nav a { color: var(--muted); text-decoration: none; margin-left: 24px; font-size: 0.9rem; }
+  nav a:hover { color: var(--text); }
+
+  /* Hero */
+  .hero {
+    padding: 100px 0 80px;
+    text-align: center;
+  }
+  .hero h1 {
+    font-size: 3.2rem;
+    font-weight: 800;
+    line-height: 1.15;
+    margin-bottom: 20px;
+    background: linear-gradient(135deg, var(--text) 0%, var(--accent2) 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .hero p {
+    font-size: 1.25rem;
+    color: var(--muted);
+    max-width: 600px;
+    margin: 0 auto 40px;
+  }
+  .cta-row { display: flex; gap: 16px; justify-content: center; flex-wrap: wrap; }
+  .btn {
+    display: inline-block;
+    padding: 14px 28px;
+    border-radius: 8px;
+    font-size: 1rem;
+    font-weight: 600;
+    text-decoration: none;
+    transition: all 0.2s;
+  }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-primary:hover { background: var(--accent2); }
+  .btn-secondary { background: var(--surface); color: var(--text); border: 1px solid var(--border); }
+  .btn-secondary:hover { border-color: var(--accent); }
+  .install-cmd {
+    display: inline-block;
+    background: var(--code-bg);
+    padding: 12px 24px;
+    border-radius: 8px;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 0.95rem;
+    color: var(--green);
+    margin-top: 24px;
+    border: 1px solid var(--border);
+  }
+
+  /* Sections */
+  section { padding: 80px 0; }
+  section h2 {
+    font-size: 2rem;
+    font-weight: 700;
+    margin-bottom: 16px;
+  }
+  section .subtitle {
+    color: var(--muted);
+    font-size: 1.1rem;
+    margin-bottom: 48px;
+  }
+
+  /* Problem/Solution */
+  .grid-2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 24px;
+  }
+  @media (max-width: 640px) { .grid-2 { grid-template-columns: 1fr; } }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 32px;
+  }
+  .card h3 { font-size: 1.2rem; margin-bottom: 12px; }
+  .card p { color: var(--muted); font-size: 0.95rem; }
+  .card.problem { border-left: 3px solid var(--red); }
+  .card.solution { border-left: 3px solid var(--green); }
+  .card .icon { font-size: 2rem; margin-bottom: 12px; }
+
+  /* Code */
+  .code-section { text-align: center; }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 28px 32px;
+    text-align: left;
+    overflow-x: auto;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 0.9rem;
+    line-height: 1.7;
+    max-width: 700px;
+    margin: 0 auto;
+  }
+  .kw { color: var(--accent2); }
+  .str { color: var(--green); }
+  .cm { color: var(--muted); }
+  .fn { color: #ffd93d; }
+
+  /* Comparison */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--surface);
+    border-radius: 12px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+  }
+  th, td { padding: 16px 20px; text-align: left; font-size: 0.9rem; }
+  th { background: var(--code-bg); color: var(--muted); font-weight: 600; text-transform: uppercase; font-size: 0.8rem; letter-spacing: 0.5px; }
+  td { border-top: 1px solid var(--border); }
+  tr:hover td { background: rgba(108, 92, 231, 0.05); }
+  .check { color: var(--green); }
+  .cross { color: var(--red); }
+
+  /* Features */
+  .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+  @media (max-width: 768px) { .grid-3 { grid-template-columns: 1fr; } }
+  .feature .icon { font-size: 1.6rem; margin-bottom: 8px; }
+  .feature h3 { font-size: 1rem; margin-bottom: 6px; }
+  .feature p { color: var(--muted); font-size: 0.85rem; }
+
+  /* Footer */
+  footer {
+    padding: 40px 0;
+    border-top: 1px solid var(--border);
+    text-align: center;
+    color: var(--muted);
+    font-size: 0.85rem;
+  }
+  footer a { color: var(--accent2); text-decoration: none; }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="container">
+    <div class="logo">agent<span>wallet</span></div>
+    <div>
+      <a href="#problem">Why</a>
+      <a href="#code">Code</a>
+      <a href="#compare">Compare</a>
+      <a href="https://github.com/agent-nexus/agent-wallet" target="_blank">GitHub</a>
+    </div>
+  </div>
+</nav>
+
+<section class="hero">
+  <div class="container">
+    <h1>Let your agent spend.<br>Stay in control.</h1>
+    <p>On-chain spend limits for autonomous AI agents. Set a budget, let your agent trade — anything over-limit queues for your approval.</p>
+    <div class="cta-row">
+      <a href="https://github.com/agent-nexus/agent-wallet" class="btn btn-primary">View on GitHub</a>
+      <a href="#code" class="btn btn-secondary">See the code</a>
+    </div>
+    <div class="install-cmd">npm install @agentwallet/sdk</div>
+  </div>
+</section>
+
+<section id="problem">
+  <div class="container">
+    <h2>The Problem</h2>
+    <p class="subtitle">AI agents need wallets. But giving an agent your private key is insane.</p>
+    <div class="grid-2">
+      <div class="card problem">
+        <div class="icon">🔑</div>
+        <h3>Shared private keys</h3>
+        <p>Most agent frameworks require your private key. One bug, one prompt injection, and your entire wallet is drained.</p>
+      </div>
+      <div class="card problem">
+        <div class="icon">🎰</div>
+        <h3>All or nothing access</h3>
+        <p>No way to say "spend up to $100/day." It's either full access or no access. That's not how you'd give a credit card to an employee.</p>
+      </div>
+      <div class="card solution">
+        <div class="icon">🛡️</div>
+        <h3>Per-transaction limits</h3>
+        <p>Agent Wallet enforces max-per-tx and daily budget caps on-chain. The smart contract itself prevents overspending — not your agent's code.</p>
+      </div>
+      <div class="card solution">
+        <div class="icon">📋</div>
+        <h3>Automatic approval queue</h3>
+        <p>Anything over-limit gets queued for your approval. You get notified, review, approve or reject. The agent keeps working on everything within budget.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="code" class="code-section">
+  <div class="container">
+    <h2>5 Lines to Production</h2>
+    <p class="subtitle">Connect your agent to a spend-limited wallet in seconds.</p>
+    <pre><span class="cm">// 1. Connect to the agent's wallet</span>
+<span class="kw">const</span> wallet = <span class="fn">createWallet</span>({ accountAddress, chain: <span class="str">'base'</span>, walletClient });
+
+<span class="cm">// 2. Agent spends autonomously within limits</span>
+<span class="kw">await</span> <span class="fn">agentTransferToken</span>(wallet, { token: USDC, to: recipient, amount });
+
+<span class="cm">// 3. Over-limit? Auto-queued. Get notified.</span>
+<span class="fn">onTransactionQueued</span>(wallet, (e) => <span class="fn">notify</span>(<span class="str">`Approval needed: $${e.amount}`</span>));</pre>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <h2>Built for Agent Builders</h2>
+    <div class="grid-3">
+      <div class="card feature">
+        <div class="icon">⛽</div>
+        <h3>ERC-4337 Ready</h3>
+        <p>Gasless transactions via paymasters. Your agent never needs ETH for gas.</p>
+      </div>
+      <div class="card feature">
+        <div class="icon">🏭</div>
+        <h3>Factory Deploys</h3>
+        <p>CREATE2 deterministic addresses. Know your agent's wallet before it exists.</p>
+      </div>
+      <div class="card feature">
+        <div class="icon">🔗</div>
+        <h3>ERC-6551 Native</h3>
+        <p>Wallets bound to NFTs. Transfer the NFT, transfer wallet ownership.</p>
+      </div>
+      <div class="card feature">
+        <div class="icon">📊</div>
+        <h3>Per-Token Policies</h3>
+        <p>Different limits for USDC, ETH, or any ERC-20. Fine-grained control.</p>
+      </div>
+      <div class="card feature">
+        <div class="icon">🔔</div>
+        <h3>Event Listeners</h3>
+        <p>Built-in hooks for queued transactions. Pipe to Telegram, Discord, or webhooks.</p>
+      </div>
+      <div class="card feature">
+        <div class="icon">🧪</div>
+        <h3>Thoroughly Tested</h3>
+        <p>33 tests (unit + exploit verification). 2 rounds of internal AI-assisted security review. Auditable Solidity with no off-chain dependencies.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="compare">
+  <div class="container">
+    <h2>How It Compares</h2>
+    <p class="subtitle">Agent Wallet vs the alternatives.</p>
+    <table>
+      <thead>
+        <tr>
+          <th>Feature</th>
+          <th>Agent Wallet</th>
+          <th>Raw EOA</th>
+          <th>Multisig</th>
+          <th>Custodial API</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Per-tx spend limits</td>
+          <td class="check">✓ On-chain</td>
+          <td class="cross">✗</td>
+          <td class="cross">✗</td>
+          <td>Off-chain only</td>
+        </tr>
+        <tr>
+          <td>Daily budget caps</td>
+          <td class="check">✓ On-chain</td>
+          <td class="cross">✗</td>
+          <td class="cross">✗</td>
+          <td>Off-chain only</td>
+        </tr>
+        <tr>
+          <td>Auto approval queue</td>
+          <td class="check">✓</td>
+          <td class="cross">✗</td>
+          <td>Manual</td>
+          <td>Varies</td>
+        </tr>
+        <tr>
+          <td>Gasless (ERC-4337)</td>
+          <td class="check">✓</td>
+          <td class="cross">✗</td>
+          <td class="cross">✗</td>
+          <td class="check">✓</td>
+        </tr>
+        <tr>
+          <td>Self-custodial</td>
+          <td class="check">✓</td>
+          <td class="check">✓</td>
+          <td class="check">✓</td>
+          <td class="cross">✗</td>
+        </tr>
+        <tr>
+          <td>No private key sharing</td>
+          <td class="check">✓</td>
+          <td class="cross">✗</td>
+          <td class="check">✓</td>
+          <td class="check">✓</td>
+        </tr>
+        <tr>
+          <td>NFT-bound identity</td>
+          <td class="check">✓</td>
+          <td class="cross">✗</td>
+          <td class="cross">✗</td>
+          <td class="cross">✗</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <p>Agent Wallet — Open source under MIT · <a href="https://github.com/agent-nexus/agent-wallet">GitHub</a></p>
+  </div>
+</footer>
+
+</body>
+</html>
