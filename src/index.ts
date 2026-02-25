@@ -529,3 +529,32 @@ export function onTransactionExecuted(
     },
   });
 }
+
+// ─── ERC-8004: Trustless Agents — Identity Registry ─────────────────────────
+export {
+  ERC8004Client, ERC8004IdentityRegistryAbi, METADATA_KEYS,
+  REGISTRATION_FILE_TYPE, KNOWN_REGISTRY_ADDRESSES,
+  buildDataURI, parseDataURI, resolveAgentURI, validateRegistrationFile, formatAgentRegistry,
+} from './identity/erc8004.js';
+export type {
+  AgentServiceEndpoint, SupportedTrustMechanism, AgentRegistrationRef,
+  AgentRegistrationFile, AgentModelMetadata, AgentIdentity,
+  MetadataEntry, ERC8004ClientConfig, RegistrationResult,
+} from './identity/erc8004.js';
+
+// ─── SwapModule — Uniswap V3 token swap aggregator ──────────────────────────
+export { SwapModule, attachSwap, calcProtocolFee, applySlippage, calcDeadline } from './swap/index.js';
+export { UniswapV3RouterAbi, UniswapV3QuoterV2Abi, ERC20Abi } from './swap/index.js';
+export { BASE_TOKENS, UNISWAP_V3_BASE, PROTOCOL_FEE_BPS, DEFAULT_SLIPPAGE_BPS } from './swap/index.js';
+export type { UniswapFeeTier, SwapQuote, SwapOptions, SwapResult, SwapModuleConfig } from './swap/index.js';
+
+// ─── CCTP V2 Cross-Chain Bridge ─────────────────────────────────────────────
+export {
+  BridgeModule, BridgeError, createBridge,
+  CCTP_DOMAIN_IDS, BRIDGE_CHAIN_IDS, USDC_CONTRACT,
+  TOKEN_MESSENGER_V2, MESSAGE_TRANSMITTER_V2, FINALITY_THRESHOLD,
+} from './bridge/index.js';
+export { TokenMessengerV2Abi, MessageTransmitterV2Abi, ERC20BridgeAbi } from './bridge/index.js';
+export type { BridgeChain, BridgeOptions, BurnResult, BridgeResult } from './bridge/index.js';
+
+// x402 already exported above from original index.ts

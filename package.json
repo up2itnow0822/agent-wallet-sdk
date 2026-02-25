@@ -1,7 +1,7 @@
 {
   "name": "agentwallet-sdk",
-  "version": "2.0.1",
-  "description": "TypeScript SDK for Agent Wallet — autonomous crypto spending for AI agents with user-set limits",
+  "version": "2.4.1",
+  "description": "TypeScript SDK for Agent Wallet \u2014 autonomous crypto spending for AI agents with user-set limits",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
