@@ -283,6 +283,46 @@ Server verifies payment → returns 200 + data
 
 Your agent's keys never leave the non-custodial wallet. All payments respect on-chain spend limits set by the wallet owner.
 
+## Why agent-wallet-sdk?
+
+Every major AI company launched an agent wallet in early 2026. Coinbase Agentic Wallets went live February 13. MoonPay Agents launched March 4. Stripe added x402 on February 11. The problem: every single one of them holds your agent's keys.
+
+Here's the direct comparison:
+
+| | Coinbase Agentic Wallets | MoonPay Agents | agent-wallet-sdk |
+|---|---|---|---|
+| **Key custody** | Coinbase servers | MoonPay servers | Your environment only |
+| **Spend limits** | Session caps (off-chain API) | None | Per-tx + daily, on-chain contract |
+| **x402 support** | Yes (Base/USDC) | No | Yes (Base/USDC, full spec) |
+| **Cross-chain** | Base only | Limited | 5 chains via CCTP |
+| **Freeze risk** | Yes (KYC, compliance) | Yes | None -- contract on-chain |
+| **Audit trail** | API logs (centralized) | API logs | On-chain events, self-queryable |
+| **Open source** | No | No | Yes (MIT) |
+
+**The three questions that matter:**
+
+**1. Who holds the key?** With Coinbase and MoonPay, their infrastructure holds your agent's private key. That means they can freeze it, they get hacked and your key goes with it, and they can shut down the product. agent-wallet-sdk generates keys locally and they never leave your environment.
+
+**2. Where are spend limits enforced?** Coinbase uses session caps enforced at the API layer -- those can change. MoonPay has no per-transaction limits at all. agent-wallet-sdk enforces limits inside an EVM contract. A `perTxLimit` of 25 USDC means the contract will physically not execute a transaction over 25 USDC. No API to call, no policy to change.
+
+**3. What happens when the platform shuts down?** Custodial wallets disappear with the platform. Your agent's wallet contract is deployed on-chain. It exists as long as the EVM exists.
+
+```typescript
+// Your keys stay in your environment -- not on Coinbase, not on MoonPay
+const wallet = createWallet({
+  accountAddress: '0xYOUR_CONTRACT',
+  walletClient: createWalletClient({
+    account: privateKeyToAccount(process.env.AGENT_KEY), // never transmitted
+    transport: http('https://mainnet.base.org'),
+  }),
+  chain: 'base',
+});
+```
+
+If you need a quick integration and you're already in the Coinbase ecosystem: their product works for demos and low-stakes use cases. But if you're building agents that handle real funds, run autonomously for weeks, or need to survive beyond a single platform's product lifecycle -- you want the keys under your own control.
+
+---
+
 ## Why Non-Custodial Beats Exchange Wallets
 
 OKX OnchainOS supports 60+ chains. Coinbase Agentic Wallets are backed by a trillion-dollar exchange. Both look impressive on paper. Here's the problem: **they hold your agent's keys.**
