@@ -1,9 +1,11 @@
 # Product Hunt Launch Draft — AgentWallet SDK
 
 ## Tagline (60 chars max)
+
 **Non-custodial crypto wallet for AI agents with on-chain limits**
 
 ## One-liner
+
 Give your AI agent autonomous spending power — with hard on-chain caps it can't override.
 
 ## Description
@@ -15,6 +17,7 @@ Coinbase just shipped custodial agent wallets. Stripe launched merchant-side age
 Your AI agent gets its own crypto wallet on Base with spending limits enforced by smart contracts — not API configs, not confirmation prompts, not rate limits. On-chain. Immutable. Auditable.
 
 **How it works:**
+
 - 🔑 Agent holds its own keys (non-custodial)
 - 📏 Owner sets per-tx and daily spending caps on-chain
 - ✅ Under-limit transactions execute instantly — no human needed
@@ -22,6 +25,7 @@ Your AI agent gets its own crypto wallet on Base with spending limits enforced b
 - 🌐 x402 protocol support — your agent pays APIs with `fetch()`
 
 **Built on:**
+
 - ERC-6551 token-bound accounts (wallet = NFT, portable & composable)
 - Base Mainnet (low gas, Coinbase ecosystem)
 - TypeScript SDK with full type safety
@@ -30,11 +34,12 @@ Your AI agent gets its own crypto wallet on Base with spending limits enforced b
 
 ```bash
 npm install agentwallet-sdk viem
-```
+```text
 
 Open source. MIT licensed. Ship it today.
 
 ## Topics
+
 - Artificial Intelligence
 - Developer Tools
 - Web3
@@ -42,9 +47,11 @@ Open source. MIT licensed. Ship it today.
 - Open Source
 
 ## Makers
+
 @up2itnow5280 *(update with PH handle)*
 
 ## Gallery Images Needed
+
 1. Hero: "Agent Wallet — Autonomous spending, on-chain limits" with flow diagram
 2. Comparison table: AgentWallet vs Coinbase CDP vs Stripe
 3. Code snippet: Quick start (3 lines)
@@ -66,6 +73,7 @@ It's live on Base Mainnet, supports x402 machine payments, and is fully open sou
 Would love feedback from anyone building AI agents that need to spend money. What limits would you want to set? What's missing?
 
 ## Launch Timing
+
 - **Best days:** Tuesday–Thursday
 - **Optimal:** Schedule for a week when no major PH launches conflict
 - **Prep:** Have 5+ upvotes ready at launch, respond to every comment within 1 hour

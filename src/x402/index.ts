@@ -13,3 +13,17 @@ export type {
   X402ClientConfig,
 } from './types.js';
 export { USDC_ADDRESSES, DEFAULT_SUPPORTED_NETWORKS } from './types.js';
+
+// ─── Chain-Specific Adapters ──────────────────────────────────────────────────
+export {
+  AbstractDelegatedFacilitatorAdapter,
+  ABSTRACT_CHAIN_IDS,
+  ABSTRACT_USDC,
+  ABSTRACT_APPROVED_FACILITATORS,
+  ABSTRACT_SUPPORTED_CHAINS,
+} from './chains/abstract/index.js';
+export type {
+  AbstractDelegatedPaymentConfig,
+  DelegatedPaymentPermit,
+  AbstractPaymentResult,
+} from './chains/abstract/index.js';

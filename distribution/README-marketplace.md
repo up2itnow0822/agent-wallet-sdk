@@ -41,7 +41,7 @@ All limits enforced **on-chain** via smart contracts. Not API rate limits. Not o
 
 ```bash
 npm install agentwallet-sdk viem
-```
+```text
 
 ```typescript
 import { createWallet, agentExecute, setSpendPolicy, NATIVE_TOKEN } from 'agentwallet-sdk';
@@ -66,7 +66,7 @@ await agentExecute(wallet, {
   to: '0xSERVICE',
   value: 10_000000000000000n, // 0.01 ETH — auto-approved
 });
-```
+```text
 
 ## 🌐 x402 Machine Payments
 
@@ -78,7 +78,7 @@ import { createX402Fetch } from 'agentwallet-sdk';
 const x402Fetch = createX402Fetch(wallet, { globalDailyLimit: 100_000_000n });
 const response = await x402Fetch('https://api.weather.com/forecast');
 // 402 → auto-pay USDC on Base → retry → get data
-```
+```text
 
 ## 🆚 Why AgentWallet vs. Alternatives
 
@@ -93,7 +93,7 @@ const response = await x402Fetch('https://api.weather.com/forecast');
 
 ## 🏗️ Architecture
 
-```
+```text
 Owner (you)                    Agent (AI)
     │                              │
     ├─ setSpendPolicy()            │
@@ -106,7 +106,7 @@ Owner (you)                    Agent (AI)
     └──────── AgentAccountV2 (on-chain) ────────┘
               ERC-6551 Token-Bound Account
               All limits enforced in Solidity
-```
+```text
 
 ## 📦 Installation
 
@@ -119,7 +119,7 @@ yarn add agentwallet-sdk viem
 
 # pnpm
 pnpm add agentwallet-sdk viem
-```
+```text
 
 ## 🔗 Links
 
