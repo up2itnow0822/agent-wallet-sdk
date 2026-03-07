@@ -1,0 +1,33 @@
+# Smithery MCP server configuration
+name: agent-wallet-sdk
+displayName: Agent Wallet SDK
+description: Non-custodial wallet SDK for AI agents. x402 payments, CCTP cross-chain transfers, on-chain spend limits. MIT licensed. Agents keep their own keys.
+homepage: https://github.com/up2itnow0822/agent-wallet-sdk
+license: MIT
+tags:
+  - mcp
+  - wallet
+  - x402
+  - ai-agents
+  - payments
+  - non-custodial
+  - blockchain
+  - typescript
+startCommand:
+  type: stdio
+  configSchema:
+    type: object
+    properties:
+      chain:
+        type: string
+        description: Target chain (base, ethereum, arbitrum, polygon, etherlink)
+        default: base
+      agentKey:
+        type: string
+        description: Agent private key (stays in your environment)
+  commandFunction: |-
+    (config) => ({
+      command: 'npx',
+      args: ['-y', '@agentwallet/sdk', 'mcp'],
+      env: { CHAIN: config.chain, AGENT_PRIVATE_KEY: config.agentKey }
+    })
