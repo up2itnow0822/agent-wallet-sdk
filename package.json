@@ -1,7 +1,7 @@
 {
   "name": "agentwallet-sdk",
-  "version": "3.4.1",
-  "description": "Non-custodial TypeScript SDK for AI agent wallets — x402 payments (Solana, Base, Abstract, Polygon), CCTP cross-chain, token swaps. Private keys never leave your environment.",
+  "version": "3.5.0",
+  "description": "Non-custodial TypeScript SDK for AI agent wallets \u2014 x402 payments (Solana, Base, Abstract, Polygon), CCTP cross-chain, token swaps. Private keys never leave your environment.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [

@@ -1,5 +1,25 @@
 # 🤖 Agent Wallet SDK
 
+## The only non-custodial agent wallet SDK. You keep the keys.
+
+> **Coinbase Agentic Wallets** store private keys in Coinbase infrastructure.
+> **MoonPay Agents** require KYC before your agent can transact.
+> **agentwallet-sdk**: your agent holds its own keys. Always. No custodian. No KYC. No freeze risk.
+
+![AP2](https://img.shields.io/badge/AP2-compatible-blue?style=flat-square)
+![x402](https://img.shields.io/badge/x402-native-green?style=flat-square)
+![MCP](https://img.shields.io/badge/MCP-ready-purple?style=flat-square)
+![Etherlink](https://img.shields.io/badge/Etherlink-supported-orange?style=flat-square)
+![CCTP V2](https://img.shields.io/badge/CCTP_V2-cross--chain-red?style=flat-square)
+![npm](https://img.shields.io/npm/v/agentwallet-sdk?style=flat-square)
+![License](https://img.shields.io/badge/license-MIT-brightgreen?style=flat-square)
+
+```bash
+npm i agentwallet-sdk
+```
+
+---
+
 **Let your AI agent spend crypto. Stay in control.**
 
 Agent Wallet gives AI agents autonomous spending power with hard on-chain limits. No more choosing between "agent can drain everything" and "every transaction needs manual approval."
@@ -190,6 +210,7 @@ for (const entry of history) {
 | **Ethereum** | ✅ | High-value operations |
 | **Arbitrum** | ✅ | DeFi agents |
 | **Polygon** | ✅ | Micropayments |
+| **Etherlink** | ✅ x402 | Tezos rollup, near-zero fees |
 
 ## x402 Protocol Support
 
@@ -265,6 +286,40 @@ const client = createX402Client(wallet, {
 });
 ```text
 
+### Etherlink x402 - Non-Custodial ERC-20 Payments via Permit2
+
+Etherlink (Tezos L2) launched x402 support in March 2026 with a Permit2 proxy that lets agents pay in ERC-20 tokens without pre-approvals. `agentwallet-sdk` supports this directly:
+
+```typescript
+import { createWallet, createX402Client } from 'agentwallet-sdk';
+import { createWalletClient, http } from 'viem';
+import { privateKeyToAccount } from 'viem/accounts';
+
+const walletClient = createWalletClient({
+  account: privateKeyToAccount(process.env.AGENT_KEY!),
+  transport: http('https://node.mainnet.etherlink.com'),
+});
+
+const wallet = createWallet({
+  accountAddress: '0xYOUR_AGENT_CONTRACT',
+  chain: 'etherlink',
+  walletClient,
+});
+
+// x402 client on Etherlink -- same API, different chain
+const client = createX402Client(wallet, {
+  preferredChain: 'etherlink',   // near-zero fees on Tezos L2
+  globalDailyLimit: 100_000_000n, // 100 USDC/day
+  globalPerRequestMax: 2_000_000n, // 2 USDC max per request
+});
+
+// Fetch x402-gated resources -- 402 payment handled automatically
+const response = await client.fetch('https://api.example.com/agent-data');
+// The client: parsed the 402, checked budget, signed via Permit2, retried with proof
+```
+
+Unlike custodial x402 implementations (Coinbase, OKX OnchainOS), the key never leaves your environment. The Permit2 proxy handles the ERC-20 approval flow, but authorization is still signed locally.
+
 ### How x402 Works
 
 ```text
@@ -289,15 +344,18 @@ Every major AI company launched an agent wallet in early 2026. Coinbase Agentic 
 
 Here's the direct comparison:
 
-| | Coinbase Agentic Wallets | MoonPay Agents | agent-wallet-sdk |
-|---|---|---|---|
-| **Key custody** | Coinbase servers | MoonPay servers | Your environment only |
-| **Spend limits** | Session caps (off-chain API) | None | Per-tx + daily, on-chain contract |
-| **x402 support** | Yes (Base/USDC) | No | Yes (Base/USDC, full spec) |
-| **Cross-chain** | Base only | Limited | 5 chains via CCTP |
-| **Freeze risk** | Yes (KYC, compliance) | Yes | None -- contract on-chain |
-| **Audit trail** | API logs (centralized) | API logs | On-chain events, self-queryable |
-| **Open source** | No | No | Yes (MIT) |
+| | Coinbase AgentKit | MoonPay Agents | Circuit & Chisel ATXP | agent-wallet-sdk |
+|---|---|---|---|---|
+| **Key custody** | Coinbase servers | MoonPay servers | Enterprise custodian | Your environment only |
+| **Spend limits** | Session caps (off-chain API) | None | Nested policy layer | Per-tx + daily, on-chain contract |
+| **x402 support** | Yes (Base/USDC) | No | Partial | Yes (Base, Etherlink, full spec) |
+| **Cross-chain** | Base only | Limited | EVM-only | 5 chains via CCTP V2 |
+| **Freeze risk** | Yes (KYC, compliance) | Yes | Yes (enterprise terms) | None -- contract on-chain |
+| **Audit trail** | API logs (centralized) | API logs | Enterprise dashboard | On-chain events, self-queryable |
+| **Open source** | No | No | No | Yes (MIT) |
+| **KYC required** | Yes | Yes | Yes | No |
+| **Micropayments** | Limited | No | Yes (nested) | Yes (x402 + sub-cent via L2) |
+| **Agent-sovereign** | No | No | No | Yes |
 
 **The three questions that matter:**
 
