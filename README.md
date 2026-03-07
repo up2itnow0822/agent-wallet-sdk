@@ -1,25 +1,5 @@
 # 🤖 Agent Wallet SDK
 
-## The only non-custodial agent wallet SDK. You keep the keys.
-
-> **Coinbase Agentic Wallets** store private keys in Coinbase infrastructure.
-> **MoonPay Agents** require KYC before your agent can transact.
-> **agentwallet-sdk**: your agent holds its own keys. Always. No custodian. No KYC. No freeze risk.
-
-![AP2](https://img.shields.io/badge/AP2-compatible-blue?style=flat-square)
-![x402](https://img.shields.io/badge/x402-native-green?style=flat-square)
-![MCP](https://img.shields.io/badge/MCP-ready-purple?style=flat-square)
-![Etherlink](https://img.shields.io/badge/Etherlink-supported-orange?style=flat-square)
-![CCTP V2](https://img.shields.io/badge/CCTP_V2-cross--chain-red?style=flat-square)
-![npm](https://img.shields.io/npm/v/agentwallet-sdk?style=flat-square)
-![License](https://img.shields.io/badge/license-MIT-brightgreen?style=flat-square)
-
-```bash
-npm i agentwallet-sdk
-```
-
----
-
 **Let your AI agent spend crypto. Stay in control.**
 
 Agent Wallet gives AI agents autonomous spending power with hard on-chain limits. No more choosing between "agent can drain everything" and "every transaction needs manual approval."
@@ -210,11 +190,13 @@ for (const entry of history) {
 | **Ethereum** | ✅ | High-value operations |
 | **Arbitrum** | ✅ | DeFi agents |
 | **Polygon** | ✅ | Micropayments |
-| **Etherlink** | ✅ x402 | Tezos rollup, near-zero fees |
+| **Etherlink** | ✅ | x402 multichain payments |
 
 ## x402 Protocol Support
 
-Agent Wallet natively supports the [x402 protocol](https://x402.org) — the open standard for HTTP 402 machine payments. Your agent can automatically pay any x402-enabled API (Stripe, Coinbase, etc.) using USDC on Base, while respecting on-chain spend limits.
+> **March 2026:** x402 just landed on Etherlink (Tezos L2). agent-wallet-sdk explicitly supports x402 on both **Base** (primary, USDC-native) and **Etherlink** — making it one of the first non-custodial SDKs to span both x402 chains. [Submit your agent to the x402 Bazaar](https://x402.org/bazaar) to get indexed.
+
+Agent Wallet natively supports the [x402 protocol](https://x402.org) — the open standard for HTTP 402 machine payments. Your agent can automatically pay any x402-enabled API (Stripe, Coinbase, etc.) using USDC on Base or Etherlink, while respecting on-chain spend limits.
 
 ### Quick Start
 
@@ -288,7 +270,7 @@ const client = createX402Client(wallet, {
 
 ### Etherlink x402 - Non-Custodial ERC-20 Payments via Permit2
 
-Etherlink (Tezos L2) launched x402 support in March 2026 with a Permit2 proxy that lets agents pay in ERC-20 tokens without pre-approvals. `agentwallet-sdk` supports this directly:
+Etherlink (Tezos L2) launched x402 support in March 2026 with a Permit2 proxy for non-custodial ERC-20 payments. `agentwallet-sdk` supports this directly:
 
 ```typescript
 import { createWallet, createX402Client } from 'agentwallet-sdk';
@@ -306,19 +288,19 @@ const wallet = createWallet({
   walletClient,
 });
 
-// x402 client on Etherlink -- same API, different chain
+// x402 client on Etherlink -- same API, near-zero fees
 const client = createX402Client(wallet, {
-  preferredChain: 'etherlink',   // near-zero fees on Tezos L2
-  globalDailyLimit: 100_000_000n, // 100 USDC/day
+  preferredChain: 'etherlink',
+  globalDailyLimit: 100_000_000n,  // 100 USDC/day
   globalPerRequestMax: 2_000_000n, // 2 USDC max per request
 });
 
-// Fetch x402-gated resources -- 402 payment handled automatically
+// Fetch x402-gated resources -- 402 handled automatically
 const response = await client.fetch('https://api.example.com/agent-data');
-// The client: parsed the 402, checked budget, signed via Permit2, retried with proof
+// Client parsed 402, checked budget, signed via Permit2, retried with proof
 ```
 
-Unlike custodial x402 implementations (Coinbase, OKX OnchainOS), the key never leaves your environment. The Permit2 proxy handles the ERC-20 approval flow, but authorization is still signed locally.
+Unlike custodial x402 implementations (Coinbase, OKX OnchainOS), the key never leaves your environment. The Permit2 proxy handles ERC-20 approval flow, but authorization is signed locally.
 
 ### How x402 Works
 
@@ -329,7 +311,7 @@ Client parses payment requirements (amount, token, recipient, network)
   ↓
 Budget check (client-side caps + on-chain spend limits)
   ↓
-AgentWallet executes USDC transfer on Base
+AgentWallet executes USDC transfer on Base or Etherlink
   ↓
 Client retries request with X-PAYMENT header (payment proof)
   ↓
@@ -347,14 +329,14 @@ Here's the direct comparison:
 | | Coinbase AgentKit | MoonPay Agents | Circuit & Chisel ATXP | agent-wallet-sdk |
 |---|---|---|---|---|
 | **Key custody** | Coinbase servers | MoonPay servers | Enterprise custodian | Your environment only |
+| **SDK type** | TypeScript SDK | CLI-only | No public SDK | TypeScript SDK |
 | **Spend limits** | Session caps (off-chain API) | None | Nested policy layer | Per-tx + daily, on-chain contract |
 | **x402 support** | Yes (Base/USDC) | No | Partial | Yes (Base, Etherlink, full spec) |
-| **Cross-chain** | Base only | Limited | EVM-only | 5 chains via CCTP V2 |
+| **Cross-chain** | Base only (USDC) | No CCTP | EVM-only | 5 chains via CCTP V2 |
 | **Freeze risk** | Yes (KYC, compliance) | Yes | Yes (enterprise terms) | None -- contract on-chain |
 | **Audit trail** | API logs (centralized) | API logs | Enterprise dashboard | On-chain events, self-queryable |
 | **Open source** | No | No | No | Yes (MIT) |
 | **KYC required** | Yes | Yes | Yes | No |
-| **Micropayments** | Limited | No | Yes (nested) | Yes (x402 + sub-cent via L2) |
 | **Agent-sovereign** | No | No | No | Yes |
 
 **The three questions that matter:**
@@ -380,6 +362,14 @@ const wallet = createWallet({
 If you need a quick integration and you're already in the Coinbase ecosystem: their product works for demos and low-stakes use cases. But if you're building agents that handle real funds, run autonomously for weeks, or need to survive beyond a single platform's product lifecycle -- you want the keys under your own control.
 
 ---
+
+## Why Non-Custodial Matters for Agents
+
+Three reasons agents need non-custodial wallets, not exchange accounts:
+
+- **Agent-sovereign by design.** The agent's private key lives in its own environment -- not on OKX, not on Coinbase, not on anyone's server. No exchange can freeze it, no compliance team can lock it, no API deprecation can kill it.
+- **On-chain spend limits, not platform policies.** Custodial wallets enforce limits at the API layer. Those policies can change. This SDK enforces limits inside an EVM contract -- the chain enforces it, not a company.
+- **No exchange holds the keys.** When OKX OnchainOS or Coinbase Agentic Wallets hold your agent's key, they own the wallet. If they go down, if they get hacked, if they decide to shut down the product -- your agent stops working. Non-custodial means the wallet is yours as long as the chain runs.
 
 ## Why Non-Custodial Beats Exchange Wallets
 
