@@ -91,6 +91,31 @@ When you need guaranteed execution, autonomous operation across jurisdictions, o
 
 ---
 
+## Why Not OKX OnchainOS?
+
+OKX launched its AI layer on OnchainOS on March 3, 2026 -- wallet infrastructure, liquidity routing, and data feeds packaged for AI agents. It's a capable stack if you're already inside the OKX ecosystem.
+
+But it's the wrong choice for most builders:
+
+- **Closed ecosystem.** OnchainOS is exchange-native. Your agent's wallet infrastructure is tied to OKX's platform, policies, and availability.
+- **Custodial by design.** OKX holds the keys. That means OKX can freeze, restrict, or shut down your agent's ability to transact.
+- **Exchange-dependent liquidity.** Swaps and transfers route through OKX's own liquidity layer. You're not chain-agnostic -- you're OKX-dependent.
+
+agent-wallet-sdk is open-source, non-custodial, and chain-agnostic. No vendor lock-in. No platform that can pull the rug. Your agent owns its wallet.
+
+| Feature | OKX OnchainOS | agent-wallet-sdk |
+|---------|--------------|-----------------|
+| Open source | No | Yes (MIT) |
+| Custody model | OKX-custodial | Non-custodial (local keys) |
+| Exchange dependency | Required (OKX) | None |
+| Chain support | OKX-native chains | Any EVM chain |
+| Can be frozen | Yes | No |
+| x402 native | No | Yes |
+
+If you want to build agents that operate freely -- across chains, without a platform intermediary -- agent-wallet-sdk is the right tool.
+
+---
+
 ## x402 Integration
 
 x402 is the HTTP-native micropayment protocol for machine-to-machine payments. It has processed 115M+ micropayments between machines as of early 2026.
@@ -142,7 +167,7 @@ Agent Environment (local)
 
 ## Full Documentation
 
-- [npm package](https://www.npmjs.com/package/agent-wallet-sdk) — v0.4.1
+- [npm package](https://www.npmjs.com/package/agent-wallet-sdk) -- v0.4.1
 - [Hashnode article: Non-Custodial vs Custodial](https://ai-agent-economy.hashnode.dev/circle-vs-stripe-vs-agent-wallet-sdk-non-custodial-advantage)
 
 ---
