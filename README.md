@@ -114,6 +114,26 @@ agent-wallet-sdk is open-source, non-custodial, and chain-agnostic. No vendor lo
 
 If you want to build agents that operate freely -- across chains, without a platform intermediary -- agent-wallet-sdk is the right tool.
 
+## Why Not Binance AI Agent Skills?
+
+Binance launched AI Agent Skills in March 2026 -- giving AI agents unified access to wallet management, spot trading, and market data through the Binance platform.
+
+Same problem, different exchange:
+
+- **Binance holds the keys.** Your agent's wallet lives on Binance infrastructure. Binance compliance can freeze it, restrict withdrawals, or require KYC at any time.
+- **Trading-centric, not payment-centric.** Agent Skills is built around Binance spot trading. It's not designed for x402 micropayments, CCTP transfers, or general-purpose agent-to-agent payments.
+- **Platform lock-in.** Your agent's financial capability is tied to Binance's API, rate limits, and terms of service. If Binance changes its agent policy, your agent adapts or stops working.
+
+| Feature | Binance AI Agent Skills | agent-wallet-sdk |
+|---------|------------------------|-----------------|
+| Open source | No | Yes (MIT) |
+| Custody model | Binance-custodial | Non-custodial (local keys) |
+| Exchange dependency | Required (Binance) | None |
+| x402 support | No | Yes (Base, Solana, Abstract) |
+| Cross-chain payments | Via Binance bridge (custodial) | CCTP (non-custodial, 5 chains) |
+| Can be frozen | Yes | No |
+| Spend limits | Platform-level | On-chain contract-enforced |
+
 ---
 
 ## x402 Integration
