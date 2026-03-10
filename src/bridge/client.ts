@@ -12,7 +12,7 @@ import {
   type WalletClient,
   type TransactionReceipt,
 } from 'viem';
-import { base, mainnet, optimism, arbitrum } from 'viem/chains';
+import { base, mainnet, optimism, arbitrum, polygon, avalanche, linea } from 'viem/chains';
 import {
   TokenMessengerV2Abi,
   MessageTransmitterV2Abi,
@@ -31,7 +31,22 @@ import {
   ATTESTATION_POLL_INTERVAL_MS,
 } from './types.js';
 
-const VIEM_CHAINS = { base, ethereum: mainnet, optimism, arbitrum } as const;
+/**
+ * Viem chain definitions for all supported CCTP V2 chains.
+ * Chains without built-in viem definitions use custom definitions.
+ */
+const VIEM_CHAINS: Record<BridgeChain, any> = {
+  base,
+  ethereum: mainnet,
+  optimism,
+  arbitrum,
+  polygon,
+  avalanche,
+  linea,
+  unichain: { id: 130, name: 'Unichain', nativeCurrency: { name: 'ETH', symbol: 'ETH', decimals: 18 }, rpcUrls: { default: { http: ['https://mainnet.unichain.org'] } } },
+  sonic: { id: 146, name: 'Sonic', nativeCurrency: { name: 'S', symbol: 'S', decimals: 18 }, rpcUrls: { default: { http: ['https://rpc.soniclabs.com'] } } },
+  worldchain: { id: 480, name: 'World Chain', nativeCurrency: { name: 'ETH', symbol: 'ETH', decimals: 18 }, rpcUrls: { default: { http: ['https://worldchain-mainnet.g.alchemy.com/public'] } } },
+};
 
 export class BridgeModule {
   private readonly walletClient: WalletClient;
