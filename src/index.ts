@@ -153,7 +153,7 @@ export async function agentExecute(
     (log) => log.address.toLowerCase() === walletAddr && log.topics[0] === QUEUED_TOPIC
   );
 
-  const wasExecuted = !!executedLog && !queuedLog;
+  const wasExecuted = !queuedLog;
 
   return {
     executed: wasExecuted,
