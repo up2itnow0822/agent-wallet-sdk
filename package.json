@@ -1,7 +1,7 @@
 {
   "name": "agentwallet-sdk",
-  "version": "3.5.0",
-  "description": "Non-custodial TypeScript SDK for AI agent wallets \u2014 x402 payments (Solana, Base, Abstract, Polygon), CCTP cross-chain, token swaps. Private keys never leave your environment.",
+  "version": "5.0.1",
+  "description": "Non-custodial AI agent wallet SDK. ERC-8004 identity & reputation registries, mutual stake escrow, x402 payments, 17-chain CCTP bridging, ERC-6551 TBA, SpendingPolicy guardrails, Uniswap V3 swap. The agent holds the keys.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
@@ -27,7 +27,12 @@
     "machine-payments",
     "agent-payments",
     "autonomous-agent",
-    "token-bound-account"
+    "token-bound-account",
+    "erc-8004",
+    "reputation",
+    "validation",
+    "mutual-stake-escrow",
+    "cctp-bridge"
   ],
   "license": "MIT",
   "repository": {
@@ -39,6 +44,7 @@
     "viem": "2.46.0"
   },
   "devDependencies": {
+    "@elizaos/core": "^1.5.4",
     "typescript": "5.3.3",
     "vitest": "4.0.18"
   }

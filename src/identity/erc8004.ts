@@ -20,18 +20,26 @@ import {
   type WalletClient,
   type Chain,
 } from 'viem';
-import { base, baseSepolia, mainnet, arbitrum, polygon } from 'viem/chains';
+import { base, baseSepolia, mainnet, arbitrum, arbitrumSepolia, polygon } from 'viem/chains';
 
 // ─── ABI ─────────────────────────────────────────────────────────────────────
 
 export const ERC8004IdentityRegistryAbi = [
+  // register() — no args
+  {
+    name: 'register', type: 'function', stateMutability: 'nonpayable',
+    inputs: [],
+    outputs: [{ name: 'agentId', type: 'uint256' }],
+  },
+  // register(string) — URI only
   {
     name: 'register', type: 'function', stateMutability: 'nonpayable',
     inputs: [{ name: 'agentURI', type: 'string' }],
     outputs: [{ name: 'agentId', type: 'uint256' }],
   },
+  // register(string,tuple[]) — URI + metadata
   {
-    name: 'registerWithMetadata', type: 'function', stateMutability: 'nonpayable',
+    name: 'register', type: 'function', stateMutability: 'nonpayable',
     inputs: [
       { name: 'agentURI', type: 'string' },
       { name: 'metadata', type: 'tuple[]', components: [
@@ -40,10 +48,6 @@ export const ERC8004IdentityRegistryAbi = [
       ]},
     ],
     outputs: [{ name: 'agentId', type: 'uint256' }],
-  },
-  {
-    name: 'registerEmpty', type: 'function', stateMutability: 'nonpayable',
-    inputs: [], outputs: [{ name: 'agentId', type: 'uint256' }],
   },
   {
     name: 'setAgentURI', type: 'function', stateMutability: 'nonpayable',
@@ -167,9 +171,11 @@ export interface MetadataEntry {
   metadataValue: Hex;
 }
 
+export type SupportedChain = 'base' | 'base-sepolia' | 'ethereum' | 'arbitrum' | 'polygon' | 'arbitrum-sepolia';
+
 export interface ERC8004ClientConfig {
-  registryAddress: Address;
-  chain: 'base' | 'base-sepolia' | 'ethereum' | 'arbitrum' | 'polygon';
+  registryAddress?: Address;
+  chain: SupportedChain;
   rpcUrl?: string;
 }
 
@@ -191,25 +197,54 @@ export const METADATA_KEYS = {
 
 export const REGISTRATION_FILE_TYPE = 'https://eips.ethereum.org/EIPS/eip-8004#registration-v1';
 
-export const KNOWN_REGISTRY_ADDRESSES: Partial<Record<ERC8004ClientConfig['chain'], Address>> = {
-  'base-sepolia': '0x0000000000000000000000000000000000000000',
+export const KNOWN_REGISTRY_ADDRESSES: Record<string, { identity: Address; reputation: Address; validation?: Address }> = {
+  'ethereum': {
+    identity: '0x8004A169FB4a3325136EB29fA0ceB6D2e539a432',
+    reputation: '0x8004BAa17C55a88189AE136b182e5fdA19dE9b63',
+  },
+  'base': {
+    identity: '0x8004A169FB4a3325136EB29fA0ceB6D2e539a432',
+    reputation: '0x8004BAa17C55a88189AE136b182e5fdA19dE9b63',
+  },
+  'arbitrum': {
+    identity: '0x8004A169FB4a3325136EB29fA0ceB6D2e539a432',
+    reputation: '0x8004BAa17C55a88189AE136b182e5fdA19dE9b63',
+  },
+  'polygon': {
+    identity: '0x8004A169FB4a3325136EB29fA0ceB6D2e539a432',
+    reputation: '0x8004BAa17C55a88189AE136b182e5fdA19dE9b63',
+  },
+  'base-sepolia': {
+    identity: '0x8004A818BFB912233c491871b3d84c89A494BD9e',
+    reputation: '0x8004B663056A597Dffe9eCcC1965A193B7388713',
+  },
+  'arbitrum-sepolia': {
+    identity: '0x8004A818BFB912233c491871b3d84c89A494BD9e',
+    reputation: '0x8004B663056A597Dffe9eCcC1965A193B7388713',
+  },
 };
 
 const CHAINS: Record<string, Chain> = {
   base, 'base-sepolia': baseSepolia, ethereum: mainnet, arbitrum, polygon,
+  'arbitrum-sepolia': arbitrumSepolia,
 };
 
-const REGISTERED_TOPIC = '0x6f3c9b7e8c3a5a5f2c3f9b7e8c3a5a5f2c3f9b7e8c3a5a5f2c3f9b7e8c3a5a';
+const REGISTERED_TOPIC = '0xca52e62c367d81bb2e328eb795f7c7ba24afb478408a26c0e201d155c449bc4a';
 
 // ─── Client ──────────────────────────────────────────────────────────────────
 
 export class ERC8004Client {
   private readonly publicClient: PublicClient;
-  private readonly config: ERC8004ClientConfig;
+  private readonly config: ERC8004ClientConfig & { registryAddress: Address };
   private readonly chain: Chain;
 
   constructor(config: ERC8004ClientConfig) {
-    this.config = config;
+    // Auto-resolve registry address from KNOWN_REGISTRY_ADDRESSES if not explicitly provided
+    const resolvedAddress = config.registryAddress ?? KNOWN_REGISTRY_ADDRESSES[config.chain]?.identity;
+    if (!resolvedAddress) {
+      throw new Error(`ERC8004Client: No registry address provided and no known address for chain "${config.chain}"`);
+    }
+    this.config = { ...config, registryAddress: resolvedAddress };
     const chain = CHAINS[config.chain];
     if (!chain) throw new Error(`ERC8004Client: Unsupported chain "${config.chain}"`);
     this.chain = chain;
@@ -247,7 +282,7 @@ export class ERC8004Client {
     let txHash: Hash;
     if (onChainMetadata && Object.keys(onChainMetadata).length > 0) {
       const entries = encodeMetadataEntries(onChainMetadata);
-      txHash = await contract.write.registerWithMetadata([resolvedURI, entries], {
+      txHash = await contract.write.register([resolvedURI, entries], {
         account: walletClient.account, chain: this.chain,
       });
     } else {

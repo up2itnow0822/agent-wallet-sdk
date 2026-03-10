@@ -141,15 +141,22 @@ export async function agentExecute(
   // Check the tx receipt for TransactionQueued vs TransactionExecuted events
   const receipt = await wallet.publicClient.waitForTransactionReceipt({ hash });
 
+  // Event topic hashes for AgentAccountV2 events
+  const EXECUTED_TOPIC = '0x9ab15459d641b40eb8c30fdf1dfcf0e7b2fe7f5576de70769d24a67fb8f9a1dd';
+  const QUEUED_TOPIC = '0x338e4b9b04df0b67a953d7ea6a7037128b8c6948e3d8c09a9d51a5f5be6c2284';
+
+  const walletAddr = wallet.address.toLowerCase();
+  const executedLog = receipt.logs.find(
+    (log) => log.address.toLowerCase() === walletAddr && log.topics[0] === EXECUTED_TOPIC
+  );
   const queuedLog = receipt.logs.find(
-    (log: { topics: string[] }) => log.topics[0] === '0x' // Will need actual topic hash
+    (log) => log.address.toLowerCase() === walletAddr && log.topics[0] === QUEUED_TOPIC
   );
 
-  // Simple heuristic: if pendingNonce increased, it was queued
-  const pendingNonce = await wallet.contract.read.pendingNonce();
+  const wasExecuted = !!executedLog && !queuedLog;
 
   return {
-    executed: true, // TODO: detect queued vs executed from events
+    executed: wasExecuted,
     txHash: hash,
   };
 }
@@ -539,8 +546,22 @@ export {
 export type {
   AgentServiceEndpoint, SupportedTrustMechanism, AgentRegistrationRef,
   AgentRegistrationFile, AgentModelMetadata, AgentIdentity,
-  MetadataEntry, ERC8004ClientConfig, RegistrationResult,
+  MetadataEntry, ERC8004ClientConfig, RegistrationResult, SupportedChain,
 } from './identity/erc8004.js';
+
+// ─── ERC-8004: Reputation Registry ─────────────────────────────────────────
+export { ReputationClient, ReputationRegistryAbi } from './identity/reputation.js';
+export type {
+  ReputationClientConfig, GiveFeedbackParams, FeedbackEntry,
+  AgentReputationSummary, FeedbackFilters, RespondToFeedbackParams,
+} from './identity/reputation.js';
+
+// ─── ERC-8004: Validation Registry ─────────────────────────────────────────
+export { ValidationClient, ValidationRegistryAbi } from './identity/validation.js';
+export type {
+  ValidationClientConfig, RequestValidationParams, RespondToValidationParams,
+  ValidationStatus, ValidationSummary,
+} from './identity/validation.js';
 
 // ─── SwapModule — Uniswap V3 token swap aggregator ──────────────────────────
 export { SwapModule, attachSwap, calcProtocolFee, applySlippage, calcDeadline } from './swap/index.js';
@@ -558,3 +579,32 @@ export { TokenMessengerV2Abi, MessageTransmitterV2Abi, ERC20BridgeAbi } from './
 export type { BridgeChain, BridgeOptions, BurnResult, BridgeResult } from './bridge/index.js';
 
 // x402 already exported above from original index.ts
+
+// ─── SpendingPolicy — Programmable spending guardrails ───────────────────────
+export {
+  SpendingPolicy,
+} from './policy/SpendingPolicy.js';
+export type {
+  SpendingPolicyConfig,
+  PaymentIntent,
+  PolicyResult,
+  PolicyStatus,
+  AuditEntry,
+  DraftEntry,
+} from './policy/SpendingPolicy.js';
+
+// ─── Mutual Stake Escrow ─────────────────────────────────────────────────────
+export { MutualStakeEscrow } from './escrow/MutualStakeEscrow.js';
+export type {
+  CreateEscrowParams,
+  EscrowCreated,
+  EscrowDetails,
+  TxResult as EscrowTxResult,
+} from './escrow/types.js';
+export { TaskStatus } from './escrow/types.js';
+export {
+  resolveVerifierAddress,
+  encodeHashVerifierData,
+  encodeOptimisticVerifierData,
+  VERIFIER_ADDRESSES,
+} from './escrow/verifiers.js';

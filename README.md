@@ -1,202 +1,220 @@
-# agent-wallet-sdk
+# AgentWallet SDK
 
-Non-custodial wallet SDK for AI agents. x402 micropayments, CCTP cross-chain transfers, token swaps.
+Non-custodial AI agent wallet with ERC-8004 on-chain identity, ERC-6551 token-bound accounts, x402 payments, mutual stake escrow, and programmable spending guardrails.
 
-[![npm version](https://img.shields.io/npm/v/agent-wallet-sdk.svg)](https://www.npmjs.com/package/agent-wallet-sdk)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+Agent Wallet gives AI agents autonomous spending power with hard on-chain limits. No more choosing between "agent can drain everything" and "every transaction needs manual approval."
 
----
+> **ERC-8004 Ready:** Maps directly to [ERC-8004 (Trustless Agents)](https://eips.ethereum.org/EIPS/eip-8004) — your agent's ERC-6551 wallet NFT doubles as its on-chain identity handle, with built-in Identity Registry, Reputation Registry, and Validation Registry clients.
 
-## Install
-
-```bash
-npm install agent-wallet-sdk
+```
+Agent wants to spend $15 → ✅ Auto-approved (under $25 limit)
+Agent wants to spend $500 → ⏳ Queued for your approval
+Agent spent $490 today → 🛑 Next tx queued ($500/day limit hit)
 ```
 
----
+## Why Agent Wallet?
+
+| Approach | Problem |
+|----------|---------|
+| Raw EOA wallet | Agent can drain everything. One prompt injection = rugged. |
+| Multisig (Safe) | Every tx needs human sigs. Kills agent autonomy. |
+| Custodial API (Stripe) | Centralized, KYC friction, not crypto-native. |
+| **Agent Wallet** | **Agents spend freely within limits. Everything else queues for approval.** |
+
+Built on **ERC-6551** (token-bound accounts). Your agent's wallet is tied to an NFT — portable, auditable, fully on-chain.
 
 ## Quick Start
 
-```typescript
-import { AgentWallet } from 'agent-wallet-sdk';
-
-// Generate a non-custodial wallet. Keys stay local.
-const wallet = await AgentWallet.create();
-
-// Pay via x402 -- no custodian, no approval gate
-await wallet.payX402('https://api.dataservice.com/endpoint', {
-  amount: '0.001',
-  currency: 'USDC'
-});
-
-// Cross-chain USDC transfer via CCTP
-await wallet.cctpTransfer({
-  amount: '10.00',
-  fromChain: 'ethereum',
-  toChain: 'base',
-  recipient: '0xRecipientAddress'
-});
+```bash
+npm install agentwallet-sdk viem
 ```
 
----
-
-## Why Non-Custodial? The Security Case
-
-Coinbase launched custodial agent wallets February 11, 2026. OKX followed with OnchainOS March 3rd. Circle Arc and Stripe Tempo both offer agent payment infrastructure with the same model: the platform holds the private keys.
-
-That works for humans. It's the wrong architecture for autonomous agents.
-
-### The Custodial Problem
-
-When a platform holds your agent's keys, you're exposed to:
-
-| Risk | What It Means |
-|------|---------------|
-| Platform outage | Your agent can't transact during downtime |
-| Compliance freeze | A single regulatory flag blocks execution instantly |
-| Jurisdiction blocks | US-based custodians (Circle, Coinbase) are subject to OFAC, FinCEN |
-| Centralized failure | If Coinbase has issues, every agent using Coinbase Agentic Wallets goes down simultaneously |
-| Auth compromise | If the custody platform's auth layer is breached, your agent's funds are exposed |
-
-An agent can't call support at 2 AM when a compliance flag fires mid-task. There's no recovery path.
-
-### The Non-Custodial Advantage
-
-agent-wallet-sdk generates and manages private keys locally. The agent owns the wallet. The keys never leave the agent's environment.
-
-- No API controls the wallet
-- No platform can freeze funds
-- No single point of failure across the agent economy
-- Regulatory exposure is limited to on-chain activity, not custodian relationships
-
-The attack surface is fundamentally smaller. Failure modes are local, not systemic.
-
-### Custodial vs Non-Custodial: Direct Comparison
-
-| Feature | Coinbase Agentic Wallets | Circle Arc | agent-wallet-sdk |
-|---------|--------------------------|------------|-----------------|
-| Key custody | Coinbase | Circle | Agent (local) |
-| Can be frozen | Yes | Yes | No |
-| API dependency | Required | Required | None |
-| Regulatory exposure | High (US-based) | High (US-based) | On-chain only |
-| Failure blast radius | All users | All users | Local only |
-| x402 native support | No | No | Yes |
-| CCTP cross-chain | Via API | No | Native |
-
-### When Custodial Is Fine
-
-Low-frequency agent tasks where a human can intervene. If your agent makes 5 transactions a day and a freeze is recoverable, custodial UX is simpler.
-
-When you need guaranteed execution, autonomous operation across jurisdictions, or high-frequency micropayments -- non-custodial is the only architecture that works.
-
----
-
-## Why Not OKX OnchainOS?
-
-OKX launched its AI layer on OnchainOS on March 3, 2026 -- wallet infrastructure, liquidity routing, and data feeds packaged for AI agents. It's a capable stack if you're already inside the OKX ecosystem.
-
-But it's the wrong choice for most builders:
-
-- **Closed ecosystem.** OnchainOS is exchange-native. Your agent's wallet infrastructure is tied to OKX's platform, policies, and availability.
-- **Custodial by design.** OKX holds the keys. That means OKX can freeze, restrict, or shut down your agent's ability to transact.
-- **Exchange-dependent liquidity.** Swaps and transfers route through OKX's own liquidity layer. You're not chain-agnostic -- you're OKX-dependent.
-
-agent-wallet-sdk is open-source, non-custodial, and chain-agnostic. No vendor lock-in. No platform that can pull the rug. Your agent owns its wallet.
-
-| Feature | OKX OnchainOS | agent-wallet-sdk |
-|---------|--------------|-----------------|
-| Open source | No | Yes (MIT) |
-| Custody model | OKX-custodial | Non-custodial (local keys) |
-| Exchange dependency | Required (OKX) | None |
-| Chain support | OKX-native chains | Any EVM chain |
-| Can be frozen | Yes | No |
-| x402 native | No | Yes |
-
-If you want to build agents that operate freely -- across chains, without a platform intermediary -- agent-wallet-sdk is the right tool.
-
-## Why Not Binance AI Agent Skills?
-
-Binance launched AI Agent Skills in March 2026 -- giving AI agents unified access to wallet management, spot trading, and market data through the Binance platform.
-
-Same problem, different exchange:
-
-- **Binance holds the keys.** Your agent's wallet lives on Binance infrastructure. Binance compliance can freeze it, restrict withdrawals, or require KYC at any time.
-- **Trading-centric, not payment-centric.** Agent Skills is built around Binance spot trading. It's not designed for x402 micropayments, CCTP transfers, or general-purpose agent-to-agent payments.
-- **Platform lock-in.** Your agent's financial capability is tied to Binance's API, rate limits, and terms of service. If Binance changes its agent policy, your agent adapts or stops working.
-
-| Feature | Binance AI Agent Skills | agent-wallet-sdk |
-|---------|------------------------|-----------------|
-| Open source | No | Yes (MIT) |
-| Custody model | Binance-custodial | Non-custodial (local keys) |
-| Exchange dependency | Required (Binance) | None |
-| x402 support | No | Yes (Base, Solana, Abstract) |
-| Cross-chain payments | Via Binance bridge (custodial) | CCTP (non-custodial, 5 chains) |
-| Can be frozen | Yes | No |
-| Spend limits | Platform-level | On-chain contract-enforced |
-
----
-
-## x402 Integration
-
-x402 is the HTTP-native micropayment protocol for machine-to-machine payments. It has processed 115M+ micropayments between machines as of early 2026.
+### Create a Wallet
 
 ```typescript
-// Pay for API access per-request
-const response = await wallet.payX402(endpoint, {
-  amount: '0.0001',
-  currency: 'USDC',
-  chain: 'base'
+import { createWallet, setSpendPolicy, agentExecute, NATIVE_TOKEN } from 'agentwallet-sdk';
+import { createWalletClient, http } from 'viem';
+import { privateKeyToAccount } from 'viem/accounts';
+import { base } from 'viem/chains';
+
+const account = privateKeyToAccount('0x...');
+const walletClient = createWalletClient({ account, chain: base, transport: http() });
+
+const wallet = createWallet({
+  accountAddress: '0xYourAgentWallet',
+  chain: 'base',
+  walletClient,
 });
+
+// Set a $25/tx, $500/day spend policy for ETH
+await setSpendPolicy(wallet, {
+  token: NATIVE_TOKEN,
+  perTxLimit: 25000000000000000n,  // 0.025 ETH
+  periodLimit: 500000000000000000n, // 0.5 ETH
+  periodLength: 86400,
+});
+
+// Agent executes — auto-approved if within limits, queued if over
+const result = await agentExecute(wallet, {
+  to: '0xRecipient',
+  value: 10000000000000000n, // 0.01 ETH
+});
+console.log(result.executed ? 'Sent!' : 'Queued for approval');
 ```
 
-No gas overhead. No pre-authorization. The agent pays for what it uses.
+## ERC-8004 On-Chain Identity
 
----
-
-## Cross-Chain Transfers (CCTP)
+Register your agent on the ERC-8004 Identity Registry — a portable, censorship-resistant on-chain identity using ERC-721.
 
 ```typescript
-// Move USDC from Ethereum to Base via Coinbase CCTP
-await wallet.cctpTransfer({
-  amount: '100.00',
-  fromChain: 'ethereum',
-  toChain: 'base',
-  recipient: recipientAddress
+import { ERC8004Client } from 'agentwallet-sdk';
+
+const identity = new ERC8004Client({ chain: 'base' });
+
+// Register agent
+const { txHash, agentId } = await identity.registerAgent(walletClient, {
+  name: 'MyAgent',
+  description: 'Autonomous trading agent',
 });
+
+// Look up any agent
+const agent = await identity.lookupAgentIdentity(agentId!);
+console.log(agent.owner, agent.agentURI);
 ```
 
-Native CCTP integration means no bridge risk. USDC moves between chains as a native burn/mint operation.
+## ERC-8004 Reputation Registry
 
----
+On-chain reputation signals — scored feedback from clients, aggregated summaries, revocable.
 
-## Architecture Overview
+```typescript
+import { ReputationClient } from 'agentwallet-sdk';
 
+const reputation = new ReputationClient({ chain: 'base' });
+
+// Leave feedback for an agent
+await reputation.giveFeedback(walletClient, {
+  agentId: 42n,
+  score: 95n,
+  category: 1,
+  comment: 'Fast execution, accurate results',
+  taskRef: 'task-abc-123',
+  verifierRef: '',
+  clientRef: '',
+  contentHash: '0x0000000000000000000000000000000000000000000000000000000000000000',
+});
+
+// Read aggregated reputation
+const rep = await reputation.getAgentReputation(42n);
+console.log(`Score: ${rep.totalScore} from ${rep.count} reviews`);
 ```
-Agent Environment (local)
-├── AgentWallet
-│   ├── Private Key (never leaves this environment)
-│   ├── x402 Payment Handler
-│   └── CCTP Bridge Client
-└── On-chain Activity Only
-    ├── Base (USDC)
-    ├── Ethereum (USDC)
-    └── Other EVM chains
+
+## ERC-8004 Validation Registry
+
+Request and receive on-chain validation from validator contracts (TEE attestations, capability proofs, compliance checks).
+
+```typescript
+import { ValidationClient } from 'agentwallet-sdk';
+import { keccak256, toBytes } from 'viem';
+
+const validation = new ValidationClient({
+  chain: 'base',
+  validationAddress: '0xYourValidationRegistry', // address required until official deployment
+});
+
+// Request validation from a validator
+const requestHash = keccak256(toBytes('my-validation-request-v1'));
+await validation.requestValidation(walletClient, {
+  validator: '0xValidatorContract',
+  agentId: 42n,
+  requestURI: 'https://example.com/validation-spec.json',
+  requestHash,
+});
+
+// Check validation status
+const status = await validation.getValidationStatus(requestHash);
+console.log(status.responded ? `Result: ${status.response}` : 'Pending');
+
+// Get summary for an agent
+const summary = await validation.getSummary(42n);
+console.log(`${summary.passCount} passed, ${summary.failCount} failed`);
 ```
 
----
+## Mutual Stake Escrow
 
-## Full Documentation
+Reciprocal collateral for agent-to-agent task settlement. Both parties stake, both lose if the task fails.
 
-- [npm package](https://www.npmjs.com/package/agent-wallet-sdk) -- v0.4.1
-- [Hashnode article: Non-Custodial vs Custodial](https://ai-agent-economy.hashnode.dev/circle-vs-stripe-vs-agent-wallet-sdk-non-custodial-advantage)
+```typescript
+import { MutualStakeEscrow } from 'agentwallet-sdk';
 
----
+const escrow = new MutualStakeEscrow({
+  chain: 'base',
+  walletClient,
+});
 
-## Contributing
+// Create escrow — both agent and client stake
+const { escrowId, txHash } = await escrow.create({
+  counterparty: '0xOtherAgent',
+  token: '0xUSDC',
+  stakeAmount: 100000000n, // 100 USDC
+  taskHash: '0x...',
+  deadline: BigInt(Math.floor(Date.now() / 1000) + 86400),
+});
 
-PRs welcome. Open an issue first for significant changes.
+// Counterparty funds their side
+await escrow.fund(escrowId);
 
----
+// After task completion, fulfill
+await escrow.fulfill(escrowId, proofHash);
+
+// Verify and release stakes
+await escrow.verify(escrowId);
+```
+
+## Feature Tiers
+
+### Base (Free)
+
+| Feature | Description |
+|---------|-------------|
+| Agent Identity | ERC-8004 Identity Registry — on-chain ERC-721 agent IDs |
+| Agent Reputation | ERC-8004 Reputation Registry — scored feedback and summaries |
+| Agent Validation | ERC-8004 Validation Registry — validator request/response |
+| ERC-6551 TBA | NFT-bound wallets with autonomous spending |
+| Mutual Stake Escrow | Reciprocal collateral task settlement |
+| Optimistic Escrow | Time-locked optimistic verification |
+| x402 Payments | HTTP 402 auto-pay for agent-to-service payments |
+| CCTP Bridge | Circle CCTP V2 across 17 chains + Solana |
+| Spend Policies | Per-token, per-period on-chain spending limits |
+| Swap | Uniswap V3 on Base/Arbitrum/Optimism |
+| Fiat Onramp | Opt-in fiat-to-crypto |
+| AP2 Protocol | Agent-to-Agent task delegation and payment |
+| Settlement | On-chain settlement finalization |
+| Gas Sponsorship | ERC-4337 paymaster-based gas sponsorship |
+| Solana Support | Cross-chain Solana bridging via CCTP |
+
+### Premium
+
+| Feature | Description |
+|---------|-------------|
+| CowSwap Solver | Batch auction solutions, earn COW tokens |
+| Flash Executor | Atomic flash loan execution |
+| MEV Protection | Private mempool via Flashbots/MEV Blocker |
+| Yield Staking | Aave V3, Compound V3, Morpho Blue strategies |
+| Tax Reporting | Cost basis and gain/loss reporting |
+
+Premium access: [github.com/up2itnow/AgentNexus2](https://github.com/up2itnow/AgentNexus2)
+
+## Supported Chains
+
+Mainnet: Ethereum, Base, Arbitrum, Polygon, Optimism, Avalanche, BSC, Celo, Gnosis, Linea, Mantle, Scroll, and more.
+
+Testnet: Base Sepolia, Arbitrum Sepolia, and corresponding testnets.
+
+## Links
+
+- [ERC-8004 Spec](https://eips.ethereum.org/EIPS/eip-8004)
+- [GitHub](https://github.com/agentnexus/agent-wallet-sdk)
+- [npm](https://www.npmjs.com/package/agentwallet-sdk)
 
 ## License
 
