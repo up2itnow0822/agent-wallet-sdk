@@ -216,6 +216,22 @@ Testnet: Base Sepolia, Arbitrum Sepolia, and corresponding testnets.
 - [GitHub](https://github.com/agentnexus/agent-wallet-sdk)
 - [npm](https://www.npmjs.com/package/agentwallet-sdk)
 
+
+## Why agent-wallet-sdk vs. Polygon Agent CLI
+
+| Feature | agent-wallet-sdk | Polygon Agent CLI |
+|---|---|---|
+| Wallet model | Non-custodial, agent holds keys | CLI-based, operator-managed |
+| x402 support | Native, automatic negotiation | Not supported |
+| Spend limits | Programmable (daily, per-tx, per-agent) | Manual configuration |
+| Multi-chain | Ethereum, Base, Etherlink, Polygon, 10+ chains | Polygon-only |
+| Integration | npm package, works in any JS/TS runtime | CLI tool, requires shell access |
+| Agent frameworks | Any (LangChain, CrewAI, Cursor, NemoClaw) | Polygon ecosystem only |
+| Audit trail | Built-in transaction logging | External tooling required |
+| Use case | Autonomous agent payments at scale | Polygon-specific agent ops |
+
+agent-wallet-sdk is chain-agnostic, framework-agnostic, and built for autonomous agents that need to pay for things without human approval. Polygon Agent CLI is a solid tool if you are all-in on Polygon infrastructure - but if your agents need to operate across chains or use x402 payment headers, agent-wallet-sdk is the better fit.
+
 ## License
 
 MIT
