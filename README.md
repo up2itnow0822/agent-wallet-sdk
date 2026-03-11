@@ -1,5 +1,8 @@
 # AgentWallet SDK
 
+> **📦 CANONICAL PACKAGE:** This is the actively maintained source for the `agentwallet-sdk` npm package (v5+). The old `agentwallet-sdk` GitHub repo is deprecated — use this repo.
+
+
 Non-custodial AI agent wallet with ERC-8004 on-chain identity, ERC-6551 token-bound accounts, x402 payments, mutual stake escrow, and programmable spending guardrails.
 
 Agent Wallet gives AI agents autonomous spending power with hard on-chain limits. No more choosing between "agent can drain everything" and "every transaction needs manual approval."
