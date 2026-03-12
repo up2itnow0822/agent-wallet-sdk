@@ -7,3 +7,9 @@ out/
 artifacts/
 forge-cache/
 .npmrc
+
+# wrangler files
+.wrangler
+.dev.vars*
+!.dev.vars.example
+!.env.example

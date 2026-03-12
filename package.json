@@ -11,7 +11,9 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "clean": "rm -rf dist",
-    "test": "vitest run"
+    "test": "vitest run",
+    "deploy": "wrangler deploy",
+    "preview": "wrangler dev"
   },
   "keywords": [
     "agent-wallet",
@@ -46,6 +48,7 @@
   "devDependencies": {
     "@elizaos/core": "^1.5.4",
     "typescript": "5.3.3",
-    "vitest": "4.0.18"
+    "vitest": "4.0.18",
+    "wrangler": "^4.72.0"
   }
 }
