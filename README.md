@@ -207,6 +207,21 @@ await escrow.verify(escrowId);
 
 Premium access: [github.com/up2itnow/AgentNexus2](https://github.com/up2itnow/AgentNexus2)
 
+## Atomic Settlement — Verified On-Chain
+
+Live x402 settlement endpoint on Base Sepolia with on-chain attestation verification:
+
+```
+https://dexter-settlement-test-production.up.railway.app
+```
+
+| Proof | Transaction |
+|---|---|
+| USDC Payment | [`0xbba6c34a...`](https://sepolia.basescan.org/tx/0xbba6c34ad6b11cc4e511317ca38553df903dcbe989ee47e45b5c48f3af7e4334) |
+| Fee Routing (0.77%) | [`0x9a5e450c...`](https://sepolia.basescan.org/tx/0x9a5e450c1080a2478ea22792b6ab034974d8f99072808f83354c98451441733a) |
+
+See [`examples/settlement-test/`](examples/settlement-test/) for the full settlement server, self-test script, and integration guide.
+
 ## Supported Chains
 
 Mainnet: Ethereum, Base, Arbitrum, Polygon, Optimism, Avalanche, BSC, Celo, Gnosis, Linea, Mantle, Scroll, and more.
