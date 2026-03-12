@@ -1,6 +1,6 @@
 {
   "name": "agentwallet-sdk",
-  "version": "5.0.4",
+  "version": "5.0.5",
   "description": "Non-custodial AI agent wallet SDK. ERC-8004 identity & reputation registries, mutual stake escrow, x402 payments, 17-chain CCTP bridging, ERC-6551 TBA, SpendingPolicy guardrails, Uniswap V3 swap. The agent holds the keys.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
