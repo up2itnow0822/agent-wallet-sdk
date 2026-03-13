@@ -1,8 +1,5 @@
 # AgentWallet SDK
 
-> **📦 CANONICAL PACKAGE:** This is the actively maintained source for the `agentwallet-sdk` npm package (v5+). The old `agentwallet-sdk` GitHub repo is deprecated — use this repo.
-
-
 Non-custodial AI agent wallet with ERC-8004 on-chain identity, ERC-6551 token-bound accounts, x402 payments, mutual stake escrow, and programmable spending guardrails.
 
 Agent Wallet gives AI agents autonomous spending power with hard on-chain limits. No more choosing between "agent can drain everything" and "every transaction needs manual approval."
@@ -207,89 +204,86 @@ await escrow.verify(escrowId);
 
 Premium access: [github.com/up2itnow/AgentNexus2](https://github.com/up2itnow/AgentNexus2)
 
-## Atomic Settlement — Verified On-Chain
+## x402 Protocol: Supported Chains and Payment Rails
 
-Live x402 settlement endpoint on Base Sepolia with on-chain attestation verification:
+x402 (HTTP 402 Payment Required) is the native payment protocol for agent-to-service transactions. The agent encounters a 402 response, signs a payment proof, and re-sends the request. One round trip. No accounts, no API keys, no invoices.
 
+As of March 2026, x402 is live on 3 chains/rails:
+
+| Chain / Rail | Status | Settlement Token | Gas Cost | Notes |
+|---|---|---|---|---|
+| **Base** (Coinbase L2) | Live | USDC | Sub-cent | Primary x402 chain. 15M+ transactions in Jan 2026. |
+| **Etherlink** (Tezos L2) | Live (Mar 2026) | USDC | Sub-cent | EVM-compatible. Same x402 integration, different RPC + chain ID. |
+| **Stripe** (Fiat offramp) | Live (Feb 2026) | USDC -> USD | N/A | Vendors receive USD in Stripe dashboard. Agents pay USDC. |
+
+### x402 + Etherlink Quick Start
+
+```typescript
+import { createWallet, agentExecute } from 'agentwallet-sdk';
+
+const wallet = createWallet({
+  accountAddress: '0xYourAgent',
+  chain: 'etherlink',  // new: Tezos L2 support
+  walletClient,
+});
+
+// x402 payment flow is identical across chains
+const response = await fetch('https://api.vendor.com/data');
+if (response.status === 402) {
+  const details = await response.json();
+  const proof = await wallet.createX402Proof(details);
+  const paid = await fetch('https://api.vendor.com/data', {
+    headers: { 'X-Payment': proof }
+  });
+}
 ```
-https://dexter-settlement-test-production.up.railway.app
-```
 
-| Proof | Transaction |
-|---|---|
-| USDC Payment | [`0xbba6c34a...`](https://sepolia.basescan.org/tx/0xbba6c34ad6b11cc4e511317ca38553df903dcbe989ee47e45b5c48f3af7e4334) |
-| Fee Routing (0.77%) | [`0x9a5e450c...`](https://sepolia.basescan.org/tx/0x9a5e450c1080a2478ea22792b6ab034974d8f99072808f83354c98451441733a) |
-
-See [`examples/settlement-test/`](examples/settlement-test/) for the full settlement server, self-test script, and integration guide.
+The SDK handles chain-specific RPC endpoints, gas estimation, and USDC contract addresses automatically. Swap `chain: 'base'` to `chain: 'etherlink'` and the x402 flow works identically.
 
 ## Supported Chains
 
-Mainnet: Ethereum, Base, Arbitrum, Polygon, Optimism, Avalanche, BSC, Celo, Gnosis, Linea, Mantle, Scroll, and more.
+Mainnet: Ethereum, Base, Arbitrum, Polygon, Optimism, Avalanche, BSC, Celo, Gnosis, Linea, Mantle, Scroll, Etherlink, and more.
 
 Testnet: Base Sepolia, Arbitrum Sepolia, and corresponding testnets.
+
+## Complete Agent Identity Stack (v5.1.0)
+
+One npm install now gives any AI agent a wallet, email address, on-chain ID, reputation, and signed payment intents.
+
+| Component | What It Does |
+|-----------|-------------|
+| **EmailResolver** *(NEW)* | AgentMail integration — agents get `email@agentmail.to` linked to wallet. Resolve email→wallet, send/receive with embedded x402 payment requests. |
+| **AgentIdentity** | ERC-8004 + ERC-6551: on-chain NFT identity + Token Bound Account |
+| **ReputationClient** | On-chain reputation scoring — give/read feedback, aggregate scores |
+| **VerifiableIntentClient** | Mastercard-spec signed payment intents with scope enforcement |
+| **ValidationClient** | Request/respond validation workflow (TEE attestations, compliance) |
+
+### EmailResolver Quick Start
+
+```typescript
+import { EmailResolver } from 'agentwallet-sdk';
+
+const resolver = new EmailResolver();
+
+// Resolve an agent email to its wallet address
+const wallet = await resolver.resolveEmail('myagent@agentmail.to');
+console.log(wallet.address); // 0x...
+
+// Send a payment request embedded in an email
+await resolver.sendWithPayment({
+  to: 'vendor@agentmail.to',
+  subject: 'Payment for API access',
+  amount: 5_000_000n, // 5 USDC
+  token: 'USDC',
+  chain: 'base',
+});
+```
 
 ## Links
 
 - [ERC-8004 Spec](https://eips.ethereum.org/EIPS/eip-8004)
 - [GitHub](https://github.com/agentnexus/agent-wallet-sdk)
 - [npm](https://www.npmjs.com/package/agentwallet-sdk)
-
-
-## Why agent-wallet-sdk vs. Polygon Agent CLI
-
-| Feature | agent-wallet-sdk | Polygon Agent CLI |
-|---|---|---|
-| Wallet model | Non-custodial, agent holds keys | CLI-based, operator-managed |
-| x402 support | Native, automatic negotiation | Not supported |
-| Spend limits | Programmable (daily, per-tx, per-agent) | Manual configuration |
-| Multi-chain | Ethereum, Base, Etherlink, Polygon, 10+ chains | Polygon-only |
-| Integration | npm package, works in any JS/TS runtime | CLI tool, requires shell access |
-| Agent frameworks | Any (LangChain, CrewAI, Cursor, NemoClaw) | Polygon ecosystem only |
-| Audit trail | Built-in transaction logging | External tooling required |
-| Use case | Autonomous agent payments at scale | Polygon-specific agent ops |
-
-agent-wallet-sdk is chain-agnostic, framework-agnostic, and built for autonomous agents that need to pay for things without human approval. Polygon Agent CLI is a solid tool if you are all-in on Polygon infrastructure - but if your agents need to operate across chains or use x402 payment headers, agent-wallet-sdk is the better fit.
-
-## Exchange Integrations
-
-Agent Wallet SDK is compatible with exchange-native AI agent trading protocols. These integrations let your trading agent manage its own wallet, execute position sizing within on-chain spend limits, and settle proceeds without a custodial intermediary.
-
-### HTX AI Skills Protocol
-
-HTX (one of the world's largest crypto exchanges) launched the AI Skills Protocol for agent-native trading in March 2026. Agent Wallet SDK is listed as compatible in their official documentation alongside Claude Code and Cursor.
-
-**What the integration enables:**
-- Natural language trading commands from your agent
-- Position monitoring and P&L queries via agent runtime
-- On-chain spend limits enforce position sizing independent of exchange controls
-- Non-custodial settlement - agent holds its own keys, no exchange custody of proceeds
-
-**Setup:**
-
-```typescript
-import { createWallet, setSpendPolicy } from 'agentwallet-sdk';
-
-// Set trading spend limits before connecting to HTX
-const agentWallet = createWallet({
-  accountAddress: '0xYOUR_AGENT_ACCOUNT',
-  chain: 'base',
-  walletClient,
-});
-
-// Hard limits at the wallet layer - independent of exchange risk controls
-await setSpendPolicy(agentWallet, {
-  token: NATIVE_TOKEN,
-  perTxLimit: 100_000000000000000n,    // 0.1 ETH max per trade
-  periodLimit: 1_000_000000000000000n, // 1.0 ETH max per day
-  periodLength: 86400,
-});
-```
-
-From OpenClaw terminal: `openclaw skills install htx-trading` and configure your HTX API credentials. The agent wallet handles settlement; HTX AI Skills handles order execution.
-
-**More integrations:** OKX, Bybit, and Binance exchange AI SDKs are expected Q2 2026. This section will be updated as compatible protocols launch.
-
----
 
 ## License
 
