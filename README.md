@@ -250,6 +250,47 @@ Testnet: Base Sepolia, Arbitrum Sepolia, and corresponding testnets.
 
 agent-wallet-sdk is chain-agnostic, framework-agnostic, and built for autonomous agents that need to pay for things without human approval. Polygon Agent CLI is a solid tool if you are all-in on Polygon infrastructure - but if your agents need to operate across chains or use x402 payment headers, agent-wallet-sdk is the better fit.
 
+## Exchange Integrations
+
+Agent Wallet SDK is compatible with exchange-native AI agent trading protocols. These integrations let your trading agent manage its own wallet, execute position sizing within on-chain spend limits, and settle proceeds without a custodial intermediary.
+
+### HTX AI Skills Protocol
+
+HTX (one of the world's largest crypto exchanges) launched the AI Skills Protocol for agent-native trading in March 2026. Agent Wallet SDK is listed as compatible in their official documentation alongside Claude Code and Cursor.
+
+**What the integration enables:**
+- Natural language trading commands from your agent
+- Position monitoring and P&L queries via agent runtime
+- On-chain spend limits enforce position sizing independent of exchange controls
+- Non-custodial settlement - agent holds its own keys, no exchange custody of proceeds
+
+**Setup:**
+
+```typescript
+import { createWallet, setSpendPolicy } from 'agentwallet-sdk';
+
+// Set trading spend limits before connecting to HTX
+const agentWallet = createWallet({
+  accountAddress: '0xYOUR_AGENT_ACCOUNT',
+  chain: 'base',
+  walletClient,
+});
+
+// Hard limits at the wallet layer - independent of exchange risk controls
+await setSpendPolicy(agentWallet, {
+  token: NATIVE_TOKEN,
+  perTxLimit: 100_000000000000000n,    // 0.1 ETH max per trade
+  periodLimit: 1_000_000000000000000n, // 1.0 ETH max per day
+  periodLength: 86400,
+});
+```
+
+From OpenClaw terminal: `openclaw skills install htx-trading` and configure your HTX API credentials. The agent wallet handles settlement; HTX AI Skills handles order execution.
+
+**More integrations:** OKX, Bybit, and Binance exchange AI SDKs are expected Q2 2026. This section will be updated as compatible protocols launch.
+
+---
+
 ## License
 
 MIT
