@@ -1,4 +1,37 @@
+## [5.1.0] — 2026-03-16
+
+### Added
+- **Multi-chain x402 payments:** Expanded from 1 chain (Base) to 10 mainnet chains — Ethereum, Arbitrum, Polygon, Optimism, Avalanche, Unichain, Linea, Sonic, World Chain
+- **Solana CCTP bridge:** EVM↔Solana USDC bridging via Circle CCTP V2 (domain 5). Self-contained base58 encoder, no hard @solana/web3.js dependency
+- **Multi-chain swap:** Uniswap V3 support expanded to Arbitrum, Optimism, and Polygon (was Base-only)
+- **Chain config expansion:** `SupportedChain` type and `CHAIN_IDS` map for all 11 chains
+- **Mainnet bridge proof:** Verified Base→Arbitrum CCTP V2 transfer (0.50 USDC, tx `0xfedb...9129`)
+
+### Fixed
+- **Critical: Solana CCTP V2 addresses** — TokenMessenger and MessageTransmitter were using V1 program IDs. Updated to V2 (`CCTPV2vPZJS2u2BB...` and `CCTPV2Sm4AdWt52...`). Verified against Circle docs + `circlefin/solana-cctp-contracts`
+- **CCTP V2 depositForBurn signature** — Updated from 4-param V1 to 7-param V2 (added `destinationCaller`, `maxFee`, `minFinalityThreshold`)
+
+### Documentation
+- JSDoc module comments added to all 10 modified source files
+- README: Complete chain support matrix, Solana bridge examples, multi-chain x402 examples
+- All "coming soon" language removed from README
+
 # Changelog
+
+## 5.0.4 (2026-03-15)
+
+### Critical Bug Fix
+- **Fixed Solana CCTP program addresses** — corrected CCTP V1 addresses to V2:
+  - `SOLANA_TOKEN_MESSENGER`: `CCTPiPYP...` → `CCTPV2vPZJS2u2BBsUoscuikbYjnpFmbFsvVuJdgUMQe` (TokenMessengerMinterV2)
+  - `SOLANA_MESSAGE_TRANSMITTER`: `CCTPmbSD...` → `CCTPV2Sm4AdWt5296sk4P66VBZ7bEhcARwFaaS9YPbeC` (MessageTransmitterV2)
+  - The old addresses were CCTP V1 Solana programs; this SDK targets CCTP V2. Any transactions sent to V1 programs would fail silently or route incorrectly.
+  - Verified against: https://developers.circle.com/cctp/references/solana-programs and https://github.com/circlefin/solana-cctp-contracts
+
+### Documentation
+- Added module-level JSDoc comments to all source files (`src/types.ts`, `src/x402/types.ts`, `src/x402/client.ts`, `src/bridge/types.ts`, `src/bridge/client.ts`, `src/bridge/solana.ts`, `src/swap/types.ts`, `src/swap/SwapModule.ts`, `src/bridge/index.ts`, `src/swap/index.ts`)
+- README: Added complete code examples for multi-chain x402, multi-chain swaps, EVM↔EVM bridge, EVM→Solana bridge, Solana→EVM receive
+- README: Documented `chain` parameter in wallet config with all supported values
+- README: Full chain support matrix showing x402, bridge, and swap support per chain
 
 ## 5.0.0 (2026-03-10)
 

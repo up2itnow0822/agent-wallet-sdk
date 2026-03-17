@@ -1,4 +1,15 @@
-// [MAX-ADDED] x402 Client — automatic 402 payment handling for AgentWallet
+/**
+ * @module x402/client
+ * x402 Payment Client — automatic HTTP 402 payment handling for AgentWallet.
+ *
+ * Wraps the standard fetch API to transparently handle 402 Payment Required
+ * responses using the x402 protocol. Supports multi-chain USDC payments across
+ * all 10 mainnet chains configured in x402/types.ts.
+ *
+ * Flow: fetch → 402 detected → parse payment requirements → budget check →
+ *       execute USDC transfer → retry request with X-PAYMENT header.
+ */
+// x402 Client — automatic 402 payment handling for AgentWallet
 import type { Address, Hash } from 'viem';
 import { encodeFunctionData, parseAbi } from 'viem';
 import type {

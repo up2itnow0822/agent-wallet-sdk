@@ -33,6 +33,10 @@ npm install agentwallet-sdk viem
 
 ### Create a Wallet
 
+The `chain` parameter selects which network the wallet operates on. Supported values:
+`'base'` | `'ethereum'` | `'arbitrum'` | `'polygon'` | `'optimism'` | `'avalanche'` |
+`'unichain'` | `'linea'` | `'sonic'` | `'worldchain'` | `'base-sepolia'`
+
 ```typescript
 import { createWallet, setSpendPolicy, agentExecute, NATIVE_TOKEN } from 'agentwallet-sdk';
 import { createWalletClient, http } from 'viem';
@@ -44,7 +48,7 @@ const walletClient = createWalletClient({ account, chain: base, transport: http(
 
 const wallet = createWallet({
   accountAddress: '0xYourAgentWallet',
-  chain: 'base',
+  chain: 'base',  // or 'arbitrum', 'polygon', 'optimism', etc.
   walletClient,
 });
 
@@ -62,6 +66,146 @@ const result = await agentExecute(wallet, {
   value: 10000000000000000n, // 0.01 ETH
 });
 console.log(result.executed ? 'Sent!' : 'Queued for approval');
+```
+
+## Multi-Chain x402 Payments
+
+Pay any x402-gated API from any supported chain. The client automatically selects
+the correct USDC address for the network the server requests.
+
+```typescript
+import { createWallet, createX402Client } from 'agentwallet-sdk';
+import { createWalletClient, http } from 'viem';
+import { privateKeyToAccount } from 'viem/accounts';
+import { arbitrum } from 'viem/chains';
+
+const account = privateKeyToAccount(process.env.AGENT_PRIVATE_KEY as `0x${string}`);
+const walletClient = createWalletClient({ account, chain: arbitrum, transport: http() });
+
+// Wallet on Arbitrum — pays with Arbitrum USDC
+const wallet = createWallet({
+  accountAddress: '0xYourAgentWallet',
+  chain: 'arbitrum',
+  walletClient,
+});
+
+const x402 = createX402Client(wallet, {
+  // Accept payment requests on any supported mainnet chain
+  supportedNetworks: ['arbitrum:42161', 'base:8453', 'optimism:10', 'polygon:137'],
+  globalDailyLimit: 10_000_000n, // 10 USDC/day cap
+  globalPerRequestMax: 1_000_000n, // 1 USDC max per request
+});
+
+// Automatically pays 402 responses with the chain's native USDC
+const response = await x402.fetch('https://api.example.com/premium-data');
+const data = await response.json();
+```
+
+## Multi-Chain Swaps (Uniswap V3)
+
+Swap tokens on Base, Arbitrum, Optimism, or Polygon using the best Uniswap V3 pool.
+
+```typescript
+import { createWallet } from 'agentwallet-sdk';
+import { attachSwap } from 'agentwallet-sdk/swap';
+import { BASE_TOKENS, ARBITRUM_TOKENS } from 'agentwallet-sdk';
+
+// Swap on Base
+const baseWallet = createWallet({ accountAddress: '0x...', chain: 'base', walletClient });
+const baseSwap = attachSwap(baseWallet, { chain: 'base' });
+
+const result = await baseSwap.swap(BASE_TOKENS.WETH, BASE_TOKENS.USDC, 1_000_000_000_000_000n, {
+  slippageBps: 50, // 0.5% slippage
+});
+console.log('Swap tx:', result.txHash);
+
+// Swap on Arbitrum
+const arbWallet = createWallet({ accountAddress: '0x...', chain: 'arbitrum', walletClient });
+const arbSwap = attachSwap(arbWallet, { chain: 'arbitrum' });
+
+const arbResult = await arbSwap.swap(ARBITRUM_TOKENS.USDC, ARBITRUM_TOKENS.WETH, 5_000_000n, {
+  slippageBps: 30,
+});
+console.log('Arbitrum swap tx:', arbResult.txHash);
+```
+
+## CCTP V2 Bridge — EVM to EVM
+
+Bridge USDC between any of the 10 supported EVM chains using Circle's CCTP V2.
+
+```typescript
+import { createBridge } from 'agentwallet-sdk';
+import { createWalletClient, http } from 'viem';
+import { base } from 'viem/chains';
+
+const walletClient = createWalletClient({
+  account: privateKeyToAccount(process.env.AGENT_PRIVATE_KEY as `0x${string}`),
+  chain: base,
+  transport: http(),
+});
+
+const bridge = createBridge(walletClient, 'base');
+
+// Bridge 100 USDC from Base to Arbitrum (~12 seconds with FAST finality)
+const result = await bridge.bridge(100_000_000n, 'arbitrum', {
+  minFinalityThreshold: 0, // FAST attestation
+});
+console.log('Burn tx:', result.burnTxHash);
+console.log('Mint tx:', result.mintTxHash);
+console.log(`Completed in ${result.elapsedMs}ms`);
+```
+
+## CCTP V2 Bridge — EVM to Solana
+
+Bridge USDC from any EVM chain to Solana using CCTP V2 domain 5.
+The EVM burn side is handled automatically; the Solana receive is returned
+as `messageBytes` + `attestation` for submission to Solana's CCTP program.
+
+```typescript
+import { bridgeEVMToSolana } from 'agentwallet-sdk';
+import { createWalletClient, http } from 'viem';
+import { base } from 'viem/chains';
+
+const walletClient = createWalletClient({
+  account: privateKeyToAccount(process.env.AGENT_PRIVATE_KEY as `0x${string}`),
+  chain: base,
+  transport: http(),
+});
+
+// Bridge 50 USDC from Base to Solana
+const result = await bridgeEVMToSolana(walletClient, 50_000_000n, {
+  fromChain: 'base',
+  solanaRecipient: 'YourSolanaWalletAddressInBase58',
+  minFinalityThreshold: 0, // FAST (~12s)
+});
+
+console.log('EVM burn tx:', result.burnTxHash);
+console.log('Attestation ready — submit to Solana TokenMessengerMinterV2');
+console.log('Message bytes:', result.messageBytes);
+console.log('Attestation:', result.attestation);
+// Submit result.messageBytes + result.attestation to the Solana CCTP V2 program:
+// CCTPV2Sm4AdWt5296sk4P66VBZ7bEhcARwFaaS9YPbeC (MessageTransmitterV2)
+```
+
+## CCTP V2 Bridge — Solana to EVM
+
+Receive USDC on an EVM chain from a Solana burn transaction.
+
+```typescript
+import { receiveFromSolanaOnEVM } from 'agentwallet-sdk';
+
+// After initiating a burn on Solana, receive on EVM:
+const result = await receiveFromSolanaOnEVM(walletClient, {
+  messageBytes: '0x...', // from Solana burn transaction
+  messageHash: '0x...',  // keccak256 of messageBytes
+  sourceDomain: 5,       // Solana CCTP domain
+}, {
+  toChain: 'arbitrum',
+  evmRecipient: '0xYourEVMAddress',
+});
+
+console.log('Mint tx:', result.mintTxHash);
+console.log('Received:', result.amount, 'USDC base units on', result.toChain);
 ```
 
 ## ERC-8004 On-Chain Identity
@@ -176,23 +320,23 @@ await escrow.verify(escrowId);
 
 ### Base (Free)
 
-| Feature | Description |
-|---------|-------------|
-| Agent Identity | ERC-8004 Identity Registry — on-chain ERC-721 agent IDs |
-| Agent Reputation | ERC-8004 Reputation Registry — scored feedback and summaries |
-| Agent Validation | ERC-8004 Validation Registry — validator request/response |
-| ERC-6551 TBA | NFT-bound wallets with autonomous spending |
-| Mutual Stake Escrow | Reciprocal collateral task settlement |
-| Optimistic Escrow | Time-locked optimistic verification |
-| x402 Payments | HTTP 402 auto-pay for agent-to-service payments |
-| CCTP Bridge | Circle CCTP V2 across 17 chains + Solana |
-| Spend Policies | Per-token, per-period on-chain spending limits |
-| Swap | Uniswap V3 on Base/Arbitrum/Optimism |
-| Fiat Onramp | Opt-in fiat-to-crypto |
-| AP2 Protocol | Agent-to-Agent task delegation and payment |
-| Settlement | On-chain settlement finalization |
-| Gas Sponsorship | ERC-4337 paymaster-based gas sponsorship |
-| Solana Support | Cross-chain Solana bridging via CCTP |
+| Feature | Status | Description |
+|---------|--------|-------------|
+| Agent Identity | ✅ Live | ERC-8004 Identity Registry — on-chain ERC-721 agent IDs |
+| Agent Reputation | ✅ Live | ERC-8004 Reputation Registry — scored feedback and summaries |
+| Agent Validation | ✅ Live | ERC-8004 Validation Registry — validator request/response |
+| ERC-6551 TBA | ✅ Live | NFT-bound wallets with autonomous spending |
+| Mutual Stake Escrow | ✅ Live | Reciprocal collateral task settlement |
+| Optimistic Escrow | ✅ Live | Time-locked optimistic verification |
+| x402 Payments | ✅ Live | HTTP 402 auto-pay — Base, Ethereum, Arbitrum, Polygon, Optimism, Avalanche, Unichain, Linea, Sonic, Worldchain |
+| CCTP Bridge (EVM) | ✅ Live | Circle CCTP V2 across 10 EVM chains |
+| CCTP Bridge (Solana) | ✅ Live | EVM↔Solana USDC bridging via CCTP V2 domain 5 |
+| Spend Policies | ✅ Live | Per-token, per-period on-chain spending limits |
+| Swap | ✅ Live | Uniswap V3 on Base, Arbitrum, Optimism, Polygon |
+| Fiat Onramp | ✅ Live | Opt-in fiat-to-crypto |
+| AP2 Protocol | ✅ Live | Agent-to-Agent task delegation and payment |
+| Settlement | ✅ Live | On-chain settlement finalization |
+| Gas Sponsorship | ✅ Live | ERC-4337 paymaster-based gas sponsorship |
 
 ### Premium
 
@@ -242,11 +386,51 @@ if (response.status === 402) {
 
 The SDK handles chain-specific RPC endpoints, gas estimation, and USDC contract addresses automatically. Swap `chain: 'base'` to `chain: 'etherlink'` and the x402 flow works identically.
 
+## Cross-Chain Bridge — Verified on Mainnet
+
+Live CCTP V2 bridge transfers verified on mainnet (March 15, 2026):
+
+| Route | Amount | Burn Tx (Base) | Status |
+|-------|--------|---------------|--------|
+| Base → Arbitrum | 0.50 USDC | [`0xfedb...9129`](https://basescan.org/tx/0xfedbfaa4b3a9fbadd36668c50c2ee7fc7e32072e2bd409e00c46020a35329129) | ✅ Confirmed — [0.50 USDC received on Arbitrum](https://arbiscan.io/address/0xff86829393C6C26A4EC122bE0Cc3E466Ef876AdD) |
+
+Bridge uses Circle CCTP V2 `depositForBurn` with fast finality (minFinalityThreshold=0). USDC is burned on the source chain and minted natively on the destination — no wrapped tokens, no liquidity pools.
+
+```typescript
+import { CctpBridgeClient } from 'agentwallet-sdk';
+
+const bridge = new CctpBridgeClient({
+  sourceChain: 'base',
+  walletClient,
+});
+
+// Bridge USDC from Base to Arbitrum
+const { txHash } = await bridge.bridge({
+  destinationChain: 'arbitrum',
+  recipient: '0xff86829393C6C26A4EC122bE0Cc3E466Ef876AdD',
+  amount: 500000n, // 0.50 USDC
+});
+```
+
 ## Supported Chains
 
-Mainnet: Ethereum, Base, Arbitrum, Polygon, Optimism, Avalanche, BSC, Celo, Gnosis, Linea, Mantle, Scroll, Etherlink, and more.
+### x402 Payments & Swap (USDC)
+| Chain | Network ID | x402 | Bridge | Swap |
+|-------|-----------|------|--------|------|
+| Base | 8453 | ✅ | ✅ | ✅ |
+| Ethereum | 1 | ✅ | ✅ | — |
+| Arbitrum | 42161 | ✅ | ✅ | ✅ |
+| Polygon | 137 | ✅ | ✅ | ✅ |
+| Optimism | 10 | ✅ | ✅ | ✅ |
+| Avalanche | 43114 | ✅ | ✅ | — |
+| Unichain | 130 | ✅ | ✅ | — |
+| Linea | 59144 | ✅ | ✅ | — |
+| Sonic | 146 | ✅ | ✅ | — |
+| World Chain | 480 | ✅ | ✅ | — |
+| Solana | — | — | ✅ (CCTP) | — |
+| Base Sepolia | 84532 | ✅ (testnet) | — | — |
 
-Testnet: Base Sepolia, Arbitrum Sepolia, and corresponding testnets.
+All USDC addresses are native Circle USDC (not bridged variants).
 
 ## Complete Agent Identity Stack (v5.1.0)
 

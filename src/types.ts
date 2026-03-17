@@ -1,3 +1,14 @@
+/**
+ * @module types
+ * Core type definitions for the AgentWallet SDK.
+ *
+ * Contains shared interfaces, constants, and type utilities used across all
+ * SDK modules: spending policies, wallet config, chain identifiers, and
+ * value-add diagnostic types (BudgetForecast, WalletHealth, ActivityEntry).
+ *
+ * Supported chains: Base, Ethereum, Arbitrum, Polygon, Optimism, Avalanche,
+ * Unichain, Linea, Sonic, Worldchain, and Base Sepolia (testnet).
+ */
 import type { Address, Hash, Hex } from 'viem';
 
 /** Spend policy for a single token */
@@ -44,7 +55,7 @@ export interface ExecuteResult {
 /** Config for creating an AgentWallet client */
 export interface AgentWalletConfig {
   accountAddress: Address;
-  chain: 'base' | 'base-sepolia' | 'ethereum' | 'arbitrum' | 'polygon';
+  chain: 'base' | 'base-sepolia' | 'ethereum' | 'arbitrum' | 'polygon' | 'optimism' | 'avalanche' | 'unichain' | 'linea' | 'sonic' | 'worldchain';
   rpcUrl?: string;
 }
 
@@ -112,9 +123,18 @@ export interface BatchTransfer {
 
 /** Supported chain IDs */
 export const CHAIN_IDS = {
-  'base': 8453,
+  'base':        8453,
   'base-sepolia': 84532,
-  'ethereum': 1,
-  'arbitrum': 42161,
-  'polygon': 137,
+  'ethereum':    1,
+  'arbitrum':    42161,
+  'polygon':     137,
+  'optimism':    10,
+  'avalanche':   43114,
+  'unichain':    130,
+  'linea':       59144,
+  'sonic':       146,
+  'worldchain':  480,
 } as const;
+
+/** Supported chain name type */
+export type SupportedChain = keyof typeof CHAIN_IDS;

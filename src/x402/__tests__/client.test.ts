@@ -1,6 +1,7 @@
 // [MAX-ADDED] Tests for x402 Client — protocol parsing and payment selection
 import { describe, it, expect } from 'vitest';
 import { X402Client } from '../client.js';
+import { USDC_ADDRESSES } from '../types.js';
 import type { X402PaymentRequired, X402PaymentRequirements } from '../types.js';
 
 // Mock wallet (we test protocol logic, not on-chain execution)
@@ -77,8 +78,8 @@ describe('X402Client', () => {
   });
 
   describe('selectPaymentOption', () => {
-    it('selects Base USDC exact scheme', () => {
-      const client = new X402Client(mockWallet);
+    it('selects Base USDC exact scheme when base is in supported networks', () => {
+      const client = new X402Client(mockWallet, { supportedNetworks: ['base:8453'] });
       const accepts: X402PaymentRequirements[] = [
         { scheme: 'exact', network: 'ethereum:1', asset: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48', amount: '1000000', payTo: '0x1', maxTimeoutSeconds: 30, extra: {} },
         { scheme: 'exact', network: 'base:8453', asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', amount: '1000000', payTo: '0x1', maxTimeoutSeconds: 30, extra: {} },
@@ -89,8 +90,55 @@ describe('X402Client', () => {
       expect(selected!.network).toBe('base:8453');
     });
 
+    it('selects Arbitrum USDC when configured for arbitrum', () => {
+      const client = new X402Client(mockWallet, { supportedNetworks: ['arbitrum:42161'] });
+      const accepts: X402PaymentRequirements[] = [
+        { scheme: 'exact', network: 'base:8453', asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', amount: '1000000', payTo: '0x1', maxTimeoutSeconds: 30, extra: {} },
+        { scheme: 'exact', network: 'arbitrum:42161', asset: '0xaf88d065e77c8cC2239327C5EDb3A432268e5831', amount: '1000000', payTo: '0x1', maxTimeoutSeconds: 30, extra: {} },
+      ];
+
+      const selected = client.selectPaymentOption(accepts);
+      expect(selected).not.toBeNull();
+      expect(selected!.network).toBe('arbitrum:42161');
+    });
+
+    it('selects Optimism USDC when configured for optimism', () => {
+      const client = new X402Client(mockWallet, { supportedNetworks: ['optimism:10'] });
+      const accepts: X402PaymentRequirements[] = [
+        { scheme: 'exact', network: 'optimism:10', asset: '0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85', amount: '2000000', payTo: '0x1', maxTimeoutSeconds: 30, extra: {} },
+      ];
+
+      const selected = client.selectPaymentOption(accepts);
+      expect(selected).not.toBeNull();
+      expect(selected!.network).toBe('optimism:10');
+    });
+
+    it('selects Polygon USDC when configured for polygon', () => {
+      const client = new X402Client(mockWallet, { supportedNetworks: ['polygon:137'] });
+      const accepts: X402PaymentRequirements[] = [
+        { scheme: 'exact', network: 'polygon:137', asset: '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359', amount: '500000', payTo: '0x1', maxTimeoutSeconds: 30, extra: {} },
+      ];
+
+      const selected = client.selectPaymentOption(accepts);
+      expect(selected).not.toBeNull();
+      expect(selected!.network).toBe('polygon:137');
+    });
+
+    it('selects any supported network when multi-chain configured', () => {
+      const client = new X402Client(mockWallet, {
+        supportedNetworks: ['base:8453', 'ethereum:1', 'arbitrum:42161'],
+      });
+      const accepts: X402PaymentRequirements[] = [
+        { scheme: 'exact', network: 'arbitrum:42161', asset: '0xaf88d065e77c8cC2239327C5EDb3A432268e5831', amount: '1000000', payTo: '0x1', maxTimeoutSeconds: 30, extra: {} },
+      ];
+
+      const selected = client.selectPaymentOption(accepts);
+      expect(selected).not.toBeNull();
+      expect(selected!.network).toBe('arbitrum:42161');
+    });
+
     it('prefers lowest amount among compatible options', () => {
-      const client = new X402Client(mockWallet);
+      const client = new X402Client(mockWallet, { supportedNetworks: ['base:8453'] });
       const accepts: X402PaymentRequirements[] = [
         { scheme: 'exact', network: 'base:8453', asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', amount: '5000000', payTo: '0x1', maxTimeoutSeconds: 30, extra: {} },
         { scheme: 'exact', network: 'base:8453', asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', amount: '1000000', payTo: '0x1', maxTimeoutSeconds: 30, extra: {} },
@@ -101,7 +149,7 @@ describe('X402Client', () => {
     });
 
     it('returns null when no compatible option exists', () => {
-      const client = new X402Client(mockWallet);
+      const client = new X402Client(mockWallet, { supportedNetworks: ['base:8453'] });
       const accepts: X402PaymentRequirements[] = [
         { scheme: 'exact', network: 'solana:mainnet', asset: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', amount: '1000000', payTo: 'sol_addr', maxTimeoutSeconds: 30, extra: {} },
       ];
@@ -109,8 +157,18 @@ describe('X402Client', () => {
       expect(client.selectPaymentOption(accepts)).toBeNull();
     });
 
+    it('returns null when network matches but asset is not supported USDC', () => {
+      const client = new X402Client(mockWallet, { supportedNetworks: ['base:8453'] });
+      const accepts: X402PaymentRequirements[] = [
+        { scheme: 'exact', network: 'base:8453', asset: '0xDeAdBeEfDeAdBeEfDeAdBeEfDeAdBeEfDeAdBeEf', amount: '1000000', payTo: '0x1', maxTimeoutSeconds: 30, extra: {} },
+      ];
+
+      // Asset is not the known USDC address — should be rejected
+      expect(client.selectPaymentOption(accepts)).toBeNull();
+    });
+
     it('prefers exact scheme over others', () => {
-      const client = new X402Client(mockWallet);
+      const client = new X402Client(mockWallet, { supportedNetworks: ['base:8453'] });
       const accepts: X402PaymentRequirements[] = [
         { scheme: 'upto', network: 'base:8453', asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', amount: '500000', payTo: '0x1', maxTimeoutSeconds: 30, extra: {} },
         { scheme: 'exact', network: 'base:8453', asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', amount: '1000000', payTo: '0x1', maxTimeoutSeconds: 30, extra: {} },
@@ -119,5 +177,31 @@ describe('X402Client', () => {
       const selected = client.selectPaymentOption(accepts);
       expect(selected!.scheme).toBe('exact');
     });
+  });
+});
+
+// ─── USDC_ADDRESSES coverage tests ───
+describe('USDC_ADDRESSES multi-chain coverage', () => {
+  it('covers all 10 mainnet chains', () => {
+    const mainnetChains = [
+      'base:8453',
+      'ethereum:1',
+      'arbitrum:42161',
+      'polygon:137',
+      'optimism:10',
+      'avalanche:43114',
+      'unichain:130',
+      'linea:59144',
+      'sonic:146',
+      'worldchain:480',
+    ];
+    for (const chain of mainnetChains) {
+      expect(USDC_ADDRESSES[chain]).toBeDefined();
+      expect(USDC_ADDRESSES[chain]).toMatch(/^0x[0-9a-fA-F]{40}$/);
+    }
+  });
+
+  it('includes base-sepolia testnet', () => {
+    expect(USDC_ADDRESSES['base-sepolia:84532']).toBe('0x036CbD53842c5426634e7929541eC2318f3dCF7e');
   });
 });

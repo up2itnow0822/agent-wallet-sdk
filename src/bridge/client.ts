@@ -1,3 +1,17 @@
+/**
+ * @module bridge/client
+ * BridgeModule — CCTP V2 cross-chain USDC bridge for AgentWallet (EVM↔EVM).
+ *
+ * Implements a full EVM-to-EVM USDC bridge using Circle's CCTP V2 protocol.
+ * Non-custodial: all signing is done locally via the agent's viem WalletClient.
+ *
+ * For EVM↔Solana bridging, see bridge/solana.ts.
+ *
+ * Supported chains: Ethereum, Avalanche, Optimism, Arbitrum, Base, Polygon,
+ *                   Unichain, Linea, Sonic, Worldchain.
+ *
+ * Flow: approve USDC → depositForBurn → poll Circle IRIS → receiveMessage
+ */
 // BridgeModule — CCTP V2 cross-chain USDC bridge for AgentWallet
 // Non-custodial: all signing is done locally via the agent's WalletClient.
 import {
@@ -18,7 +32,7 @@ import {
   MessageTransmitterV2Abi,
   ERC20BridgeAbi,
 } from './abis.js';
-import type { BridgeChain, BridgeOptions, BurnResult, BridgeResult } from './types.js';
+import type { BridgeChain, EVMBridgeChain, BridgeOptions, BurnResult, BridgeResult } from './types.js';
 import {
   CCTP_DOMAIN_IDS,
   BRIDGE_CHAIN_IDS,
@@ -32,10 +46,11 @@ import {
 } from './types.js';
 
 /**
- * Viem chain definitions for all supported CCTP V2 chains.
+ * Viem chain definitions for all supported EVM CCTP V2 chains.
  * Chains without built-in viem definitions use custom definitions.
+ * Solana is NOT included — use bridge/solana.ts for EVM↔Solana bridging.
  */
-const VIEM_CHAINS: Record<BridgeChain, any> = {
+const VIEM_CHAINS: Record<EVMBridgeChain, any> = {
   base,
   ethereum: mainnet,
   optimism,
@@ -43,20 +58,20 @@ const VIEM_CHAINS: Record<BridgeChain, any> = {
   polygon,
   avalanche,
   linea,
-  unichain: { id: 130, name: 'Unichain', nativeCurrency: { name: 'ETH', symbol: 'ETH', decimals: 18 }, rpcUrls: { default: { http: ['https://mainnet.unichain.org'] } } },
-  sonic: { id: 146, name: 'Sonic', nativeCurrency: { name: 'S', symbol: 'S', decimals: 18 }, rpcUrls: { default: { http: ['https://rpc.soniclabs.com'] } } },
-  worldchain: { id: 480, name: 'World Chain', nativeCurrency: { name: 'ETH', symbol: 'ETH', decimals: 18 }, rpcUrls: { default: { http: ['https://worldchain-mainnet.g.alchemy.com/public'] } } },
+  unichain:   { id: 130, name: 'Unichain',    nativeCurrency: { name: 'ETH', symbol: 'ETH', decimals: 18 }, rpcUrls: { default: { http: ['https://mainnet.unichain.org'] } } },
+  sonic:      { id: 146, name: 'Sonic',        nativeCurrency: { name: 'S',   symbol: 'S',   decimals: 18 }, rpcUrls: { default: { http: ['https://rpc.soniclabs.com'] } } },
+  worldchain: { id: 480, name: 'World Chain',  nativeCurrency: { name: 'ETH', symbol: 'ETH', decimals: 18 }, rpcUrls: { default: { http: ['https://worldchain-mainnet.g.alchemy.com/public'] } } },
 };
 
 export class BridgeModule {
   private readonly walletClient: WalletClient;
   private readonly publicClient: PublicClient;
-  private readonly fromChain: BridgeChain;
+  private readonly fromChain: EVMBridgeChain;
   private readonly fromRpcUrl: string | undefined;
 
   constructor(
     walletClient: WalletClient,
-    fromChain: BridgeChain = 'base',
+    fromChain: EVMBridgeChain = 'base',
     options: { rpcUrl?: string } = {},
   ) {
     if (!walletClient.account) {
@@ -74,7 +89,7 @@ export class BridgeModule {
     }) as PublicClient;
   }
 
-  async bridge(amount: bigint, toChain: BridgeChain, options: BridgeOptions = {}): Promise<BridgeResult> {
+  async bridge(amount: bigint, toChain: EVMBridgeChain, options: BridgeOptions = {}): Promise<BridgeResult> {
     const startMs = Date.now();
     this.validateBridgeParams(amount, toChain);
     const account = this.walletClient.account!;
@@ -100,7 +115,7 @@ export class BridgeModule {
     };
   }
 
-  async burn(amount: bigint, toChain: BridgeChain, options: BridgeOptions = {}): Promise<BurnResult> {
+  async burn(amount: bigint, toChain: EVMBridgeChain, options: BridgeOptions = {}): Promise<BurnResult> {
     this.validateBridgeParams(amount, toChain);
     const account = this.walletClient.account!;
     const recipient = options.destinationAddress ?? account.address;
@@ -114,7 +129,7 @@ export class BridgeModule {
     return this.pollForAttestation(messageHash, this.fromChain, apiUrl);
   }
 
-  async mint(messageBytes: Hex, attestation: Hex, toChain: BridgeChain, destinationRpcUrl?: string): Promise<Hash> {
+  async mint(messageBytes: Hex, attestation: Hex, toChain: EVMBridgeChain, destinationRpcUrl?: string): Promise<Hash> {
     return this.receiveMessage(messageBytes, attestation, toChain, destinationRpcUrl);
   }
 
@@ -163,7 +178,7 @@ export class BridgeModule {
 
   private async depositForBurn(
     amount: bigint,
-    toChain: BridgeChain,
+    toChain: EVMBridgeChain,
     recipient: `0x${string}`,
     minFinalityThreshold: number,
     maxFee: bigint,
@@ -222,7 +237,7 @@ export class BridgeModule {
     throw new BridgeError('BURN_FAILED', 'Could not find MessageSent event in burn transaction receipt.');
   }
 
-  private async pollForAttestation(messageHash: Hex, fromChain: BridgeChain, apiUrl: string): Promise<Hex> {
+  private async pollForAttestation(messageHash: Hex, fromChain: EVMBridgeChain, apiUrl: string): Promise<Hex> {
     const sourceDomain = CCTP_DOMAIN_IDS[fromChain];
     const url = `${apiUrl}/v2/messages/${sourceDomain}/${messageHash}`;
 
@@ -252,7 +267,7 @@ export class BridgeModule {
       `Attestation not received after ${MAX_ATTESTATION_POLLS} attempts. Message hash: ${messageHash}.`);
   }
 
-  private async receiveMessage(messageBytes: Hex, attestation: Hex, toChain: BridgeChain, destinationRpcUrl?: string): Promise<Hash> {
+  private async receiveMessage(messageBytes: Hex, attestation: Hex, toChain: EVMBridgeChain, destinationRpcUrl?: string): Promise<Hash> {
     const account = this.walletClient.account!;
     const transmitterAddress = MESSAGE_TRANSMITTER_V2[toChain];
     const destChain = VIEM_CHAINS[toChain];
@@ -279,7 +294,7 @@ export class BridgeModule {
     return mintTxHash;
   }
 
-  private validateBridgeParams(amount: bigint, toChain: BridgeChain): void {
+  private validateBridgeParams(amount: bigint, toChain: EVMBridgeChain): void {
     if (amount <= 0n) {
       throw new BridgeError('INVALID_AMOUNT', `Bridge amount must be greater than 0. Received: ${amount}.`);
     }
@@ -307,13 +322,13 @@ export class BridgeError extends Error {
 
 export function createBridge(
   walletClient: WalletClient,
-  fromChain: BridgeChain = 'base',
+  fromChain: EVMBridgeChain = 'base',
   options: { rpcUrl?: string } = {},
 ): BridgeModule {
   return new BridgeModule(walletClient, fromChain, options);
 }
 
-export type { BridgeChain, BridgeOptions, BurnResult, BridgeResult };
+export type { BridgeChain, EVMBridgeChain, BridgeOptions, BurnResult, BridgeResult };
 export {
   CCTP_DOMAIN_IDS, BRIDGE_CHAIN_IDS, USDC_CONTRACT,
   TOKEN_MESSENGER_V2, MESSAGE_TRANSMITTER_V2, FINALITY_THRESHOLD,

@@ -1,3 +1,13 @@
+/**
+ * @module swap/SwapModule
+ * SwapModule — multi-chain Uniswap V3 token swap aggregator with 0.875% protocol fee.
+ *
+ * Supports Base, Arbitrum, Optimism, and Polygon. Automatically selects the best
+ * Uniswap V3 fee tier (0.01%, 0.05%, 0.3%, 1%) by quoting all tiers and choosing
+ * the highest output. Applies slippage protection and an optional protocol fee.
+ *
+ * Usage: construct with `chain` param or use `attachSwap(wallet, { chain: 'arbitrum' })`.
+ */
 // SwapModule — Uniswap V3 token swap aggregator with 0.875% protocol fee
 import {
   encodeFunctionData,
@@ -12,10 +22,11 @@ import {
   type SwapOptions,
   type SwapResult,
   type SwapModuleConfig,
+  type SwapChain,
   type UniswapFeeTier,
   PROTOCOL_FEE_BPS,
   DEFAULT_SLIPPAGE_BPS,
-  UNISWAP_V3_BASE,
+  UNISWAP_V3_ADDRESSES,
 } from './types.js';
 
 const FEE_TIERS: UniswapFeeTier[] = [100, 500, 3000, 10000];
@@ -45,17 +56,23 @@ export class SwapModule {
     publicClient: PublicClient,
     walletClient: WalletClient,
     accountAddress: Address,
-    config?: Partial<SwapModuleConfig>,
+    config?: Partial<SwapModuleConfig> & { chain?: SwapChain },
   ) {
     this.publicClient = publicClient;
     this.walletClient = walletClient;
     this.accountAddress = accountAddress;
+    const chain: SwapChain = config?.chain ?? 'base';
+    const chainAddresses = UNISWAP_V3_ADDRESSES[chain];
     this.config = {
-      routerAddress: UNISWAP_V3_BASE.ROUTER,
-      quoterAddress: UNISWAP_V3_BASE.QUOTER_V2,
+      routerAddress: chainAddresses.ROUTER,
+      quoterAddress: chainAddresses.QUOTER_V2,
       feeBps: PROTOCOL_FEE_BPS,
       feeWallet: accountAddress,
+      chain,
       ...config,
+      // Re-apply chain-derived addresses if chain was specified but addresses were not
+      ...(config?.routerAddress ? {} : { routerAddress: chainAddresses.ROUTER }),
+      ...(config?.quoterAddress ? {} : { quoterAddress: chainAddresses.QUOTER_V2 }),
     };
   }
 
@@ -92,7 +109,7 @@ export class SwapModule {
     }
 
     if (!bestQuote) {
-      throw new Error(`SwapModule: No Uniswap V3 pool found for ${tokenIn} → ${tokenOut} on Base.`);
+      throw new Error(`SwapModule: No Uniswap V3 pool found for ${tokenIn} → ${tokenOut} on ${this.config.chain}.`);
     }
 
     const amountOutMinimum = applySlippage(bestQuote.amountOut, slippageBps);
@@ -194,7 +211,7 @@ export class SwapModule {
 
 export function attachSwap(
   wallet: { address: Address; publicClient: PublicClient; walletClient: WalletClient },
-  config?: Partial<SwapModuleConfig>,
+  config?: Partial<SwapModuleConfig> & { chain?: SwapChain },
 ) {
   const swapModule = new SwapModule(wallet.publicClient, wallet.walletClient, wallet.address, config);
   return {
