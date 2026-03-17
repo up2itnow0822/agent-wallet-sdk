@@ -1,4 +1,4 @@
-## [5.1.0] — 2026-03-16
+## [5.2.0] — 2026-03-16
 
 ### Added
 - **Multi-chain x402 payments:** Expanded from 1 chain (Base) to 10 mainnet chains — Ethereum, Arbitrum, Polygon, Optimism, Avalanche, Unichain, Linea, Sonic, World Chain
