@@ -465,10 +465,125 @@ await resolver.sendWithPayment({
 });
 ```
 
+## Enterprise Deployment Guide
+
+### Architecture Overview
+
+agent-wallet-sdk is designed for enterprise environments where AI agents need autonomous spending power with hard compliance boundaries. The SDK runs in your infrastructure - no third-party custody, no shared key management service, no data leaving your network.
+
+**Deployment options:**
+
+- **Self-hosted node service:** Run the SDK as a microservice behind your API gateway. Each agent gets its own ERC-6551 wallet with organization-wide SpendingPolicy enforcement.
+- **Embedded in agent runtime:** Import directly into your agent's Node.js/TypeScript process. Wallet keys stay in your process memory, never transmitted.
+- **Containerized (Docker/K8s):** Production-ready with environment variable configuration. Secrets via mounted volumes or your existing secrets manager (Vault, AWS Secrets Manager, GCP Secret Manager).
+
+```bash
+# Docker deployment
+docker run -e WALLET_PRIVATE_KEY_FILE=/secrets/key \
+           -e RPC_URL=https://mainnet.base.org \
+           -v /path/to/secrets:/secrets:ro \
+           agentwallet-sdk:latest
+```
+
+### Network Requirements
+
+- Outbound HTTPS to your chosen RPC provider (Base, Ethereum, Arbitrum, etc.)
+- No inbound ports required
+- Compatible with corporate proxies (standard HTTPS_PROXY env var)
+- Air-gapped deployment supported for key generation; RPC access needed only for transaction broadcast
+
+### High Availability
+
+- Stateless design: wallet state lives on-chain, not in application memory
+- Multiple SDK instances can share the same wallet address safely (nonce management handled)
+- Recommended: run behind a load balancer with health checks on the `/health` endpoint
+
+## Compliance Checklist
+
+Use this checklist when evaluating agent-wallet-sdk for regulated environments.
+
+### Data Residency
+- [x] All wallet keys generated and stored locally - no external key management service
+- [x] No telemetry, analytics, or usage data transmitted to any third party
+- [x] Transaction data stays on public blockchain (Base, Ethereum, etc.) - no proprietary data store
+- [x] SDK source code is open source (MIT) - full audit capability
+
+### Access Control
+- [x] SpendingPolicy enforces per-transaction limits, daily caps, and token-specific restrictions on-chain
+- [x] Transactions exceeding policy limits are queued for human approval - never auto-executed
+- [x] Wallet access revocation via NFT transfer (ERC-6551) - instant, cryptographic, no admin API
+- [x] Role-based access: owner (human) sets policy, agent executes within policy bounds
+
+### Audit Trail
+- [x] Every transaction recorded on-chain with block number, timestamp, and gas cost
+- [x] SpendingPolicy changes are on-chain events - immutable audit log
+- [x] ERC-8004 reputation feedback is on-chain - tamper-proof performance history
+- [x] No off-chain state that could be modified without detection
+
+### Key Management
+- [x] Non-custodial: the organization holds all private keys
+- [x] Compatible with HSMs via standard Ethereum signing interfaces (EIP-712)
+- [x] Key rotation: deploy new ERC-6551 wallet, transfer NFT, old keys become inert
+- [x] No shared secrets between SDK instances or between organization and vendor
+
+## Procurement FAQ
+
+**Q: Is agent-wallet-sdk a SaaS product?**
+No. It's an open-source SDK (MIT license) that you install and run in your infrastructure. There's no hosted service, no subscription, no vendor lock-in. You own the deployment.
+
+**Q: What are the costs?**
+The SDK itself is free. Costs are blockchain gas fees for transactions (typically $0.001-0.01 on Base L2) and your chosen RPC provider. No per-seat, per-agent, or per-transaction licensing fees.
+
+**Q: How does licensing work?**
+MIT license. Use it in commercial products, modify it, distribute it. No copyleft restrictions. No license changes planned - the license is in the git history.
+
+**Q: Who maintains it?**
+AI Agent Economy (https://github.com/up2itnow0822/agent-wallet-sdk). Active development since 2025. Community contributions welcome.
+
+**Q: Can we get a support agreement?**
+Enterprise support packages are available. Contact bill@ai-agent-economy.com for SLA terms.
+
+**Q: Is there vendor lock-in risk?**
+No. The SDK uses standard Ethereum tooling (viem, ERC-6551, ERC-8004). If you stop using the SDK, your wallets, keys, and on-chain identity continue to work with any Ethereum-compatible tool.
+
+**Q: Does it work with our existing agent framework?**
+Yes. The SDK is framework-agnostic. It works with OpenClaw, NanoClaw, LangChain, CrewAI, AutoGPT, Anthropic Claude tool-use, OpenAI Assistants, or any Node.js/TypeScript environment. agentpay-mcp adds MCP protocol support for Claude and other MCP-compatible clients.
+
+**Q: What chains are supported?**
+17 chains via CCTP bridging. Primary: Base (recommended for low gas costs), Ethereum, Arbitrum, Polygon, Optimism. See Supported Chains table above.
+
+## SOC 2 Readiness Matrix
+
+| SOC 2 Criteria | agent-wallet-sdk Coverage | Notes |
+|---|---|---|
+| **CC6.1** Logical access security | SpendingPolicy on-chain enforcement, ERC-6551 NFT-based access control | Access revocation is cryptographic via NFT transfer |
+| **CC6.2** System component access | Non-custodial - no vendor access to keys or wallets | Organization controls all secrets |
+| **CC6.3** Access removal | NFT transfer = instant revocation of all agent permissions | No "forgot to deprovision" risk |
+| **CC7.1** System monitoring | All transactions on-chain with block explorer visibility | Real-time alerting via standard blockchain monitoring tools |
+| **CC7.2** Anomaly detection | SpendingPolicy caps prevent anomalous spend automatically | Over-limit transactions queue for human review |
+| **CC8.1** Change management | Open-source - all changes in public git history | Audit any version, diff any release |
+| **A1.2** Recovery objectives | Stateless SDK + on-chain state = recovery is re-deploy + import keys | No database backups needed |
+| **C1.1** Data confidentiality | No data transmitted to vendor, no telemetry, local-only operation | Private keys never leave your infrastructure |
+| **PI1.1** Processing integrity | Deterministic smart contract execution, on-chain verification | Transaction results are cryptographically verifiable |
+
+### What SOC 2 Auditors Will Ask (And Your Answers)
+
+**"How do you control what the AI agent can spend?"**
+SpendingPolicy smart contracts enforce per-transaction limits, daily caps, and approved token lists on-chain. The agent cannot bypass these limits - they're enforced by the blockchain, not by application code.
+
+**"What happens if an agent is compromised?"**
+The agent can only spend up to its SpendingPolicy limits. Worst case: one day's approved budget. Transfer the NFT to revoke all access immediately. No waiting for key rotation, no certificate revocation lists.
+
+**"Where are the private keys stored?"**
+In your infrastructure. The SDK never transmits keys. Compatible with your existing secrets management (Vault, AWS Secrets Manager, Azure Key Vault, GCP Secret Manager, or local encrypted storage).
+
+**"Can the vendor access our wallets?"**
+No. Non-custodial means we never have your keys. There's no "admin backdoor," no support override, no recovery mechanism that bypasses your key ownership.
+
 ## Links
 
 - [ERC-8004 Spec](https://eips.ethereum.org/EIPS/eip-8004)
-- [GitHub](https://github.com/agentnexus/agent-wallet-sdk)
+- [GitHub](https://github.com/up2itnow0822/agent-wallet-sdk)
 - [npm](https://www.npmjs.com/package/agentwallet-sdk)
 
 ## License
