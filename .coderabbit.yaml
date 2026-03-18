@@ -1,0 +1,29 @@
+language: en-US
+reviews:
+  profile: assertive
+  request_changes_workflow: true
+  high_level_summary: true
+  poem: false
+  auto_review:
+    enabled: true
+    drafts: false
+  path_instructions:
+    - path: "src/**/*.ts"
+      instructions: |
+        Non-custodial cryptocurrency wallet SDK. Review with extreme security focus:
+        - Flag ANY exposure of private keys, mnemonics, or seed phrases in logs, errors, or return values
+        - Flag unvalidated chain IDs, addresses, or transaction amounts
+        - Flag missing spending policy validation before transaction signing
+        - Flag reentrancy risks in contract interactions
+        - Flag hardcoded RPC endpoints or API keys
+        - Flag missing error handling on blockchain calls
+    - path: "src/cli/**/*.ts"
+      instructions: |
+        AgentGuard CLI for transaction policy validation.
+        - Flag private keys passed as CLI arguments (CRITICAL - CVE vector)
+        - Flag missing input sanitization on CLI parameters
+    - path: "**/*.sol"
+      instructions: |
+        Solidity smart contracts. Check for reentrancy, access control, unchecked calls, missing events.
+chat:
+  auto_reply: true

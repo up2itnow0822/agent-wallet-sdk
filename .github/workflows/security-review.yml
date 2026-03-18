@@ -1,0 +1,57 @@
+name: AI Security Review
+on:
+  pull_request:
+    types: [opened, synchronize]
+    branches: [main]
+    paths: ['src/**/*.ts', 'src/**/*.sol', 'contracts/**/*.sol']
+permissions:
+  contents: read
+  pull-requests: write
+jobs:
+  security-review:
+    runs-on: ubuntu-latest
+    name: Wallet Security Scan
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Get changed files
+        id: changed
+        run: |
+          FILES=$(git diff --name-only ${{ github.event.pull_request.base.sha }}...${{ github.sha }} | grep -E '\.(ts|sol)$' | grep -v '\.d\.ts$' | grep -v 'test' | grep -v 'spec' | tr '\n' ' ')
+          echo "files=$FILES" >> $GITHUB_OUTPUT
+      - name: Security pattern scan
+        if: steps.changed.outputs.files != ''
+        run: |
+          echo "## Security Scan Results" > /tmp/report.md
+          FOUND=0
+          for file in ${{ steps.changed.outputs.files }}; do
+            [ ! -f "$file" ] && continue
+            if grep -n -i 'console.*\(private\|secret\|mnemonic\|seed\)' "$file" 2>/dev/null; then
+              echo "CRITICAL: Potential key exposure in $file" >> /tmp/report.md; FOUND=1
+            fi
+            if grep -n 'privateKey.*process\.argv\|--private-key\|--secret' "$file" 2>/dev/null; then
+              echo "CRITICAL: Private key via CLI arg in $file" >> /tmp/report.md; FOUND=1
+            fi
+            if grep -n -E 'eval\s*\(|new\s+Function\s*\(' "$file" 2>/dev/null; then
+              echo "HIGH: Dynamic code execution in $file" >> /tmp/report.md; FOUND=1
+            fi
+          done
+          [ "$FOUND" -eq 0 ] && echo "No security patterns detected." >> /tmp/report.md
+          cat /tmp/report.md
+      - name: Post report
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let report = 'Security scan completed.';
+            try { report = fs.readFileSync('/tmp/report.md', 'utf-8'); } catch(e) {}
+            const hasCrit = report.includes('CRITICAL:');
+            const icon = hasCrit ? '🔴' : '🟢';
+            await github.rest.issues.createComment({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: '## ' + icon + ' Security Review\\n\\n' + report
+            });
+            if (hasCrit) core.setFailed('Critical security issues found');
