@@ -348,7 +348,7 @@ await escrow.verify(escrowId);
 | Yield Staking | Aave V3, Compound V3, Morpho Blue strategies |
 | Tax Reporting | Cost basis and gain/loss reporting |
 
-Premium access: [github.com/up2itnow/AgentNexus2](https://github.com/up2itnow/AgentNexus2)
+Premium access: [github.com/up2itnow0822/AgentNexus2](https://github.com/up2itnow0822/AgentNexus2)
 
 ## x402 Protocol: Supported Chains and Payment Rails
 
