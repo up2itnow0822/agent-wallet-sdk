@@ -1,6 +1,6 @@
 # AgentWallet SDK
 
-> **⭐ Star us during GTC Week (Mar 15-20) — NVIDIA's NemoClaw launches Monday with no payment primitive. agent-wallet-sdk is the open-source answer. Help us reach record stars during the biggest AI week of 2026.**
+> **Patent Pending** — Non-Custodial Multi-Chain Financial Infrastructure System for Autonomous AI Agents (USPTO Provisional, filed March 2026)
 
 Non-custodial AI agent wallet with ERC-8004 on-chain identity, ERC-6551 token-bound accounts, x402 payments, mutual stake escrow, and programmable spending guardrails.
 
