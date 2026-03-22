@@ -608,3 +608,64 @@ export {
   encodeOptimisticVerifierData,
   VERIFIER_ADDRESSES,
 } from './escrow/verifiers.js';
+
+// ─── v6: Multi-Token Support ─────────────────────────────────────────────────
+
+// TokenRegistry — pre-populated multi-chain token address registry
+export {
+  TokenRegistry,
+  getGlobalRegistry,
+  getNativeToken,
+  ETHEREUM_REGISTRY,
+  BASE_REGISTRY,
+  ARBITRUM_REGISTRY,
+  OPTIMISM_REGISTRY,
+  POLYGON_REGISTRY,
+  AVALANCHE_REGISTRY,
+  UNICHAIN_REGISTRY,
+  LINEA_REGISTRY,
+  SONIC_REGISTRY,
+  WORLDCHAIN_REGISTRY,
+  BASE_SEPOLIA_REGISTRY,
+} from './tokens/registry.js';
+export type { TokenEntry, AddTokenParams } from './tokens/registry.js';
+
+// Token decimal normalization
+export { toRaw, toHuman, formatBalance, parseAmount } from './tokens/decimals.js';
+export type { TokenInfo } from './tokens/decimals.js';
+
+// Multi-token EVM transfers (direct EOA/hot-wallet operations)
+export {
+  sendToken,
+  sendNative,
+  getTokenBalance,
+  getNativeBalance,
+  getBalances,
+  encodeERC20Transfer,
+} from './tokens/transfers.js';
+export type {
+  TransferContext,
+  TransferOptions,
+  TokenBalanceResult,
+  NativeBalanceResult,
+} from './tokens/transfers.js';
+
+// Solana SPL token support (optional peer dependency: @solana/web3.js)
+export { SolanaWallet, createSolanaWallet, SOLANA_TOKENS, SOLANA_TOKEN_DECIMALS } from './tokens/solana.js';
+export type {
+  SolanaWalletConfig,
+  SolanaTokenInfo,
+  SolanaTokenSymbol,
+  SolBalanceResult,
+  SplBalanceResult,
+  SolanaTxResult,
+} from './tokens/solana.js';
+
+// x402 multi-asset resolution (v6 additions)
+export {
+  resolveAssetAddress,
+  resolveAssetDecimals,
+  buildSupportedAssets,
+  isStablecoin,
+  parseNetworkChainId,
+} from './x402/multi-asset.js';

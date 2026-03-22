@@ -14,6 +14,15 @@ export type {
 } from './types.js';
 export { USDC_ADDRESSES, DEFAULT_SUPPORTED_NETWORKS } from './types.js';
 
+// v6: Multi-asset resolution utilities
+export {
+  resolveAssetAddress,
+  resolveAssetDecimals,
+  buildSupportedAssets,
+  isStablecoin,
+  parseNetworkChainId,
+} from './multi-asset.js';
+
 // ─── Chain-Specific Adapters ──────────────────────────────────────────────────
 export {
   AbstractDelegatedFacilitatorAdapter,
