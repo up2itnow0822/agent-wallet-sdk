@@ -1,7 +1,7 @@
 {
   "name": "agentwallet-sdk",
   "version": "6.0.0",
-  "description": "Non-custodial AI agent wallet SDK. Full multi-chain, multi-token support with TokenRegistry, ERC-20/native transfers, Solana SPL, multi-asset x402 payments, ERC-8004 identity & reputation, mutual stake escrow, CCTP bridging, SpendingPolicy guardrails, Uniswap V3 swap. The agent holds the keys.",
+  "description": "Non-custodial AI agent wallet SDK. Full multi-chain, multi-token support with TokenRegistry, ERC-20/native transfers, Solana SPL, multi-asset x402 payments, ERC-8004 identity & reputation, mutual stake escrow, CCTP bridging, SpendingPolicy guardrails, Uniswap V3 swap. The agent holds the keys. Patent Pending.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
