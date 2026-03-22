@@ -155,7 +155,7 @@ export class StellarX402Adapter {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let StellarSdk: any;
     try {
-      // @ts-ignore — @stellar/stellar-sdk is an optional peer dependency
+      // @ts-expect-error — @stellar/stellar-sdk is an optional peer dependency
       StellarSdk = await import('@stellar/stellar-sdk');
     } catch {
       throw new Error(

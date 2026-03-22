@@ -1,5 +1,7 @@
 # AgentWallet SDK
 
+> **v6.0.0** — TokenRegistry, multi-token EVM transfers, Solana SPL support, x402 multi-asset payments
+>
 > **Patent Pending** — Non-Custodial Multi-Chain Financial Infrastructure System for Autonomous AI Agents (USPTO Provisional, filed March 2026)
 
 Non-custodial AI agent wallet with ERC-8004 on-chain identity, ERC-6551 token-bound accounts, x402 payments, mutual stake escrow, and programmable spending guardrails.
@@ -66,6 +68,137 @@ const result = await agentExecute(wallet, {
   value: 10000000000000000n, // 0.01 ETH
 });
 console.log(result.executed ? 'Sent!' : 'Queued for approval');
+```
+
+## Token Registry (v6.0.0)
+
+The `TokenRegistry` ships with 80+ verified token addresses across 11 EVM chains + Solana. No more hard-coding contract addresses.
+
+```typescript
+import { getGlobalRegistry, BASE_REGISTRY, ETHEREUM_REGISTRY } from 'agentwallet-sdk';
+
+// Global registry — all chains loaded
+const registry = getGlobalRegistry();
+
+// Look up a token by symbol + chain
+const usdc = registry.getToken('USDC', 8453); // Base chain ID
+console.log(usdc?.address); // 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
+
+// List all tokens on a chain
+const baseTokens = registry.listTokens(8453);
+console.log(baseTokens.map(t => t.symbol));
+// ['USDC', 'USDT', 'DAI', 'WETH', 'WBTC', 'LINK', 'UNI', 'AAVE', 'LDO', ...]
+
+// Add a custom token
+registry.addToken({
+  symbol: 'MYTOKEN',
+  name: 'My Custom Token',
+  chainId: 8453,
+  address: '0xYourTokenAddress',
+  decimals: 18,
+});
+
+// Native gas token (ETH, POL, AVAX, S) — isNative: true, no ERC-20 transfer needed
+const eth = registry.getToken('ETH', 1);
+console.log(eth?.isNative); // true
+
+// Per-chain convenience exports (global registry, filtered by chain)
+import { BASE_REGISTRY, ARBITRUM_REGISTRY, ETHEREUM_REGISTRY } from 'agentwallet-sdk';
+const arbUsdc = ARBITRUM_REGISTRY.getToken('USDC', 42161);
+```
+
+## Multi-Token EVM Transfers (v6.0.0)
+
+Send any ERC-20 token or native gas to any address with automatic decimal handling.
+
+```typescript
+import { createWallet, sendToken, sendNative, getTokenBalance, getNativeBalance, getBalances } from 'agentwallet-sdk';
+
+const wallet = createWallet({ accountAddress: '0x...', chain: 'base', walletClient });
+
+// Send 100 USDC (human-readable amount — no manual decimal math)
+const txHash = await sendToken(wallet, {
+  symbol: 'USDC',
+  to: '0xRecipient',
+  amount: '100',       // 100 USDC → internally converted to 100_000_000 (6 decimals)
+});
+
+// Send 0.5 ETH (native gas)
+const nativeTxHash = await sendNative(wallet, '0xRecipient', '0.5');
+
+// Check a single token balance (returns human-readable string)
+const usdcBalance = await getTokenBalance(wallet, 'USDC');
+console.log(usdcBalance); // "250.00"
+
+// Check native balance
+const ethBalance = await getNativeBalance(wallet);
+console.log(ethBalance); // "1.234567890123456789"
+
+// Check all registered token balances at once
+const balances = await getBalances(wallet);
+// [{ symbol: 'USDC', balance: '250.00', raw: 250000000n }, { symbol: 'WETH', ... }, ...]
+```
+
+## Decimal Helpers (v6.0.0)
+
+Convert between on-chain raw amounts and human-readable values without hunting for decimal counts.
+
+```typescript
+import { toRaw, toHuman, formatBalance } from 'agentwallet-sdk';
+
+// Human → raw (for contract calls)
+const raw = toRaw('100.50', 6);   // → 100_500_000n (USDC 6 decimals)
+const rawEth = toRaw('1.5', 18);  // → 1_500_000_000_000_000_000n
+
+// Raw → human-readable string
+const human = toHuman(100_500_000n, 6);  // → "100.5"
+const humanEth = toHuman(1_500_000_000_000_000_000n, 18); // → "1.5"
+
+// Format with rounding and symbol
+const display = formatBalance(100_500_000n, 6, 'USDC', 2); // → "100.50 USDC"
+const ethDisplay = formatBalance(1_500_000_000_000_000_000n, 18, 'ETH', 4); // → "1.5000 ETH"
+```
+
+## Solana SPL Token Support (v6.0.0)
+
+`SolanaWallet` wraps `@solana/web3.js` as an optional peer dependency — install only if you need Solana.
+
+```bash
+npm install @solana/web3.js @solana/spl-token
+```
+
+```typescript
+import { SolanaWallet } from 'agentwallet-sdk/tokens/solana';
+
+const solWallet = new SolanaWallet({
+  privateKeyBase58: process.env.SOLANA_PRIVATE_KEY!,
+  rpcUrl: 'https://api.mainnet-beta.solana.com', // optional, defaults to mainnet
+});
+
+// Get native SOL balance
+const { sol, lamports } = await solWallet.getSolBalance();
+console.log(`Balance: ${sol} SOL`);
+
+// Send SOL
+const sig = await solWallet.sendSol('RecipientBase58Address', 0.1); // 0.1 SOL
+console.log('Tx:', sig);
+
+// Get SPL token balance (e.g., USDC on Solana)
+const usdcMint = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'; // Solana USDC
+const { amount, decimals } = await solWallet.getSplTokenBalance(usdcMint);
+console.log(`USDC: ${Number(amount) / 10 ** decimals}`);
+
+// Send SPL token
+const splSig = await solWallet.sendSplToken(
+  usdcMint,
+  'RecipientBase58Address',
+  5_000_000n, // 5 USDC (6 decimals)
+);
+console.log('SPL tx:', splSig);
+
+// List all SPL token accounts
+const accounts = await solWallet.listSplTokenAccounts();
+// [{ mint: '...', amount: 5000000n, decimals: 6 }, ...]
 ```
 
 ## Multi-Chain x402 Payments
@@ -322,6 +455,10 @@ await escrow.verify(escrowId);
 
 | Feature | Status | Description |
 |---------|--------|-------------|
+| TokenRegistry | ✅ Live | 80+ verified token addresses across 11 EVM chains + Solana |
+| Multi-Token Transfers | ✅ Live | sendToken, sendNative, getBalances — any ERC-20 or native gas |
+| Solana SPL Tokens | ✅ Live | SolanaWallet with getSolBalance, sendSol, sendSplToken (optional dep) |
+| Decimal Helpers | ✅ Live | toRaw, toHuman, formatBalance — no manual decimal math |
 | Agent Identity | ✅ Live | ERC-8004 Identity Registry — on-chain ERC-721 agent IDs |
 | Agent Reputation | ✅ Live | ERC-8004 Reputation Registry — scored feedback and summaries |
 | Agent Validation | ✅ Live | ERC-8004 Validation Registry — validator request/response |
@@ -432,7 +569,7 @@ const { txHash } = await bridge.bridge({
 
 All USDC addresses are native Circle USDC (not bridged variants).
 
-## Complete Agent Identity Stack (v5.1.0)
+## Complete Agent Identity Stack (v6.0.0)
 
 One npm install now gives any AI agent a wallet, email address, on-chain ID, reputation, and signed payment intents.
 

@@ -1,18 +1,13 @@
 import {
   createPublicClient,
-  createWalletClient,
   http,
   getContract,
-  parseAbiItem,
   type Address,
   type Hash,
   type Hex,
-  type PublicClient,
   type WalletClient,
   type Chain,
-  type Log,
   zeroAddress,
-  decodeAbiParameters,
 } from 'viem';
 import { base, baseSepolia, mainnet, arbitrum, polygon } from 'viem/chains';
 import { AgentAccountV2Abi, AgentAccountFactoryV2Abi } from './abi.js';
@@ -27,7 +22,6 @@ import type {
   WalletHealth,
   ActivityEntry,
   BatchTransfer,
-  CHAIN_IDS,
 } from './types.js';
 
 export type {
@@ -141,14 +135,10 @@ export async function agentExecute(
   // Check the tx receipt for TransactionQueued vs TransactionExecuted events
   const receipt = await wallet.publicClient.waitForTransactionReceipt({ hash });
 
-  // Event topic hashes for AgentAccountV2 events
-  const EXECUTED_TOPIC = '0x9ab15459d641b40eb8c30fdf1dfcf0e7b2fe7f5576de70769d24a67fb8f9a1dd';
+  // Event topic hash for AgentAccountV2 queue detection
   const QUEUED_TOPIC = '0x338e4b9b04df0b67a953d7ea6a7037128b8c6948e3d8c09a9d51a5f5be6c2284';
 
   const walletAddr = wallet.address.toLowerCase();
-  const executedLog = receipt.logs.find(
-    (log) => log.address.toLowerCase() === walletAddr && log.topics[0] === EXECUTED_TOPIC
-  );
   const queuedLog = receipt.logs.find(
     (log) => log.address.toLowerCase() === walletAddr && log.topics[0] === QUEUED_TOPIC
   );
@@ -265,7 +255,7 @@ export async function deployWallet(config: {
   factoryAddress: Address;
   tokenContract: Address;
   tokenId: bigint;
-  chain: keyof typeof CHAINS_MAP;
+  chain: keyof typeof CHAINS;
   rpcUrl?: string;
   walletClient: WalletClient;
 }): Promise<{ walletAddress: Address; txHash: Hash }> {
@@ -297,8 +287,6 @@ export async function deployWallet(config: {
 
   return { walletAddress, txHash };
 }
-
-const CHAINS_MAP = CHAINS; // alias for type usage
 
 /**
  * Compute the deterministic wallet address without deploying.
@@ -340,7 +328,7 @@ export async function getBudgetForecast(
   now?: number
 ): Promise<BudgetForecast> {
   const [perTxLimit, remainingInPeriod] = await wallet.contract.read.remainingBudget([token]);
-  const [policyPerTx, periodLimit, periodLength, periodSpent, periodStart] =
+  const [_policyPerTx, periodLimit, periodLength, periodSpent, periodStart] =
     await wallet.contract.read.spendPolicies([token]);
 
   const currentTime = now ?? Math.floor(Date.now() / 1000);

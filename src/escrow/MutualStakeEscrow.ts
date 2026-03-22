@@ -1,11 +1,8 @@
 import {
   type Address,
-  type Hash,
   type Hex,
   type PublicClient,
   type WalletClient,
-  getContract,
-  getAddress,
 } from 'viem';
 import type {
   CreateEscrowParams,
@@ -158,14 +155,10 @@ export class MutualStakeEscrow {
       chain: this.walletClient.chain,
     });
 
-    const receipt = await this.publicClient.waitForTransactionReceipt({ hash: txHash });
+    await this.publicClient.waitForTransactionReceipt({ hash: txHash });
 
-    // Extract vault address from VaultCreated event
-    const vaultCreatedLog = receipt.logs.find(
-      (log) => log.topics[0] === '0x' // Match VaultCreated event signature
-    );
-
-    // Fallback: read vault address from return data via simulation
+    // Read vault address from return data via simulation
+    // (VaultCreated event parsing reserved for future use)
     const vaultAddress = await this.publicClient.readContract({
       address: this.factoryAddress,
       abi: StakeVaultFactoryAbi,

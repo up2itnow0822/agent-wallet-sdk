@@ -1,3 +1,26 @@
+## [6.0.0] — 2026-03-21
+
+### Added
+- **`TokenRegistry` class** — 80+ verified token addresses across 11 EVM chains + Solana
+  - Pre-populated registries: USDC, USDT, DAI, WETH, WBTC, LINK, UNI, AAVE, CRV, MKR, SNX, COMP, LDO, ARB, OP, and more
+  - Native gas token support (ETH, POL, AVAX, S) with `isNative` flag
+  - `addToken()` for custom token imports
+  - Per-chain registry exports: `BASE_REGISTRY`, `ETHEREUM_REGISTRY`, `ARBITRUM_REGISTRY`, etc.
+- **Multi-token EVM transfers**: `sendToken()`, `sendNative()`, `getTokenBalance()`, `getNativeBalance()`, `getBalances()`
+- **Human-readable amount handling**: `toRaw()`, `toHuman()`, `formatBalance()`
+- **Solana SPL token support** (optional peer dependency `@solana/web3.js`):
+  - `SolanaWallet` class with `getSolBalance()`, `sendSol()`, `sendSplToken()`, `getSplTokenBalance()`
+- **x402 multi-asset resolution** — payments now accept any token the server requests, not just USDC
+
+### Changed
+- x402 client updated to resolve assets via `TokenRegistry` (multi-asset support)
+- Bumped version to 6.0.0
+
+### Backward Compatible
+- All v5.x imports continue to work unchanged
+
+---
+
 ## [5.2.0] — 2026-03-16
 
 ### Added

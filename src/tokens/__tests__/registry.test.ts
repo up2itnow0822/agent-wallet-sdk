@@ -1,7 +1,7 @@
 /**
  * Tests for the TokenRegistry — pre-populated multi-chain token registry.
  */
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { TokenRegistry, getGlobalRegistry, BASE_REGISTRY, ETHEREUM_REGISTRY } from '../registry.js';
 import { zeroAddress } from 'viem';
 

@@ -96,7 +96,7 @@ describe('sendNative (mocked)', () => {
       account: ACCOUNT,
     };
 
-    const hash = await sendNative(ctx, TO, '0.5'); // 0.5 ETH
+    const _hash = await sendNative(ctx, TO, '0.5'); // 0.5 ETH
 
     expect(sendTransaction).toHaveBeenCalledOnce();
 

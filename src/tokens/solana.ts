@@ -104,7 +104,7 @@ function base58Decode(str: string): Uint8Array {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function loadSolanaWeb3(): Promise<any> {
   try {
-    // @ts-ignore — @solana/web3.js is an optional peer dependency
+    // @ts-expect-error — @solana/web3.js is an optional peer dependency
     const mod = await import('@solana/web3.js');
     return mod;
   } catch {
@@ -117,7 +117,7 @@ async function loadSolanaWeb3(): Promise<any> {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function loadSplToken(): Promise<any> {
   try {
-    // @ts-ignore — @solana/spl-token is an optional peer dependency
+    // @ts-expect-error — @solana/spl-token is an optional peer dependency
     const mod = await import('@solana/spl-token');
     return mod;
   } catch {
@@ -173,7 +173,7 @@ export class SolanaWallet {
 
   private async getConnection() {
     if (this._connection) return this._connection;
-    const { Connection, clusterApiUrl } = await loadSolanaWeb3();
+    const { Connection } = await loadSolanaWeb3();
     this._connection = new Connection(this.rpcUrl, 'confirmed');
     return this._connection;
   }
@@ -213,7 +213,7 @@ export class SolanaWallet {
    * @param address - Optional base-58 public key to check (defaults to wallet's key)
    */
   async getSolBalance(address?: string): Promise<SolBalanceResult> {
-    const { Connection, PublicKey } = await loadSolanaWeb3();
+    const { PublicKey } = await loadSolanaWeb3();
     const connection = await this.getConnection();
 
     let pubkey: any;
@@ -387,7 +387,6 @@ export class SolanaWallet {
    * List all SPL token accounts for the wallet.
    */
   async listSplTokenAccounts(): Promise<Array<{ mint: string; amount: bigint; decimals: number }>> {
-    const { PublicKey } = await loadSolanaWeb3();
     const splToken = await loadSplToken();
     const connection = await this.getConnection();
     const keypair = await this.getKeypair();

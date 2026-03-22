@@ -21,7 +21,7 @@ import {
 } from 'viem';
 import { getGlobalRegistry } from './registry.js';
 import { parseAmount, toHuman, formatBalance } from './decimals.js';
-import type { TokenEntry } from './registry.js';
+
 
 // ─── ERC20 ABI (minimal) ─────────────────────────────────────────────────────
 

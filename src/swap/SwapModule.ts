@@ -183,7 +183,7 @@ export class SwapModule {
     const account = this.walletClient.account;
     if (!account) throw new Error('SwapModule: walletClient has no account');
 
-    const deadline = calcDeadline(deadlineSecs);
+    const _deadline = calcDeadline(deadlineSecs); // reserved for future router versions
     const swapData = encodeFunctionData({
       abi: UniswapV3RouterAbi,
       functionName: 'exactInputSingle',

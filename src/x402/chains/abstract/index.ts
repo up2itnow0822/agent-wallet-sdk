@@ -12,8 +12,8 @@
  *   - Abstract Testnet: 11124
  */
 
-import type { Address, Hash, Hex, WalletClient } from 'viem';
-import { hashTypedData, encodeAbiParameters, parseAbiParameters } from 'viem';
+import type { Address, Hex, WalletClient } from 'viem';
+import { encodeAbiParameters, parseAbiParameters } from 'viem';
 
 // ─── Abstract Chain Constants ────────────────────────────────────────────────
 

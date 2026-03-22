@@ -322,10 +322,11 @@ export function getGlobalRegistry(): TokenRegistry {
   return _globalRegistry;
 }
 
-/** Create a fresh registry pre-populated for a single chain. */
-function chainRegistry(chainId: number): TokenRegistry {
-  const r = new TokenRegistry(); // still loads all, but filtered on getToken/listTokens
-  return r;
+/** Create a fresh registry pre-populated for a single chain.
+ * @internal — reserved for future per-chain filtering API
+ */
+export function createChainRegistry(_chainId: number): TokenRegistry {
+  return new TokenRegistry(); // loads all tokens; filter via listTokens(chainId)
 }
 
 // Named per-chain exports — each returns the global registry (all tokens loaded,
