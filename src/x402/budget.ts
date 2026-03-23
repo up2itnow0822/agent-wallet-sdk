@@ -1,5 +1,5 @@
 // [MAX-ADDED] x402 Budget Controls — per-service spending caps and transaction logging
-import type { Address, Hash } from 'viem';
+// viem types imported on-demand within class methods
 import type { X402ServiceBudget, X402TransactionLog, X402ClientConfig } from './types.js';
 
 /**

@@ -53,10 +53,6 @@ export function wrapWithX402(
   wallet: any,
   config?: X402ClientConfig
 ): typeof globalThis.fetch {
-  const client = new X402Client(wallet, config);
-
-  // Override the global fetch used by X402Client
-  const originalGlobalFetch = globalThis.fetch;
   const wrappedClient = new X402Client(wallet, config);
 
   return async (input: string | URL | Request, init?: RequestInit) => {

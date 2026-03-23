@@ -152,8 +152,10 @@ export class StellarX402Adapter {
    * Returns the XDR-encoded transaction envelope for signing and submission.
    */
   async buildPaymentTransaction(request: StellarPaymentRequest): Promise<string> {
-    let StellarSdk: typeof import('@stellar/stellar-sdk');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let StellarSdk: any;
     try {
+      // @ts-expect-error — @stellar/stellar-sdk is an optional peer dependency
       StellarSdk = await import('@stellar/stellar-sdk');
     } catch {
       throw new Error(

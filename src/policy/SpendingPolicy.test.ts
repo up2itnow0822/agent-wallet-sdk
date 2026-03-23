@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { SpendingPolicy } from './SpendingPolicy.js';
 import type { PaymentIntent, SpendingPolicyConfig } from './SpendingPolicy.js';
 

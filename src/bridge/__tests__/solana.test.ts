@@ -86,7 +86,7 @@ describe('USDC contract addresses', () => {
   it('all EVM chains have valid 0x addresses', () => {
     const chains = Object.keys(USDC_CONTRACT);
     expect(chains.length).toBe(10);
-    for (const [chain, addr] of Object.entries(USDC_CONTRACT)) {
+    for (const [_chain, addr] of Object.entries(USDC_CONTRACT)) {
       expect(addr).toMatch(/^0x[0-9a-fA-F]{40}$/);
     }
   });

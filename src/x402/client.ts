@@ -3,31 +3,27 @@
  * x402 Payment Client — automatic HTTP 402 payment handling for AgentWallet.
  *
  * Wraps the standard fetch API to transparently handle 402 Payment Required
- * responses using the x402 protocol. Supports multi-chain USDC payments across
- * all 10 mainnet chains configured in x402/types.ts.
+ * responses using the x402 protocol. Supports multi-chain, multi-asset payments
+ * (USDC, USDT, DAI, WETH, and any token in the TokenRegistry) across all 11
+ * mainnet chains configured in x402/types.ts.
  *
- * Flow: fetch → 402 detected → parse payment requirements → budget check →
- *       execute USDC transfer → retry request with X-PAYMENT header.
+ * Flow: fetch → 402 detected → parse payment requirements → resolve asset address
+ *       via TokenRegistry → budget check → execute ERC-20 transfer → retry with
+ *       X-PAYMENT header.
  */
-// x402 Client — automatic 402 payment handling for AgentWallet
+// x402 Client — automatic 402 payment handling for AgentWallet (v6: multi-asset)
 import type { Address, Hash } from 'viem';
-import { encodeFunctionData, parseAbi } from 'viem';
 import type {
   X402PaymentRequired,
   X402PaymentRequirements,
   X402PaymentPayload,
-  X402SettlementResponse,
   X402ClientConfig,
   X402TransactionLog,
 } from './types.js';
-import { USDC_ADDRESSES, DEFAULT_SUPPORTED_NETWORKS } from './types.js';
+import { DEFAULT_SUPPORTED_NETWORKS } from './types.js';
 import { X402BudgetTracker } from './budget.js';
 import { agentTransferToken, checkBudget } from '../index.js';
-
-// ERC20 transfer ABI for encoding
-const ERC20_TRANSFER_ABI = parseAbi([
-  'function transfer(address to, uint256 amount) returns (bool)',
-]);
+import { resolveAssetAddress } from './multi-asset.js';
 
 /**
  * [MAX-ADDED] x402 Payment Client for AgentWallet.
@@ -175,15 +171,26 @@ export class X402Client {
 
   /**
    * Select the best compatible payment option from offered requirements.
-   * Prefers: Base network, USDC, exact scheme.
+   * Prefers: Base network, stablecoins, exact scheme.
+   *
+   * v6 change: resolves assets via TokenRegistry in addition to USDC_ADDRESSES.
+   * Now accepts any ERC-20 whose address is in the TokenRegistry for the network.
    */
   selectPaymentOption(accepts: X402PaymentRequirements[]): X402PaymentRequirements | null {
-    // Filter to supported networks and known assets
+    // Filter to supported networks and resolvable assets
     const compatible = accepts.filter(req => {
       if (!this.supportedNetworks.has(req.network)) return false;
-      const networkAssets = this.config.supportedAssets?.[req.network]
-        ?? [USDC_ADDRESSES[req.network]].filter(Boolean);
-      return networkAssets.some(a => a.toLowerCase() === req.asset.toLowerCase());
+
+      // Config override: explicit supportedAssets list
+      if (this.config.supportedAssets?.[req.network]) {
+        return this.config.supportedAssets[req.network].some(
+          a => a.toLowerCase() === req.asset.toLowerCase()
+        );
+      }
+
+      // v6: resolve via TokenRegistry — accept any known ERC-20 on this network
+      const resolved = resolveAssetAddress(req.asset, req.network);
+      return resolved != null;
     });
 
     if (compatible.length === 0) return null;
@@ -198,10 +205,22 @@ export class X402Client {
 
   /**
    * Execute the payment via AgentWallet's agentTransferToken.
+   *
+   * v6 change: resolves asset address via TokenRegistry before executing.
+   * The 402 response may specify an asset by symbol ("USDC") or by address.
    */
   private async executePayment(req: X402PaymentRequirements): Promise<{ txHash: Hash }> {
+    // Resolve the actual contract address for the requested asset
+    const resolvedAddress = resolveAssetAddress(req.asset, req.network);
+    if (!resolvedAddress) {
+      throw new X402PaymentError(
+        `Cannot resolve asset "${req.asset}" on network "${req.network}" to a contract address`,
+        req
+      );
+    }
+
     // First check on-chain budget
-    const onChainBudget = await checkBudget(this.wallet, req.asset as Address);
+    const onChainBudget = await checkBudget(this.wallet, resolvedAddress);
     const amount = BigInt(req.amount);
 
     if (amount > onChainBudget.perTxLimit) {
@@ -233,7 +252,7 @@ export class X402Client {
 
     // Execute the ERC20 transfer via AgentWallet (full amount to payee)
     const txHash = await agentTransferToken(this.wallet, {
-      token: req.asset as Address,
+      token: resolvedAddress,
       to: req.payTo as Address,
       amount,
     });

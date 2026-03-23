@@ -1,6 +1,8 @@
 # AgentWallet SDK
 
-> **⭐ Star us during GTC Week (Mar 15-20) — NVIDIA's NemoClaw launches Monday with no payment primitive. agent-wallet-sdk is the open-source answer. Help us reach record stars during the biggest AI week of 2026.**
+> **v6.0.0** — TokenRegistry, multi-token EVM transfers, Solana SPL support, x402 multi-asset payments
+>
+> **Patent Pending** — Non-Custodial Multi-Chain Financial Infrastructure System for Autonomous AI Agents (USPTO Provisional, filed March 2026)
 
 Non-custodial AI agent wallet with ERC-8004 on-chain identity, ERC-6551 token-bound accounts, x402 payments, mutual stake escrow, and programmable spending guardrails.
 
@@ -66,6 +68,137 @@ const result = await agentExecute(wallet, {
   value: 10000000000000000n, // 0.01 ETH
 });
 console.log(result.executed ? 'Sent!' : 'Queued for approval');
+```
+
+## Token Registry (v6.0.0)
+
+The `TokenRegistry` ships with 80+ verified token addresses across 11 EVM chains + Solana. No more hard-coding contract addresses.
+
+```typescript
+import { getGlobalRegistry, BASE_REGISTRY, ETHEREUM_REGISTRY } from 'agentwallet-sdk';
+
+// Global registry — all chains loaded
+const registry = getGlobalRegistry();
+
+// Look up a token by symbol + chain
+const usdc = registry.getToken('USDC', 8453); // Base chain ID
+console.log(usdc?.address); // 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
+
+// List all tokens on a chain
+const baseTokens = registry.listTokens(8453);
+console.log(baseTokens.map(t => t.symbol));
+// ['USDC', 'USDT', 'DAI', 'WETH', 'WBTC', 'LINK', 'UNI', 'AAVE', 'LDO', ...]
+
+// Add a custom token
+registry.addToken({
+  symbol: 'MYTOKEN',
+  name: 'My Custom Token',
+  chainId: 8453,
+  address: '0xYourTokenAddress',
+  decimals: 18,
+});
+
+// Native gas token (ETH, POL, AVAX, S) — isNative: true, no ERC-20 transfer needed
+const eth = registry.getToken('ETH', 1);
+console.log(eth?.isNative); // true
+
+// Per-chain convenience exports (global registry, filtered by chain)
+import { BASE_REGISTRY, ARBITRUM_REGISTRY, ETHEREUM_REGISTRY } from 'agentwallet-sdk';
+const arbUsdc = ARBITRUM_REGISTRY.getToken('USDC', 42161);
+```
+
+## Multi-Token EVM Transfers (v6.0.0)
+
+Send any ERC-20 token or native gas to any address with automatic decimal handling.
+
+```typescript
+import { createWallet, sendToken, sendNative, getTokenBalance, getNativeBalance, getBalances } from 'agentwallet-sdk';
+
+const wallet = createWallet({ accountAddress: '0x...', chain: 'base', walletClient });
+
+// Send 100 USDC (human-readable amount — no manual decimal math)
+const txHash = await sendToken(wallet, {
+  symbol: 'USDC',
+  to: '0xRecipient',
+  amount: '100',       // 100 USDC → internally converted to 100_000_000 (6 decimals)
+});
+
+// Send 0.5 ETH (native gas)
+const nativeTxHash = await sendNative(wallet, '0xRecipient', '0.5');
+
+// Check a single token balance (returns human-readable string)
+const usdcBalance = await getTokenBalance(wallet, 'USDC');
+console.log(usdcBalance); // "250.00"
+
+// Check native balance
+const ethBalance = await getNativeBalance(wallet);
+console.log(ethBalance); // "1.234567890123456789"
+
+// Check all registered token balances at once
+const balances = await getBalances(wallet);
+// [{ symbol: 'USDC', balance: '250.00', raw: 250000000n }, { symbol: 'WETH', ... }, ...]
+```
+
+## Decimal Helpers (v6.0.0)
+
+Convert between on-chain raw amounts and human-readable values without hunting for decimal counts.
+
+```typescript
+import { toRaw, toHuman, formatBalance } from 'agentwallet-sdk';
+
+// Human → raw (for contract calls)
+const raw = toRaw('100.50', 6);   // → 100_500_000n (USDC 6 decimals)
+const rawEth = toRaw('1.5', 18);  // → 1_500_000_000_000_000_000n
+
+// Raw → human-readable string
+const human = toHuman(100_500_000n, 6);  // → "100.5"
+const humanEth = toHuman(1_500_000_000_000_000_000n, 18); // → "1.5"
+
+// Format with rounding and symbol
+const display = formatBalance(100_500_000n, 6, 'USDC', 2); // → "100.50 USDC"
+const ethDisplay = formatBalance(1_500_000_000_000_000_000n, 18, 'ETH', 4); // → "1.5000 ETH"
+```
+
+## Solana SPL Token Support (v6.0.0)
+
+`SolanaWallet` wraps `@solana/web3.js` as an optional peer dependency — install only if you need Solana.
+
+```bash
+npm install @solana/web3.js @solana/spl-token
+```
+
+```typescript
+import { SolanaWallet } from 'agentwallet-sdk/tokens/solana';
+
+const solWallet = new SolanaWallet({
+  privateKeyBase58: process.env.SOLANA_PRIVATE_KEY!,
+  rpcUrl: 'https://api.mainnet-beta.solana.com', // optional, defaults to mainnet
+});
+
+// Get native SOL balance
+const { sol, lamports } = await solWallet.getSolBalance();
+console.log(`Balance: ${sol} SOL`);
+
+// Send SOL
+const sig = await solWallet.sendSol('RecipientBase58Address', 0.1); // 0.1 SOL
+console.log('Tx:', sig);
+
+// Get SPL token balance (e.g., USDC on Solana)
+const usdcMint = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'; // Solana USDC
+const { amount, decimals } = await solWallet.getSplTokenBalance(usdcMint);
+console.log(`USDC: ${Number(amount) / 10 ** decimals}`);
+
+// Send SPL token
+const splSig = await solWallet.sendSplToken(
+  usdcMint,
+  'RecipientBase58Address',
+  5_000_000n, // 5 USDC (6 decimals)
+);
+console.log('SPL tx:', splSig);
+
+// List all SPL token accounts
+const accounts = await solWallet.listSplTokenAccounts();
+// [{ mint: '...', amount: 5000000n, decimals: 6 }, ...]
 ```
 
 ## Multi-Chain x402 Payments
@@ -322,6 +455,10 @@ await escrow.verify(escrowId);
 
 | Feature | Status | Description |
 |---------|--------|-------------|
+| TokenRegistry | ✅ Live | 80+ verified token addresses across 11 EVM chains + Solana |
+| Multi-Token Transfers | ✅ Live | sendToken, sendNative, getBalances — any ERC-20 or native gas |
+| Solana SPL Tokens | ✅ Live | SolanaWallet with getSolBalance, sendSol, sendSplToken (optional dep) |
+| Decimal Helpers | ✅ Live | toRaw, toHuman, formatBalance — no manual decimal math |
 | Agent Identity | ✅ Live | ERC-8004 Identity Registry — on-chain ERC-721 agent IDs |
 | Agent Reputation | ✅ Live | ERC-8004 Reputation Registry — scored feedback and summaries |
 | Agent Validation | ✅ Live | ERC-8004 Validation Registry — validator request/response |
@@ -348,7 +485,7 @@ await escrow.verify(escrowId);
 | Yield Staking | Aave V3, Compound V3, Morpho Blue strategies |
 | Tax Reporting | Cost basis and gain/loss reporting |
 
-Premium access: [github.com/up2itnow/AgentNexus2](https://github.com/up2itnow/AgentNexus2)
+Premium access: [github.com/up2itnow0822/AgentNexus2](https://github.com/up2itnow0822/AgentNexus2)
 
 ## x402 Protocol: Supported Chains and Payment Rails
 
@@ -432,7 +569,7 @@ const { txHash } = await bridge.bridge({
 
 All USDC addresses are native Circle USDC (not bridged variants).
 
-## Complete Agent Identity Stack (v5.1.0)
+## Complete Agent Identity Stack (v6.0.0)
 
 One npm install now gives any AI agent a wallet, email address, on-chain ID, reputation, and signed payment intents.
 
@@ -464,6 +601,121 @@ await resolver.sendWithPayment({
   chain: 'base',
 });
 ```
+
+## Enterprise Deployment Guide
+
+### Architecture Overview
+
+agent-wallet-sdk is designed for enterprise environments where AI agents need autonomous spending power with hard compliance boundaries. The SDK runs in your infrastructure - no third-party custody, no shared key management service, no data leaving your network.
+
+**Deployment options:**
+
+- **Self-hosted node service:** Run the SDK as a microservice behind your API gateway. Each agent gets its own ERC-6551 wallet with organization-wide SpendingPolicy enforcement.
+- **Embedded in agent runtime:** Import directly into your agent's Node.js/TypeScript process. Wallet keys stay in your process memory, never transmitted.
+- **Containerized (Docker/K8s):** Production-ready with environment variable configuration. Secrets via mounted volumes or your existing secrets manager (Vault, AWS Secrets Manager, GCP Secret Manager).
+
+```bash
+# Docker deployment
+docker run -e WALLET_PRIVATE_KEY_FILE=/secrets/key \
+           -e RPC_URL=https://mainnet.base.org \
+           -v /path/to/secrets:/secrets:ro \
+           agentwallet-sdk:latest
+```
+
+### Network Requirements
+
+- Outbound HTTPS to your chosen RPC provider (Base, Ethereum, Arbitrum, etc.)
+- No inbound ports required
+- Compatible with corporate proxies (standard HTTPS_PROXY env var)
+- Air-gapped deployment supported for key generation; RPC access needed only for transaction broadcast
+
+### High Availability
+
+- Stateless design: wallet state lives on-chain, not in application memory
+- Multiple SDK instances can share the same wallet address safely (nonce management handled)
+- Recommended: run behind a load balancer with health checks on the `/health` endpoint
+
+## Compliance Checklist
+
+Use this checklist when evaluating agent-wallet-sdk for regulated environments.
+
+### Data Residency
+- [x] All wallet keys generated and stored locally - no external key management service
+- [x] No telemetry, analytics, or usage data transmitted to any third party
+- [x] Transaction data stays on public blockchain (Base, Ethereum, etc.) - no proprietary data store
+- [x] SDK source code is open source (MIT) - full audit capability
+
+### Access Control
+- [x] SpendingPolicy enforces per-transaction limits, daily caps, and token-specific restrictions on-chain
+- [x] Transactions exceeding policy limits are queued for human approval - never auto-executed
+- [x] Wallet access revocation via NFT transfer (ERC-6551) - instant, cryptographic, no admin API
+- [x] Role-based access: owner (human) sets policy, agent executes within policy bounds
+
+### Audit Trail
+- [x] Every transaction recorded on-chain with block number, timestamp, and gas cost
+- [x] SpendingPolicy changes are on-chain events - immutable audit log
+- [x] ERC-8004 reputation feedback is on-chain - tamper-proof performance history
+- [x] No off-chain state that could be modified without detection
+
+### Key Management
+- [x] Non-custodial: the organization holds all private keys
+- [x] Compatible with HSMs via standard Ethereum signing interfaces (EIP-712)
+- [x] Key rotation: deploy new ERC-6551 wallet, transfer NFT, old keys become inert
+- [x] No shared secrets between SDK instances or between organization and vendor
+
+## Procurement FAQ
+
+**Q: Is agent-wallet-sdk a SaaS product?**
+No. It's an open-source SDK (MIT license) that you install and run in your infrastructure. There's no hosted service, no subscription, no vendor lock-in. You own the deployment.
+
+**Q: What are the costs?**
+The SDK itself is free. Costs are blockchain gas fees for transactions (typically $0.001-0.01 on Base L2) and your chosen RPC provider. No per-seat, per-agent, or per-transaction licensing fees.
+
+**Q: How does licensing work?**
+MIT license. Use it in commercial products, modify it, distribute it. No copyleft restrictions. No license changes planned - the license is in the git history.
+
+**Q: Who maintains it?**
+AI Agent Economy (https://github.com/up2itnow0822/agent-wallet-sdk). Active development since 2025. Community contributions welcome.
+
+**Q: Can we get a support agreement?**
+Enterprise support packages are available. Contact bill@ai-agent-economy.com for SLA terms.
+
+**Q: Is there vendor lock-in risk?**
+No. The SDK uses standard Ethereum tooling (viem, ERC-6551, ERC-8004). If you stop using the SDK, your wallets, keys, and on-chain identity continue to work with any Ethereum-compatible tool.
+
+**Q: Does it work with our existing agent framework?**
+Yes. The SDK is framework-agnostic. It works with OpenClaw, NanoClaw, LangChain, CrewAI, AutoGPT, Anthropic Claude tool-use, OpenAI Assistants, or any Node.js/TypeScript environment. agentpay-mcp adds MCP protocol support for Claude and other MCP-compatible clients.
+
+**Q: What chains are supported?**
+17 chains via CCTP bridging. Primary: Base (recommended for low gas costs), Ethereum, Arbitrum, Polygon, Optimism. See Supported Chains table above.
+
+## SOC 2 Readiness Matrix
+
+| SOC 2 Criteria | agent-wallet-sdk Coverage | Notes |
+|---|---|---|
+| **CC6.1** Logical access security | SpendingPolicy on-chain enforcement, ERC-6551 NFT-based access control | Access revocation is cryptographic via NFT transfer |
+| **CC6.2** System component access | Non-custodial - no vendor access to keys or wallets | Organization controls all secrets |
+| **CC6.3** Access removal | NFT transfer = instant revocation of all agent permissions | No "forgot to deprovision" risk |
+| **CC7.1** System monitoring | All transactions on-chain with block explorer visibility | Real-time alerting via standard blockchain monitoring tools |
+| **CC7.2** Anomaly detection | SpendingPolicy caps prevent anomalous spend automatically | Over-limit transactions queue for human review |
+| **CC8.1** Change management | Open-source - all changes in public git history | Audit any version, diff any release |
+| **A1.2** Recovery objectives | Stateless SDK + on-chain state = recovery is re-deploy + import keys | No database backups needed |
+| **C1.1** Data confidentiality | No data transmitted to vendor, no telemetry, local-only operation | Private keys never leave your infrastructure |
+| **PI1.1** Processing integrity | Deterministic smart contract execution, on-chain verification | Transaction results are cryptographically verifiable |
+
+### What SOC 2 Auditors Will Ask (And Your Answers)
+
+**"How do you control what the AI agent can spend?"**
+SpendingPolicy smart contracts enforce per-transaction limits, daily caps, and approved token lists on-chain. The agent cannot bypass these limits - they're enforced by the blockchain, not by application code.
+
+**"What happens if an agent is compromised?"**
+The agent can only spend up to its SpendingPolicy limits. Worst case: one day's approved budget. Transfer the NFT to revoke all access immediately. No waiting for key rotation, no certificate revocation lists.
+
+**"Where are the private keys stored?"**
+In your infrastructure. The SDK never transmits keys. Compatible with your existing secrets management (Vault, AWS Secrets Manager, Azure Key Vault, GCP Secret Manager, or local encrypted storage).
+
+**"Can the vendor access our wallets?"**
+No. Non-custodial means we never have your keys. There's no "admin backdoor," no support override, no recovery mechanism that bypasses your key ownership.
 
 ## Links
 
