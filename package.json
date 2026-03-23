@@ -1,12 +1,7 @@
 {
   "name": "agentwallet-sdk",
-<<<<<<< HEAD
   "version": "6.0.4",
   "description": "Non-custodial AI agent wallet SDK. ERC-8004 identity & reputation registries, mutual stake escrow, x402 payments, 17-chain CCTP bridging, ERC-6551 TBA, SpendingPolicy guardrails, Uniswap V3 swap. The agent holds the keys.",
-=======
-  "version": "6.0.2",
-  "description": "Non-custodial AI agent wallet SDK. Full multi-chain, multi-token support with TokenRegistry, ERC-20/native transfers, Solana SPL, multi-asset x402 payments, ERC-8004 identity & reputation, mutual stake escrow, CCTP bridging, SpendingPolicy guardrails, Uniswap V3 swap. The agent holds the keys. Patent Pending.",
->>>>>>> 91247d5d38da8954b8bd07a9e8362ae64588e101
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
@@ -61,13 +56,11 @@
   },
   "devDependencies": {
     "@elizaos/core": "^1.5.4",
-<<<<<<< HEAD
     "@types/node": "^25.5.0",
-=======
     "@typescript-eslint/eslint-plugin": "^8.57.1",
     "@typescript-eslint/parser": "^8.57.1",
     "eslint": "^10.1.0",
->>>>>>> 91247d5d38da8954b8bd07a9e8362ae64588e101
+    "globals": "^16.5.0",
     "typescript": "5.3.3",
     "vitest": "4.0.18",
     "wrangler": "^4.72.0"
