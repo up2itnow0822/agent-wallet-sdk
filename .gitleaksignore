@@ -1,0 +1,14 @@
+# Public contract addresses and test fixture keys — not real secrets
+dist/bridge/solana.d.ts:generic-api-key:25
+dist/bridge/types.js:generic-api-key:59
+dist/x402/__tests__/budget.test.js:generic-api-key:41
+dist/x402/__tests__/budget.test.js:generic-api-key:61
+dist/x402/__tests__/budget.test.js:generic-api-key:81
+dist/x402/__tests__/budget.test.js:generic-api-key:93
+dist/bridge/solana.js:generic-api-key:28
+src/x402/__tests__/budget.test.ts:generic-api-key:49
+src/x402/__tests__/budget.test.ts:generic-api-key:72
+src/x402/__tests__/budget.test.ts:generic-api-key:94
+src/x402/__tests__/budget.test.ts:generic-api-key:106
+src/bridge/solana.ts:generic-api-key:54
+test/chains/abstract-x402.test.ts:generic-api-key:171

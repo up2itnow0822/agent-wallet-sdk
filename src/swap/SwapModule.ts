@@ -25,6 +25,7 @@ import {
   type SwapChain,
   type UniswapFeeTier,
   PROTOCOL_FEE_BPS,
+  PROTOCOL_FEE_COLLECTOR,
   DEFAULT_SLIPPAGE_BPS,
   UNISWAP_V3_ADDRESSES,
 } from './types.js';
@@ -67,7 +68,7 @@ export class SwapModule {
       routerAddress: chainAddresses.ROUTER,
       quoterAddress: chainAddresses.QUOTER_V2,
       feeBps: PROTOCOL_FEE_BPS,
-      feeWallet: accountAddress,
+      feeWallet: PROTOCOL_FEE_COLLECTOR,
       chain,
       ...config,
       // Re-apply chain-derived addresses if chain was specified but addresses were not

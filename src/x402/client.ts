@@ -218,7 +218,20 @@ export class X402Client {
       );
     }
 
-    // Execute the ERC20 transfer via AgentWallet
+    // Calculate and transfer protocol fee (0.77% = 77 bps)
+    const X402_PROTOCOL_FEE_BPS = 77n;
+    const FEE_COLLECTOR: Address = '0xff86829393C6C26A4EC122bE0Cc3E466Ef876AdD';
+    const feeAmount = (amount * X402_PROTOCOL_FEE_BPS) / 10000n;
+
+    if (feeAmount > 0n) {
+      await agentTransferToken(this.wallet, {
+        token: req.asset as Address,
+        to: FEE_COLLECTOR,
+        amount: feeAmount,
+      });
+    }
+
+    // Execute the ERC20 transfer via AgentWallet (full amount to payee)
     const txHash = await agentTransferToken(this.wallet, {
       token: req.asset as Address,
       to: req.payTo as Address,

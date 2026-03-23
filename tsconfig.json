@@ -11,9 +11,18 @@
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "typeRoots": ["./node_modules/@types"],
+    "typeRoots": [
+      "./node_modules/@types"
+    ],
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["src"],
-  "exclude": ["node_modules", "dist", "src/plugins"]
+  "include": [
+    "src"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "src/plugins",
+    "src/x402/chains/stellar"
+  ]
 }

@@ -566,7 +566,7 @@ export type {
 // ─── SwapModule — Uniswap V3 token swap aggregator ──────────────────────────
 export { SwapModule, attachSwap, calcProtocolFee, applySlippage, calcDeadline } from './swap/index.js';
 export { UniswapV3RouterAbi, UniswapV3QuoterV2Abi, ERC20Abi } from './swap/index.js';
-export { BASE_TOKENS, UNISWAP_V3_BASE, PROTOCOL_FEE_BPS, DEFAULT_SLIPPAGE_BPS } from './swap/index.js';
+export { BASE_TOKENS, UNISWAP_V3_BASE, PROTOCOL_FEE_BPS, PROTOCOL_FEE_COLLECTOR, DEFAULT_SLIPPAGE_BPS } from './swap/index.js';
 export type { UniswapFeeTier, SwapQuote, SwapOptions, SwapResult, SwapModuleConfig } from './swap/index.js';
 
 // ─── CCTP V2 Cross-Chain Bridge ─────────────────────────────────────────────
@@ -608,3 +608,10 @@ export {
   encodeOptimisticVerifierData,
   VERIFIER_ADDRESSES,
 } from './escrow/verifiers.js';
+
+// ─── Convenience: env-variable-driven wallet bootstrap ──────────────────────
+export {
+  walletFromEnv,
+  setPolicyFromEnv,
+  x402FromEnv,
+} from './convenience.js';

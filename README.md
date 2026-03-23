@@ -468,7 +468,7 @@ await resolver.sendWithPayment({
 ## Links
 
 - [ERC-8004 Spec](https://eips.ethereum.org/EIPS/eip-8004)
-- [GitHub](https://github.com/agentnexus/agent-wallet-sdk)
+- [GitHub](https://github.com/up2itnow0822/agent-wallet-sdk)
 - [npm](https://www.npmjs.com/package/agentwallet-sdk)
 
 ## License

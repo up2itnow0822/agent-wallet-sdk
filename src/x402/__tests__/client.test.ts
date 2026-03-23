@@ -69,7 +69,7 @@ describe('X402Client', () => {
       expect(parsed!.accepts[0].amount).toBe('500000');
     });
 
-    it('returns null for unparseable 402', async () => {
+    it('returns null for unparsable 402', async () => {
       const client = new X402Client(mockWallet, { autoPay: false });
       const response = new Response('Payment Required', { status: 402 });
       const parsed = await client.parse402Response(response);

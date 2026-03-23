@@ -134,5 +134,7 @@ export const UNISWAP_V3_BASE = {
 
 /** Protocol fee in bps — 0.875% */
 export const PROTOCOL_FEE_BPS = 875;
+/** Protocol fee collector address (all EVM chains) */
+export const PROTOCOL_FEE_COLLECTOR = '0xff86829393C6C26A4EC122bE0Cc3E466Ef876AdD' as const;
 /** Default slippage in bps — 0.5% */
 export const DEFAULT_SLIPPAGE_BPS = 50;
