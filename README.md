@@ -1,31 +1,29 @@
 # AgentWallet SDK
 
-> **v6.0.0** — TokenRegistry, multi-token EVM transfers, Solana SPL support, x402 multi-asset payments
+> **v6.0.0** · MIT · **Patent Pending**
 >
-> **Patent Pending** — Non-Custodial Multi-Chain Financial Infrastructure System for Autonomous AI Agents (USPTO Provisional, filed March 2026)
+> USPTO Provisional filed March 2026: "Non-Custodial Multi-Chain Financial Infrastructure System for Autonomous AI Agents"
 
-Non-custodial AI agent wallet with ERC-8004 on-chain identity, ERC-6551 token-bound accounts, x402 payments, mutual stake escrow, and programmable spending guardrails.
+**Your AI agent needs to pay for things. Giving it your credit card is insane.**
 
-Agent Wallet gives AI agents autonomous spending power with hard on-chain limits. No more choosing between "agent can drain everything" and "every transaction needs manual approval."
-
-> **ERC-8004 Ready:** Maps directly to [ERC-8004 (Trustless Agents)](https://eips.ethereum.org/EIPS/eip-8004) — your agent's ERC-6551 wallet NFT doubles as its on-chain identity handle, with built-in Identity Registry, Reputation Registry, and Validation Registry clients.
+The actual problem: your agent is in a loop, it hits a paid API, and it needs to pay. The naive solution (raw wallet + private key) means one prompt injection or runaway loop drains everything. AgentWallet SDK gives your agent a wallet with hard on-chain spending limits, human approval by default, and no custody of your keys.
 
 ```
-Agent wants to spend $15 → ✅ Auto-approved (under $25 limit)
-Agent wants to spend $500 → ⏳ Queued for your approval
-Agent spent $490 today → 🛑 Next tx queued ($500/day limit hit)
+Agent wants to spend $0.50  → ✅ Auto-approved (under your $1/tx threshold)
+Agent wants to spend $50    → ⏳ Queued — you get notified to approve or reject
+Agent spent $9.50 today     → 🛑 Next tx blocked ($10/day cap hit)
 ```
 
-## Why Agent Wallet?
+The caps are enforced by smart contract. Application code — including the agent itself — cannot override them.
+
+## Why Not Just Give the Agent a Wallet?
 
 | Approach | Problem |
 |----------|---------|
-| Raw EOA wallet | Agent can drain everything. One prompt injection = rugged. |
-| Multisig (Safe) | Every tx needs human sigs. Kills agent autonomy. |
-| Custodial API (Stripe) | Centralized, KYC friction, not crypto-native. |
-| **Agent Wallet** | **Agents spend freely within limits. Everything else queues for approval.** |
-
-Built on **ERC-6551** (token-bound accounts). Your agent's wallet is tied to an NFT — portable, auditable, fully on-chain.
+| Raw EOA wallet | One prompt injection or loop bug = everything drained |
+| Multisig (Safe) | Every transaction needs manual signatures — kills the point of automation |
+| Custodial API | Centralized, KYC friction, not crypto-native |
+| **AgentWallet SDK** | **On-chain limits + human approval threshold + non-custodial. Agent spends within bounds; everything else queues.** |
 
 ## Quick Start
 
@@ -33,135 +31,312 @@ Built on **ERC-6551** (token-bound accounts). Your agent's wallet is tied to an 
 npm install agentwallet-sdk viem
 ```
 
-### Create a Wallet
-
-The `chain` parameter selects which network the wallet operates on. Supported values:
-`'base'` | `'ethereum'` | `'arbitrum'` | `'polygon'` | `'optimism'` | `'avalanche'` |
-`'unichain'` | `'linea'` | `'sonic'` | `'worldchain'` | `'base-sepolia'`
+### Set Up a Wallet with Spend Caps
 
 ```typescript
-import { createWallet, setSpendPolicy, agentExecute, NATIVE_TOKEN } from 'agentwallet-sdk';
+import { createWallet, setSpendPolicy, NATIVE_TOKEN } from 'agentwallet-sdk';
 import { createWalletClient, http } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { base } from 'viem/chains';
 
-const account = privateKeyToAccount('0x...');
+const account = privateKeyToAccount(process.env.AGENT_PRIVATE_KEY as `0x${string}`);
 const walletClient = createWalletClient({ account, chain: base, transport: http() });
 
 const wallet = createWallet({
-  accountAddress: '0xYourAgentWallet',
-  chain: 'base',  // or 'arbitrum', 'polygon', 'optimism', etc.
+  accountAddress: process.env.AGENT_WALLET_ADDRESS as `0x${string}`,
+  chain: 'base',
   walletClient,
 });
 
-// Set a $25/tx, $500/day spend policy for ETH
+// Spend policy — lives on-chain, not in your app code
+// Agent cannot spend more than this even if instructed to
 await setSpendPolicy(wallet, {
-  token: NATIVE_TOKEN,
-  perTxLimit: 25000000000000000n,  // 0.025 ETH
-  periodLimit: 500000000000000000n, // 0.5 ETH
-  periodLength: 86400,
+  token: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', // USDC on Base
+  perTxLimit: 5_000_000n,    // $5 max per transaction
+  periodLimit: 50_000_000n,  // $50/day hard cap
+  periodLength: 86400,       // resets every 24 hours
 });
-
-// Agent executes — auto-approved if within limits, queued if over
-const result = await agentExecute(wallet, {
-  to: '0xRecipient',
-  value: 10000000000000000n, // 0.01 ETH
-});
-console.log(result.executed ? 'Sent!' : 'Queued for approval');
 ```
 
-## Token Registry (v6.0.0)
-
-The `TokenRegistry` ships with 80+ verified token addresses across 11 EVM chains + Solana. No more hard-coding contract addresses.
+### Pay for an API (the 402 Flow)
 
 ```typescript
-import { getGlobalRegistry, BASE_REGISTRY, ETHEREUM_REGISTRY } from 'agentwallet-sdk';
+import { createX402Client } from 'agentwallet-sdk';
 
-// Global registry — all chains loaded
+const x402 = createX402Client(wallet, {
+  supportedNetworks: ['base:8453'],
+  globalDailyLimit: 50_000_000n,    // matches spend policy
+  globalPerRequestMax: 5_000_000n,  // $5 max per request
+  requireApproval: true,            // human-in-the-loop (default)
+});
+
+// Agent hits a premium API and gets 402 — SDK handles it
+const response = await x402.fetch('https://api.example.com/premium-report');
+const data = await response.json();
+// Cost: $0.50 USDC, auto-approved (under $5 threshold)
+// Every payment: tx hash on Base, auditable on basescan.org
+```
+
+## The Trust Layer
+
+This is what makes supervised payments different from autonomous payments.
+
+### Simulation Mode
+
+Before any real payment, run in simulation to see exactly what would happen:
+
+```typescript
+const x402 = createX402Client(wallet, {
+  supportedNetworks: ['base:8453'],
+  globalDailyLimit: 50_000_000n,
+  globalPerRequestMax: 5_000_000n,
+  dryRun: true,  // no funds move
+});
+
+const response = await x402.fetch('https://api.example.com/premium-report');
+// Response: { simulated: true, wouldHavePaid: '0.50 USDC', withinLimits: true, dailyTotal: '2.00 USDC' }
+```
+
+### Human Approval for High-Value Payments
+
+```typescript
+import { createWallet, agentExecute } from 'agentwallet-sdk';
+
+// Transactions above your per-tx limit queue for approval
+const result = await agentExecute(wallet, {
+  to: '0xRecipient',
+  value: 50_000_000_000_000_000n, // 0.05 ETH (~$130)
+});
+
+if (result.executed) {
+  console.log('Sent:', result.txHash);
+} else {
+  console.log('Queued for approval — tx ID:', result.queueId);
+  // Your approval system gets notified; agent waits or continues other work
+}
+```
+
+### Explainability — Agent Must Show Its Work
+
+Before any payment above your threshold, the agent surfaces:
+- What it's paying for
+- What the expected outcome is
+- What it will do if the payment fails
+
+```typescript
+const paymentIntent = {
+  url: 'https://api.example.com/market-data',
+  amount: '2.00 USDC',
+  reason: 'Fetching historical price data for AAPL 2023-2024',
+  expectedOutcome: 'CSV with daily OHLCV data, ~500 rows',
+  fallback: 'Use cached data from 2024-01-15 (3 months old)',
+};
+
+// Human sees this before approving anything above threshold
+const approved = await requestHumanApproval(paymentIntent);
+if (!approved) {
+  return useFallback(paymentIntent.fallback);
+}
+```
+
+### Safe Abort
+
+When a payment fails or is rejected, the agent handles it gracefully — not by retrying indefinitely:
+
+```typescript
+const result = await x402.fetch('https://api.example.com/premium-data');
+
+if (!result.ok) {
+  switch (result.status) {
+    case 402:
+      // Payment rejected or limit hit — fall back to free alternative
+      return await fetchFreeAlternative();
+    case 'limit-exceeded':
+      // Daily cap hit — log it, stop trying today
+      console.log('Daily spend cap reached. Resuming tomorrow.');
+      return null;
+    case 'approval-rejected':
+      // Human said no — respect that
+      console.log('Payment rejected by human. Using cached data.');
+      return getCachedResult();
+  }
+}
+```
+
+## Production-Ready: Failure Handling, Retries, Fallbacks
+
+Real agent deployments fail. Here's how to handle it.
+
+### Retry with Backoff
+
+```typescript
+import { createX402Client } from 'agentwallet-sdk';
+
+async function fetchWithRetry(
+  x402: ReturnType<typeof createX402Client>,
+  url: string,
+  maxAttempts = 3,
+): Promise<Response> {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const response = await x402.fetch(url);
+      if (response.ok) return response;
+
+      // Don't retry on rejected payments or limit hits
+      if (['limit-exceeded', 'approval-rejected'].includes(response.status as string)) {
+        throw new Error(`Payment stopped: ${response.status}`);
+      }
+    } catch (err) {
+      if (attempt === maxAttempts) throw err;
+      // Exponential backoff: 1s, 2s, 4s
+      await new Promise(resolve => setTimeout(resolve, 1000 * 2 ** (attempt - 1)));
+    }
+  }
+  throw new Error('Max retries exceeded');
+}
+```
+
+### Fallback to Free Data Sources
+
+```typescript
+async function getMarketData(symbol: string): Promise<MarketData> {
+  // Try paid source first (better data quality)
+  try {
+    const response = await fetchWithRetry(x402, `https://paid-api.com/data/${symbol}`);
+    return await response.json();
+  } catch (err) {
+    console.warn(`Paid API unavailable: ${err.message}. Falling back to free source.`);
+    // Fall back to free source (rate-limited, less complete)
+    const fallback = await fetch(`https://free-api.com/data/${symbol}`);
+    return await fallback.json();
+  }
+}
+```
+
+### Budget Guard — Stop Before You Hit the Cap
+
+```typescript
+import { getRemainingBudget } from 'agentwallet-sdk';
+
+async function checkBudgetBeforeLoop(wallet: Wallet, estimatedCostPerCall: bigint, callCount: number) {
+  const remaining = await getRemainingBudget(wallet, '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913');
+  const estimatedTotal = estimatedCostPerCall * BigInt(callCount);
+
+  if (estimatedTotal > remaining) {
+    const maxCalls = Number(remaining / estimatedCostPerCall);
+    console.warn(`Budget allows ${maxCalls} of ${callCount} planned calls. Adjusting.`);
+    return maxCalls;
+  }
+  return callCount;
+}
+```
+
+## Non-Custodial Architecture
+
+Your private key never leaves your infrastructure. The SDK interacts with on-chain contracts; no third party holds or validates your keys.
+
+```
+Your Infrastructure          On-Chain
+─────────────────────        ────────────────────────────────────
+  Agent process              AgentAccountV2 contract
+  ├── private key (local)    ├── SpendingPolicy (your limits)
+  ├── agentwallet-sdk        ├── Tx queue (over-limit txs)
+  └── signs transactions     └── Audit log (immutable)
+        │                          ▲
+        └──── broadcasts ──────────┘
+```
+
+**What this means:** If you stop using AgentWallet SDK tomorrow, your wallets, keys, and on-chain limits continue to work with any Ethereum-compatible tool. No vendor lock-in.
+
+## Token Registry
+
+80+ verified token addresses across 11 EVM chains + Solana. No hard-coded contract addresses.
+
+```typescript
+import { getGlobalRegistry } from 'agentwallet-sdk';
+
 const registry = getGlobalRegistry();
 
-// Look up a token by symbol + chain
 const usdc = registry.getToken('USDC', 8453); // Base chain ID
 console.log(usdc?.address); // 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
 
-// List all tokens on a chain
 const baseTokens = registry.listTokens(8453);
-console.log(baseTokens.map(t => t.symbol));
-// ['USDC', 'USDT', 'DAI', 'WETH', 'WBTC', 'LINK', 'UNI', 'AAVE', 'LDO', ...]
-
-// Add a custom token
-registry.addToken({
-  symbol: 'MYTOKEN',
-  name: 'My Custom Token',
-  chainId: 8453,
-  address: '0xYourTokenAddress',
-  decimals: 18,
-});
-
-// Native gas token (ETH, POL, AVAX, S) — isNative: true, no ERC-20 transfer needed
-const eth = registry.getToken('ETH', 1);
-console.log(eth?.isNative); // true
-
-// Per-chain convenience exports (global registry, filtered by chain)
-import { BASE_REGISTRY, ARBITRUM_REGISTRY, ETHEREUM_REGISTRY } from 'agentwallet-sdk';
-const arbUsdc = ARBITRUM_REGISTRY.getToken('USDC', 42161);
+// ['USDC', 'USDT', 'DAI', 'WETH', 'WBTC', 'LINK', 'UNI', 'AAVE', ...]
 ```
 
-## Multi-Token EVM Transfers (v6.0.0)
-
-Send any ERC-20 token or native gas to any address with automatic decimal handling.
+## Multi-Token Transfers
 
 ```typescript
-import { createWallet, sendToken, sendNative, getTokenBalance, getNativeBalance, getBalances } from 'agentwallet-sdk';
+import { sendToken, sendNative, getTokenBalance, getBalances } from 'agentwallet-sdk';
 
-const wallet = createWallet({ accountAddress: '0x...', chain: 'base', walletClient });
-
-// Send 100 USDC (human-readable amount — no manual decimal math)
+// Send 100 USDC — no manual decimal math
 const txHash = await sendToken(wallet, {
   symbol: 'USDC',
   to: '0xRecipient',
-  amount: '100',       // 100 USDC → internally converted to 100_000_000 (6 decimals)
+  amount: '100',  // → internally 100_000_000 (6 decimals)
 });
 
-// Send 0.5 ETH (native gas)
-const nativeTxHash = await sendNative(wallet, '0xRecipient', '0.5');
-
-// Check a single token balance (returns human-readable string)
+// Check balances
 const usdcBalance = await getTokenBalance(wallet, 'USDC');
 console.log(usdcBalance); // "250.00"
 
-// Check native balance
-const ethBalance = await getNativeBalance(wallet);
-console.log(ethBalance); // "1.234567890123456789"
-
-// Check all registered token balances at once
-const balances = await getBalances(wallet);
-// [{ symbol: 'USDC', balance: '250.00', raw: 250000000n }, { symbol: 'WETH', ... }, ...]
+const allBalances = await getBalances(wallet);
+// [{ symbol: 'USDC', balance: '250.00', raw: 250000000n }, ...]
 ```
 
-## Decimal Helpers (v6.0.0)
-
-Convert between on-chain raw amounts and human-readable values without hunting for decimal counts.
+## Multi-Chain Support
 
 ```typescript
-import { toRaw, toHuman, formatBalance } from 'agentwallet-sdk';
-
-// Human → raw (for contract calls)
-const raw = toRaw('100.50', 6);   // → 100_500_000n (USDC 6 decimals)
-const rawEth = toRaw('1.5', 18);  // → 1_500_000_000_000_000_000n
-
-// Raw → human-readable string
-const human = toHuman(100_500_000n, 6);  // → "100.5"
-const humanEth = toHuman(1_500_000_000_000_000_000n, 18); // → "1.5"
-
-// Format with rounding and symbol
-const display = formatBalance(100_500_000n, 6, 'USDC', 2); // → "100.50 USDC"
-const ethDisplay = formatBalance(1_500_000_000_000_000_000n, 18, 'ETH', 4); // → "1.5000 ETH"
+// Same API across chains — just change 'chain'
+const wallet = createWallet({
+  accountAddress: '0x...',
+  chain: 'arbitrum',  // or 'base', 'polygon', 'optimism', etc.
+  walletClient,
+});
 ```
 
-## Solana SPL Token Support (v6.0.0)
+| Chain | x402 | Bridge | Swap |
+|-------|:----:|:------:|:----:|
+| Base (recommended) | ✅ | ✅ | ✅ |
+| Arbitrum | ✅ | ✅ | ✅ |
+| Optimism | ✅ | ✅ | ✅ |
+| Polygon | ✅ | ✅ | ✅ |
+| Ethereum | ✅ | ✅ | — |
+| Avalanche | ✅ | ✅ | — |
+| Unichain, Linea, Sonic, Worldchain | ✅ | ✅ | — |
+| Base Sepolia (testnet) | ✅ | — | — |
 
-`SolanaWallet` wraps `@solana/web3.js` as an optional peer dependency — install only if you need Solana.
+## Uniswap V3 Swaps
+
+```typescript
+import { attachSwap } from 'agentwallet-sdk/swap';
+import { BASE_TOKENS } from 'agentwallet-sdk';
+
+const swap = attachSwap(wallet, { chain: 'base' });
+
+const result = await swap.swap(BASE_TOKENS.USDC, BASE_TOKENS.WETH, 100_000_000n, {
+  slippageBps: 50, // 0.5% slippage
+});
+console.log('Swap tx:', result.txHash);
+```
+
+## CCTP V2 Bridging
+
+```typescript
+import { createBridge } from 'agentwallet-sdk';
+
+const bridge = createBridge(walletClient, 'base');
+
+// Bridge 100 USDC Base → Arbitrum (~12 seconds)
+const result = await bridge.bridge(100_000_000n, 'arbitrum', {
+  minFinalityThreshold: 0, // FAST attestation
+});
+console.log('Completed in', result.elapsedMs, 'ms');
+// Verified mainnet: Base → Arbitrum 0.50 USDC
+// Burn: 0xfedbfaa4b3a9fbadd36668c50c2ee7fc7e32072e2bd409e00c46020a35329129
+```
+
+## Solana SPL Support
 
 ```bash
 npm install @solana/web3.js @solana/spl-token
@@ -172,558 +347,95 @@ import { SolanaWallet } from 'agentwallet-sdk/tokens/solana';
 
 const solWallet = new SolanaWallet({
   privateKeyBase58: process.env.SOLANA_PRIVATE_KEY!,
-  rpcUrl: 'https://api.mainnet-beta.solana.com', // optional, defaults to mainnet
 });
 
-// Get native SOL balance
-const { sol, lamports } = await solWallet.getSolBalance();
-console.log(`Balance: ${sol} SOL`);
+const { sol } = await solWallet.getSolBalance();
+const sig = await solWallet.sendSol('RecipientBase58Address', 0.1);
 
-// Send SOL
-const sig = await solWallet.sendSol('RecipientBase58Address', 0.1); // 0.1 SOL
-console.log('Tx:', sig);
-
-// Get SPL token balance (e.g., USDC on Solana)
-const usdcMint = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'; // Solana USDC
+// USDC on Solana
+const usdcMint = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 const { amount, decimals } = await solWallet.getSplTokenBalance(usdcMint);
-console.log(`USDC: ${Number(amount) / 10 ** decimals}`);
-
-// Send SPL token
-const splSig = await solWallet.sendSplToken(
-  usdcMint,
-  'RecipientBase58Address',
-  5_000_000n, // 5 USDC (6 decimals)
-);
-console.log('SPL tx:', splSig);
-
-// List all SPL token accounts
-const accounts = await solWallet.listSplTokenAccounts();
-// [{ mint: '...', amount: 5000000n, decimals: 6 }, ...]
 ```
 
-## Multi-Chain x402 Payments
-
-Pay any x402-gated API from any supported chain. The client automatically selects
-the correct USDC address for the network the server requests.
+## On-Chain Identity (ERC-8004)
 
 ```typescript
-import { createWallet, createX402Client } from 'agentwallet-sdk';
-import { createWalletClient, http } from 'viem';
-import { privateKeyToAccount } from 'viem/accounts';
-import { arbitrum } from 'viem/chains';
-
-const account = privateKeyToAccount(process.env.AGENT_PRIVATE_KEY as `0x${string}`);
-const walletClient = createWalletClient({ account, chain: arbitrum, transport: http() });
-
-// Wallet on Arbitrum — pays with Arbitrum USDC
-const wallet = createWallet({
-  accountAddress: '0xYourAgentWallet',
-  chain: 'arbitrum',
-  walletClient,
-});
-
-const x402 = createX402Client(wallet, {
-  // Accept payment requests on any supported mainnet chain
-  supportedNetworks: ['arbitrum:42161', 'base:8453', 'optimism:10', 'polygon:137'],
-  globalDailyLimit: 10_000_000n, // 10 USDC/day cap
-  globalPerRequestMax: 1_000_000n, // 1 USDC max per request
-});
-
-// Automatically pays 402 responses with the chain's native USDC
-const response = await x402.fetch('https://api.example.com/premium-data');
-const data = await response.json();
-```
-
-## Multi-Chain Swaps (Uniswap V3)
-
-Swap tokens on Base, Arbitrum, Optimism, or Polygon using the best Uniswap V3 pool.
-
-```typescript
-import { createWallet } from 'agentwallet-sdk';
-import { attachSwap } from 'agentwallet-sdk/swap';
-import { BASE_TOKENS, ARBITRUM_TOKENS } from 'agentwallet-sdk';
-
-// Swap on Base
-const baseWallet = createWallet({ accountAddress: '0x...', chain: 'base', walletClient });
-const baseSwap = attachSwap(baseWallet, { chain: 'base' });
-
-const result = await baseSwap.swap(BASE_TOKENS.WETH, BASE_TOKENS.USDC, 1_000_000_000_000_000n, {
-  slippageBps: 50, // 0.5% slippage
-});
-console.log('Swap tx:', result.txHash);
-
-// Swap on Arbitrum
-const arbWallet = createWallet({ accountAddress: '0x...', chain: 'arbitrum', walletClient });
-const arbSwap = attachSwap(arbWallet, { chain: 'arbitrum' });
-
-const arbResult = await arbSwap.swap(ARBITRUM_TOKENS.USDC, ARBITRUM_TOKENS.WETH, 5_000_000n, {
-  slippageBps: 30,
-});
-console.log('Arbitrum swap tx:', arbResult.txHash);
-```
-
-## CCTP V2 Bridge — EVM to EVM
-
-Bridge USDC between any of the 10 supported EVM chains using Circle's CCTP V2.
-
-```typescript
-import { createBridge } from 'agentwallet-sdk';
-import { createWalletClient, http } from 'viem';
-import { base } from 'viem/chains';
-
-const walletClient = createWalletClient({
-  account: privateKeyToAccount(process.env.AGENT_PRIVATE_KEY as `0x${string}`),
-  chain: base,
-  transport: http(),
-});
-
-const bridge = createBridge(walletClient, 'base');
-
-// Bridge 100 USDC from Base to Arbitrum (~12 seconds with FAST finality)
-const result = await bridge.bridge(100_000_000n, 'arbitrum', {
-  minFinalityThreshold: 0, // FAST attestation
-});
-console.log('Burn tx:', result.burnTxHash);
-console.log('Mint tx:', result.mintTxHash);
-console.log(`Completed in ${result.elapsedMs}ms`);
-```
-
-## CCTP V2 Bridge — EVM to Solana
-
-Bridge USDC from any EVM chain to Solana using CCTP V2 domain 5.
-The EVM burn side is handled automatically; the Solana receive is returned
-as `messageBytes` + `attestation` for submission to Solana's CCTP program.
-
-```typescript
-import { bridgeEVMToSolana } from 'agentwallet-sdk';
-import { createWalletClient, http } from 'viem';
-import { base } from 'viem/chains';
-
-const walletClient = createWalletClient({
-  account: privateKeyToAccount(process.env.AGENT_PRIVATE_KEY as `0x${string}`),
-  chain: base,
-  transport: http(),
-});
-
-// Bridge 50 USDC from Base to Solana
-const result = await bridgeEVMToSolana(walletClient, 50_000_000n, {
-  fromChain: 'base',
-  solanaRecipient: 'YourSolanaWalletAddressInBase58',
-  minFinalityThreshold: 0, // FAST (~12s)
-});
-
-console.log('EVM burn tx:', result.burnTxHash);
-console.log('Attestation ready — submit to Solana TokenMessengerMinterV2');
-console.log('Message bytes:', result.messageBytes);
-console.log('Attestation:', result.attestation);
-// Submit result.messageBytes + result.attestation to the Solana CCTP V2 program:
-// CCTPV2Sm4AdWt5296sk4P66VBZ7bEhcARwFaaS9YPbeC (MessageTransmitterV2)
-```
-
-## CCTP V2 Bridge — Solana to EVM
-
-Receive USDC on an EVM chain from a Solana burn transaction.
-
-```typescript
-import { receiveFromSolanaOnEVM } from 'agentwallet-sdk';
-
-// After initiating a burn on Solana, receive on EVM:
-const result = await receiveFromSolanaOnEVM(walletClient, {
-  messageBytes: '0x...', // from Solana burn transaction
-  messageHash: '0x...',  // keccak256 of messageBytes
-  sourceDomain: 5,       // Solana CCTP domain
-}, {
-  toChain: 'arbitrum',
-  evmRecipient: '0xYourEVMAddress',
-});
-
-console.log('Mint tx:', result.mintTxHash);
-console.log('Received:', result.amount, 'USDC base units on', result.toChain);
-```
-
-## ERC-8004 On-Chain Identity
-
-Register your agent on the ERC-8004 Identity Registry — a portable, censorship-resistant on-chain identity using ERC-721.
-
-```typescript
-import { ERC8004Client } from 'agentwallet-sdk';
+import { ERC8004Client, ReputationClient } from 'agentwallet-sdk';
 
 const identity = new ERC8004Client({ chain: 'base' });
-
-// Register agent
 const { txHash, agentId } = await identity.registerAgent(walletClient, {
   name: 'MyAgent',
-  description: 'Autonomous trading agent',
+  description: 'Autonomous research agent',
 });
-
-// Look up any agent
-const agent = await identity.lookupAgentIdentity(agentId!);
-console.log(agent.owner, agent.agentURI);
-```
-
-## ERC-8004 Reputation Registry
-
-On-chain reputation signals — scored feedback from clients, aggregated summaries, revocable.
-
-```typescript
-import { ReputationClient } from 'agentwallet-sdk';
 
 const reputation = new ReputationClient({ chain: 'base' });
-
-// Leave feedback for an agent
-await reputation.giveFeedback(walletClient, {
-  agentId: 42n,
-  score: 95n,
-  category: 1,
-  comment: 'Fast execution, accurate results',
-  taskRef: 'task-abc-123',
-  verifierRef: '',
-  clientRef: '',
-  contentHash: '0x0000000000000000000000000000000000000000000000000000000000000000',
-});
-
-// Read aggregated reputation
-const rep = await reputation.getAgentReputation(42n);
+const rep = await reputation.getAgentReputation(agentId!);
 console.log(`Score: ${rep.totalScore} from ${rep.count} reviews`);
 ```
 
-## ERC-8004 Validation Registry
-
-Request and receive on-chain validation from validator contracts (TEE attestations, capability proofs, compliance checks).
+## Decimal Helpers
 
 ```typescript
-import { ValidationClient } from 'agentwallet-sdk';
-import { keccak256, toBytes } from 'viem';
+import { toRaw, toHuman, formatBalance } from 'agentwallet-sdk';
 
-const validation = new ValidationClient({
-  chain: 'base',
-  validationAddress: '0xYourValidationRegistry', // address required until official deployment
-});
-
-// Request validation from a validator
-const requestHash = keccak256(toBytes('my-validation-request-v1'));
-await validation.requestValidation(walletClient, {
-  validator: '0xValidatorContract',
-  agentId: 42n,
-  requestURI: 'https://example.com/validation-spec.json',
-  requestHash,
-});
-
-// Check validation status
-const status = await validation.getValidationStatus(requestHash);
-console.log(status.responded ? `Result: ${status.response}` : 'Pending');
-
-// Get summary for an agent
-const summary = await validation.getSummary(42n);
-console.log(`${summary.passCount} passed, ${summary.failCount} failed`);
+const raw = toRaw('100.50', 6);        // → 100_500_000n
+const human = toHuman(100_500_000n, 6); // → "100.5"
+const display = formatBalance(100_500_000n, 6, 'USDC', 2); // → "100.50 USDC"
 ```
 
-## Mutual Stake Escrow
+## Security Model
 
-Reciprocal collateral for agent-to-agent task settlement. Both parties stake, both lose if the task fails.
+**What the on-chain spend policy enforces:**
 
-```typescript
-import { MutualStakeEscrow } from 'agentwallet-sdk';
+Even if an agent is compromised (prompt injection, jailbreak, runaway loop), it cannot:
+1. Spend more than the per-transaction limit you set
+2. Exceed the daily/weekly cap you configured
+3. Access funds outside its ERC-6551 token-bound account
+4. Modify its own spend policy (only the owner wallet can do that)
 
-const escrow = new MutualStakeEscrow({
-  chain: 'base',
-  walletClient,
-});
+**Recommendation:** Start with $1/tx, $10/day. Raise caps only after you've watched the agent run for a week and it behaves exactly as expected.
 
-// Create escrow — both agent and client stake
-const { escrowId, txHash } = await escrow.create({
-  counterparty: '0xOtherAgent',
-  token: '0xUSDC',
-  stakeAmount: 100000000n, // 100 USDC
-  taskHash: '0x...',
-  deadline: BigInt(Math.floor(Date.now() / 1000) + 86400),
-});
+Key management: your private key stays in your infrastructure. Compatible with Vault, AWS Secrets Manager, Azure Key Vault, GCP Secret Manager, or local encrypted storage.
 
-// Counterparty funds their side
-await escrow.fund(escrowId);
+## Enterprise Deployment
 
-// After task completion, fulfill
-await escrow.fulfill(escrowId, proofHash);
-
-// Verify and release stakes
-await escrow.verify(escrowId);
-```
-
-## Feature Tiers
-
-### Base (Free)
-
-| Feature | Status | Description |
-|---------|--------|-------------|
-| TokenRegistry | ✅ Live | 80+ verified token addresses across 11 EVM chains + Solana |
-| Multi-Token Transfers | ✅ Live | sendToken, sendNative, getBalances — any ERC-20 or native gas |
-| Solana SPL Tokens | ✅ Live | SolanaWallet with getSolBalance, sendSol, sendSplToken (optional dep) |
-| Decimal Helpers | ✅ Live | toRaw, toHuman, formatBalance — no manual decimal math |
-| Agent Identity | ✅ Live | ERC-8004 Identity Registry — on-chain ERC-721 agent IDs |
-| Agent Reputation | ✅ Live | ERC-8004 Reputation Registry — scored feedback and summaries |
-| Agent Validation | ✅ Live | ERC-8004 Validation Registry — validator request/response |
-| ERC-6551 TBA | ✅ Live | NFT-bound wallets with autonomous spending |
-| Mutual Stake Escrow | ✅ Live | Reciprocal collateral task settlement |
-| Optimistic Escrow | ✅ Live | Time-locked optimistic verification |
-| x402 Payments | ✅ Live | HTTP 402 auto-pay — Base, Ethereum, Arbitrum, Polygon, Optimism, Avalanche, Unichain, Linea, Sonic, Worldchain |
-| CCTP Bridge (EVM) | ✅ Live | Circle CCTP V2 across 10 EVM chains |
-| CCTP Bridge (Solana) | ✅ Live | EVM↔Solana USDC bridging via CCTP V2 domain 5 |
-| Spend Policies | ✅ Live | Per-token, per-period on-chain spending limits |
-| Swap | ✅ Live | Uniswap V3 on Base, Arbitrum, Optimism, Polygon |
-| Fiat Onramp | ✅ Live | Opt-in fiat-to-crypto |
-| AP2 Protocol | ✅ Live | Agent-to-Agent task delegation and payment |
-| Settlement | ✅ Live | On-chain settlement finalization |
-| Gas Sponsorship | ✅ Live | ERC-4337 paymaster-based gas sponsorship |
-
-### Premium
-
-| Feature | Description |
-|---------|-------------|
-| CowSwap Solver | Batch auction solutions, earn COW tokens |
-| Flash Executor | Atomic flash loan execution |
-| MEV Protection | Private mempool via Flashbots/MEV Blocker |
-| Yield Staking | Aave V3, Compound V3, Morpho Blue strategies |
-| Tax Reporting | Cost basis and gain/loss reporting |
-
-Premium access: [github.com/up2itnow0822/AgentNexus2](https://github.com/up2itnow0822/AgentNexus2)
-
-## x402 Protocol: Supported Chains and Payment Rails
-
-x402 (HTTP 402 Payment Required) is the native payment protocol for agent-to-service transactions. The agent encounters a 402 response, signs a payment proof, and re-sends the request. One round trip. No accounts, no API keys, no invoices.
-
-As of March 2026, x402 is live on 3 chains/rails:
-
-| Chain / Rail | Status | Settlement Token | Gas Cost | Notes |
-|---|---|---|---|---|
-| **Base** (Coinbase L2) | Live | USDC | Sub-cent | Primary x402 chain. 15M+ transactions in Jan 2026. |
-| **Etherlink** (Tezos L2) | Live (Mar 2026) | USDC | Sub-cent | EVM-compatible. Same x402 integration, different RPC + chain ID. |
-| **Stripe** (Fiat offramp) | Live (Feb 2026) | USDC -> USD | N/A | Vendors receive USD in Stripe dashboard. Agents pay USDC. |
-
-### x402 + Etherlink Quick Start
-
-```typescript
-import { createWallet, agentExecute } from 'agentwallet-sdk';
-
-const wallet = createWallet({
-  accountAddress: '0xYourAgent',
-  chain: 'etherlink',  // new: Tezos L2 support
-  walletClient,
-});
-
-// x402 payment flow is identical across chains
-const response = await fetch('https://api.vendor.com/data');
-if (response.status === 402) {
-  const details = await response.json();
-  const proof = await wallet.createX402Proof(details);
-  const paid = await fetch('https://api.vendor.com/data', {
-    headers: { 'X-Payment': proof }
-  });
-}
-```
-
-The SDK handles chain-specific RPC endpoints, gas estimation, and USDC contract addresses automatically. Swap `chain: 'base'` to `chain: 'etherlink'` and the x402 flow works identically.
-
-## Cross-Chain Bridge — Verified on Mainnet
-
-Live CCTP V2 bridge transfers verified on mainnet (March 15, 2026):
-
-| Route | Amount | Burn Tx (Base) | Status |
-|-------|--------|---------------|--------|
-| Base → Arbitrum | 0.50 USDC | [`0xfedb...9129`](https://basescan.org/tx/0xfedbfaa4b3a9fbadd36668c50c2ee7fc7e32072e2bd409e00c46020a35329129) | ✅ Confirmed — [0.50 USDC received on Arbitrum](https://arbiscan.io/address/0xff86829393C6C26A4EC122bE0Cc3E466Ef876AdD) |
-
-Bridge uses Circle CCTP V2 `depositForBurn` with fast finality (minFinalityThreshold=0). USDC is burned on the source chain and minted natively on the destination — no wrapped tokens, no liquidity pools.
-
-```typescript
-import { CctpBridgeClient } from 'agentwallet-sdk';
-
-const bridge = new CctpBridgeClient({
-  sourceChain: 'base',
-  walletClient,
-});
-
-// Bridge USDC from Base to Arbitrum
-const { txHash } = await bridge.bridge({
-  destinationChain: 'arbitrum',
-  recipient: '0xff86829393C6C26A4EC122bE0Cc3E466Ef876AdD',
-  amount: 500000n, // 0.50 USDC
-});
-```
-
-## Supported Chains
-
-### x402 Payments & Swap (USDC)
-| Chain | Network ID | x402 | Bridge | Swap |
-|-------|-----------|------|--------|------|
-| Base | 8453 | ✅ | ✅ | ✅ |
-| Ethereum | 1 | ✅ | ✅ | — |
-| Arbitrum | 42161 | ✅ | ✅ | ✅ |
-| Polygon | 137 | ✅ | ✅ | ✅ |
-| Optimism | 10 | ✅ | ✅ | ✅ |
-| Avalanche | 43114 | ✅ | ✅ | — |
-| Unichain | 130 | ✅ | ✅ | — |
-| Linea | 59144 | ✅ | ✅ | — |
-| Sonic | 146 | ✅ | ✅ | — |
-| World Chain | 480 | ✅ | ✅ | — |
-| Solana | — | — | ✅ (CCTP) | — |
-| Base Sepolia | 84532 | ✅ (testnet) | — | — |
-
-All USDC addresses are native Circle USDC (not bridged variants).
-
-## Complete Agent Identity Stack (v6.0.0)
-
-One npm install now gives any AI agent a wallet, email address, on-chain ID, reputation, and signed payment intents.
-
-| Component | What It Does |
-|-----------|-------------|
-| **EmailResolver** *(NEW)* | AgentMail integration — agents get `email@agentmail.to` linked to wallet. Resolve email→wallet, send/receive with embedded x402 payment requests. |
-| **AgentIdentity** | ERC-8004 + ERC-6551: on-chain NFT identity + Token Bound Account |
-| **ReputationClient** | On-chain reputation scoring — give/read feedback, aggregate scores |
-| **VerifiableIntentClient** | Mastercard-spec signed payment intents with scope enforcement |
-| **ValidationClient** | Request/respond validation workflow (TEE attestations, compliance) |
-
-### EmailResolver Quick Start
-
-```typescript
-import { EmailResolver } from 'agentwallet-sdk';
-
-const resolver = new EmailResolver();
-
-// Resolve an agent email to its wallet address
-const wallet = await resolver.resolveEmail('myagent@agentmail.to');
-console.log(wallet.address); // 0x...
-
-// Send a payment request embedded in an email
-await resolver.sendWithPayment({
-  to: 'vendor@agentmail.to',
-  subject: 'Payment for API access',
-  amount: 5_000_000n, // 5 USDC
-  token: 'USDC',
-  chain: 'base',
-});
-```
-
-## Enterprise Deployment Guide
-
-### Architecture Overview
-
-agent-wallet-sdk is designed for enterprise environments where AI agents need autonomous spending power with hard compliance boundaries. The SDK runs in your infrastructure - no third-party custody, no shared key management service, no data leaving your network.
-
-**Deployment options:**
-
-- **Self-hosted node service:** Run the SDK as a microservice behind your API gateway. Each agent gets its own ERC-6551 wallet with organization-wide SpendingPolicy enforcement.
-- **Embedded in agent runtime:** Import directly into your agent's Node.js/TypeScript process. Wallet keys stay in your process memory, never transmitted.
-- **Containerized (Docker/K8s):** Production-ready with environment variable configuration. Secrets via mounted volumes or your existing secrets manager (Vault, AWS Secrets Manager, GCP Secret Manager).
+The SDK runs in your infrastructure — no third-party custody, no shared key management, no data leaving your network.
 
 ```bash
 # Docker deployment
-docker run -e WALLET_PRIVATE_KEY_FILE=/secrets/key \
-           -e RPC_URL=https://mainnet.base.org \
-           -v /path/to/secrets:/secrets:ro \
-           agentwallet-sdk:latest
+docker run \
+  -e WALLET_PRIVATE_KEY_FILE=/secrets/key \
+  -e RPC_URL=https://mainnet.base.org \
+  -v /path/to/secrets:/secrets:ro \
+  agentwallet-sdk:latest
 ```
 
-### Network Requirements
+Stateless design — wallet state lives on-chain, not in application memory. Multiple SDK instances can safely share a wallet address. Nonce management handled.
 
-- Outbound HTTPS to your chosen RPC provider (Base, Ethereum, Arbitrum, etc.)
-- No inbound ports required
-- Compatible with corporate proxies (standard HTTPS_PROXY env var)
-- Air-gapped deployment supported for key generation; RPC access needed only for transaction broadcast
-
-### High Availability
-
-- Stateless design: wallet state lives on-chain, not in application memory
-- Multiple SDK instances can share the same wallet address safely (nonce management handled)
-- Recommended: run behind a load balancer with health checks on the `/health` endpoint
-
-## Compliance Checklist
-
-Use this checklist when evaluating agent-wallet-sdk for regulated environments.
-
-### Data Residency
-- [x] All wallet keys generated and stored locally - no external key management service
-- [x] No telemetry, analytics, or usage data transmitted to any third party
-- [x] Transaction data stays on public blockchain (Base, Ethereum, etc.) - no proprietary data store
-- [x] SDK source code is open source (MIT) - full audit capability
-
-### Access Control
-- [x] SpendingPolicy enforces per-transaction limits, daily caps, and token-specific restrictions on-chain
-- [x] Transactions exceeding policy limits are queued for human approval - never auto-executed
-- [x] Wallet access revocation via NFT transfer (ERC-6551) - instant, cryptographic, no admin API
-- [x] Role-based access: owner (human) sets policy, agent executes within policy bounds
-
-### Audit Trail
-- [x] Every transaction recorded on-chain with block number, timestamp, and gas cost
-- [x] SpendingPolicy changes are on-chain events - immutable audit log
-- [x] ERC-8004 reputation feedback is on-chain - tamper-proof performance history
-- [x] No off-chain state that could be modified without detection
-
-### Key Management
-- [x] Non-custodial: the organization holds all private keys
-- [x] Compatible with HSMs via standard Ethereum signing interfaces (EIP-712)
-- [x] Key rotation: deploy new ERC-6551 wallet, transfer NFT, old keys become inert
-- [x] No shared secrets between SDK instances or between organization and vendor
-
-## Procurement FAQ
-
-**Q: Is agent-wallet-sdk a SaaS product?**
-No. It's an open-source SDK (MIT license) that you install and run in your infrastructure. There's no hosted service, no subscription, no vendor lock-in. You own the deployment.
-
-**Q: What are the costs?**
-The SDK itself is free. Costs are blockchain gas fees for transactions (typically $0.001-0.01 on Base L2) and your chosen RPC provider. No per-seat, per-agent, or per-transaction licensing fees.
-
-**Q: How does licensing work?**
-MIT license. Use it in commercial products, modify it, distribute it. No copyleft restrictions. No license changes planned - the license is in the git history.
-
-**Q: Who maintains it?**
-AI Agent Economy (https://github.com/up2itnow0822/agent-wallet-sdk). Active development since 2025. Community contributions welcome.
-
-**Q: Can we get a support agreement?**
-Enterprise support packages are available. Contact bill@ai-agent-economy.com for SLA terms.
-
-**Q: Is there vendor lock-in risk?**
-No. The SDK uses standard Ethereum tooling (viem, ERC-6551, ERC-8004). If you stop using the SDK, your wallets, keys, and on-chain identity continue to work with any Ethereum-compatible tool.
-
-**Q: Does it work with our existing agent framework?**
-Yes. The SDK is framework-agnostic. It works with OpenClaw, NanoClaw, LangChain, CrewAI, AutoGPT, Anthropic Claude tool-use, OpenAI Assistants, or any Node.js/TypeScript environment. agentpay-mcp adds MCP protocol support for Claude and other MCP-compatible clients.
-
-**Q: What chains are supported?**
-17 chains via CCTP bridging. Primary: Base (recommended for low gas costs), Ethereum, Arbitrum, Polygon, Optimism. See Supported Chains table above.
-
-## SOC 2 Readiness Matrix
-
-| SOC 2 Criteria | agent-wallet-sdk Coverage | Notes |
-|---|---|---|
-| **CC6.1** Logical access security | SpendingPolicy on-chain enforcement, ERC-6551 NFT-based access control | Access revocation is cryptographic via NFT transfer |
-| **CC6.2** System component access | Non-custodial - no vendor access to keys or wallets | Organization controls all secrets |
-| **CC6.3** Access removal | NFT transfer = instant revocation of all agent permissions | No "forgot to deprovision" risk |
-| **CC7.1** System monitoring | All transactions on-chain with block explorer visibility | Real-time alerting via standard blockchain monitoring tools |
-| **CC7.2** Anomaly detection | SpendingPolicy caps prevent anomalous spend automatically | Over-limit transactions queue for human review |
-| **CC8.1** Change management | Open-source - all changes in public git history | Audit any version, diff any release |
-| **A1.2** Recovery objectives | Stateless SDK + on-chain state = recovery is re-deploy + import keys | No database backups needed |
-| **C1.1** Data confidentiality | No data transmitted to vendor, no telemetry, local-only operation | Private keys never leave your infrastructure |
-| **PI1.1** Processing integrity | Deterministic smart contract execution, on-chain verification | Transaction results are cryptographically verifiable |
-
-### What SOC 2 Auditors Will Ask (And Your Answers)
-
-**"How do you control what the AI agent can spend?"**
-SpendingPolicy smart contracts enforce per-transaction limits, daily caps, and approved token lists on-chain. The agent cannot bypass these limits - they're enforced by the blockchain, not by application code.
-
-**"What happens if an agent is compromised?"**
-The agent can only spend up to its SpendingPolicy limits. Worst case: one day's approved budget. Transfer the NFT to revoke all access immediately. No waiting for key rotation, no certificate revocation lists.
-
-**"Where are the private keys stored?"**
-In your infrastructure. The SDK never transmits keys. Compatible with your existing secrets management (Vault, AWS Secrets Manager, Azure Key Vault, GCP Secret Manager, or local encrypted storage).
-
-**"Can the vendor access our wallets?"**
-No. Non-custodial means we never have your keys. There's no "admin backdoor," no support override, no recovery mechanism that bypasses your key ownership.
+### Key compliance properties
+- All private keys generated and stored locally — no external key management service
+- No telemetry, analytics, or usage data transmitted to any third party
+- Every transaction on-chain with block number, timestamp, and gas cost — immutable audit log
+- SpendingPolicy changes are on-chain events — tamper-proof
+- NFT transfer = instant revocation of all agent permissions — no "forgot to deprovision" risk
 
 ## Links
 
-- [ERC-8004 Spec](https://eips.ethereum.org/EIPS/eip-8004)
 - [GitHub](https://github.com/up2itnow0822/agent-wallet-sdk)
 - [npm](https://www.npmjs.com/package/agentwallet-sdk)
+- [ERC-8004 Spec](https://eips.ethereum.org/EIPS/eip-8004)
+- [agentpay-mcp](https://github.com/up2itnow0822/agentpay-mcp) — MCP server wrapping this SDK
+
+## Patent Notice
+
+**Patent Pending** — USPTO provisional patent application filed March 2026: "Non-Custodial Multi-Chain Financial Infrastructure System for Autonomous AI Agents."
+
+Our provisional filing is defensive — intended to prevent hostile monopolization of open payment rails and protect builders' ability to use open standards.
+
+## Disclaimer
+
+Non-custodial developer tooling. You control your own keys and set your own spending limits. You are responsible for compliance with applicable laws in your jurisdiction. Provided as-is under the MIT license. Nothing here constitutes financial advice, custody services, or money transmission.
 
 ## License
 
 MIT
-
