@@ -663,3 +663,13 @@ export {
   isStablecoin,
   parseNetworkChainId,
 } from './x402/multi-asset.js';
+
+// ─── Payment Router ───────────────────────────────────────────────────────────
+export { PaymentRouter } from './router/index.js';
+export type {
+  PaymentRail,
+  RailStatus,
+  RailConfig,
+  PaymentContext,
+  RoutingDecision,
+} from './router/index.js';
