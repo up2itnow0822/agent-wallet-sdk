@@ -1,18 +1,28 @@
 /**
- * PaymentRouter — Hybrid x402/MPP payment rail selector.
+ * PaymentRouter — Three-rail payment architecture.
  *
- * Routes payments to the optimal rail based on:
+ * Routes payments across three rails:
+ *   1. **x402** (crypto-native) — on-chain USDC payments via the x402 protocol. Optimal for
+ *      micropayments, autonomous agents, and scenarios requiring on-chain audit trails.
+ *   2. **MPP** (Managed Payment Protocol / Stripe) — fiat-based payments with dispute resolution.
+ *      Optimal for larger amounts, supervised agents, and high-frequency session batching.
+ *   3. **Google AP2** (Agent Payment Protocol) — Google's managed agent payment rail combining
+ *      identity verification and payment in a single flow. Roadmap; activates when Google
+ *      publishes the full AP2 spec. Settlement on Base.
+ *
+ * Routing criteria:
  *   - Transaction amount (micropayments → x402, high-frequency → MPP)
  *   - Session context (ongoing session → MPP for batching efficiency)
  *   - Agent autonomy level (autonomous → x402, supervised → MPP)
- *   - Chain availability (Base x402 live, Solana x402 roadmap)
+ *   - Chain/ecosystem preference (Google ecosystem → AP2, Solana → x402-solana)
+ *   - Rail availability (live vs. roadmap)
  *
  * @module router/PaymentRouter
  */
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-export type PaymentRail = 'x402' | 'mpp' | 'x402-solana';
+export type PaymentRail = 'x402' | 'mpp' | 'x402-solana' | 'google-ap2';
 
 export type RailStatus = 'live' | 'roadmap' | 'disabled';
 
@@ -37,7 +47,7 @@ export interface PaymentContext {
   /** Whether the agent is operating autonomously (no human in loop) */
   autonomous?: boolean;
   /** Preferred chain, if any */
-  preferredChain?: 'base' | 'solana';
+  preferredChain?: 'base' | 'solana' | 'google-ap2';
 }
 
 export interface RoutingDecision {
@@ -68,6 +78,12 @@ const DEFAULT_RAILS: RailConfig[] = [
     rail: 'x402-solana',
     status: 'roadmap',
   },
+  {
+    rail: 'google-ap2',
+    status: 'roadmap',
+    minAmount: 1_000,        // $0.001 minimum (aligned with x402)
+    maxAmount: 50_000_000,   // $50 max per tx (conservative until spec finalized)
+  },
 ];
 
 // ─── Router ───────────────────────────────────────────────────────────────────
@@ -94,6 +110,21 @@ export class PaymentRouter {
    */
   route(context: PaymentContext): RoutingDecision {
     const { amount, isSessionContext, sessionTxCount, autonomous, preferredChain } = context;
+
+    // If Google AP2 rail is live and context indicates Google ecosystem preference
+    // Google AP2 (Agent Payment Protocol) — Google's native agent payment rail
+    // Currently roadmap; will activate when Google publishes the full AP2 spec
+    const googleRail = this.getRail('google-ap2');
+    if (googleRail?.status === 'live' && preferredChain === 'base') {
+      // Google AP2 routes through Base for on-chain settlement
+      // When live, AP2 provides Google-managed identity + payment in a single flow
+      return {
+        rail: 'google-ap2',
+        reason: 'Google AP2 rail — managed identity + payment bundle',
+        estimatedOverheadBps: 100, // Estimated Google platform fee
+        isLive: true,
+      };
+    }
 
     // If Solana is explicitly preferred and x402-solana is available
     if (preferredChain === 'solana') {

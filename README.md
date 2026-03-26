@@ -419,13 +419,26 @@ Stateless design — wallet state lives on-chain, not in application memory. Mul
 - SpendingPolicy changes are on-chain events — tamper-proof
 - NFT transfer = instant revocation of all agent permissions — no "forgot to deprovision" risk
 
-## Supported Payment Rails
+## Supported Payment Rails — Three-Rail Architecture
 
-| Rail | Status | Use Case |
-|------|--------|----------|
-| ✅ Base x402 (live) | Production | Autonomous micropayments, API access, agent-to-agent commerce |
-| ✅ Stripe MPP (live) | Production | High-frequency session payments, fiat-connected merchants |
-| 🔜 Solana x402 (roadmap) | Q2 2026 | Solana-native agent payments via Solana Foundation gateway |
+AgentWallet SDK routes payments across three independent rails, selecting the optimal one based on amount, session context, autonomy level, and ecosystem preference:
+
+| Rail | Status | Use Case | Overhead |
+|------|--------|----------|----------|
+| ✅ **x402** (Base, EVM) | **Live** | Autonomous micropayments, API access, agent-to-agent commerce | 0 bps (no protocol fee) |
+| ✅ **Stripe MPP** | **Live** | High-frequency session payments, fiat-connected merchants, dispute resolution | ~290 bps |
+| 🔜 **Google AP2** | **Roadmap** | Google-managed identity + payment bundle, enterprise SSO integration | ~100 bps (est.) |
+| 🔜 **Solana x402** | **Roadmap Q2** | Solana-native agent payments via Solana Foundation gateway | 0 bps |
+
+### How the Router Decides
+
+The `PaymentRouter` evaluates each transaction and selects the rail automatically:
+
+- **Micropayments (< $1) + autonomous agent** → x402 (zero overhead, on-chain audit)
+- **High-frequency session (5+ txns)** → MPP (batching efficiency)
+- **Larger amounts or supervised agent** → MPP (fiat rails, dispute resolution)
+- **Google ecosystem preference** → Google AP2 (when live — managed identity + payment)
+- **Solana preference** → x402-solana (when live)
 
 AgentWallet SDK is the **multi-rail abstraction layer** — your agent code doesn't change when you add a new payment rail. Write once, pay on any chain or protocol.
 
