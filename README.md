@@ -419,6 +419,26 @@ Stateless design — wallet state lives on-chain, not in application memory. Mul
 - SpendingPolicy changes are on-chain events — tamper-proof
 - NFT transfer = instant revocation of all agent permissions — no "forgot to deprovision" risk
 
+## Supported Payment Rails
+
+| Rail | Status | Use Case |
+|------|--------|----------|
+| ✅ Base x402 (live) | Production | Autonomous micropayments, API access, agent-to-agent commerce |
+| ✅ Stripe MPP (live) | Production | High-frequency session payments, fiat-connected merchants |
+| 🔜 Solana x402 (roadmap) | Q2 2026 | Solana-native agent payments via Solana Foundation gateway |
+
+AgentWallet SDK is the **multi-rail abstraction layer** — your agent code doesn't change when you add a new payment rail. Write once, pay on any chain or protocol.
+
+```typescript
+import { createX402Client } from 'agentwallet-sdk';
+
+// Same API regardless of underlying rail
+const client = createX402Client(wallet, {
+  supportedNetworks: ['base:8453'],  // Solana coming soon
+  globalDailyLimit: 50_000_000n,
+});
+```
+
 ## Links
 
 - [GitHub](https://github.com/up2itnow0822/agent-wallet-sdk)
