@@ -452,11 +452,32 @@ const client = createX402Client(wallet, {
 });
 ```
 
+## Open Wallet Standard (OWS) Compatibility
+
+AgentWallet SDK is designed to work **on top of** [MoonPay's Open Wallet Standard](https://github.com/moonpay/open-wallet-standard) — not compete with it. OWS handles wallet key management (multi-chain signing, hardware-backed vaults, encrypted local storage). AgentWallet SDK handles everything above that: MCP integration, framework abstraction, spend-policy enforcement, payment routing, and human-in-the-loop approval.
+
+**The complete stack:**
+
+| Layer | Component | Responsibility |
+|-------|-----------|---------------|
+| Wallet & Key Management | **Open Wallet Standard (OWS)** | Multi-chain signing, hardware-backed keys (Ledger), encrypted vault, policy engine |
+| Framework & Integration | **AgentWallet SDK** | On-chain spend limits, payment routing (x402/MPP/AP2), human approval, framework adapters |
+| MCP Server | **[agentpay-mcp](https://github.com/up2itnow0822/agentpay-mcp)** | MCP-native payment tools for any MCP-compatible agent |
+
+If your agent framework or wallet provider already implements OWS, AgentWallet SDK plugs in as the payment execution and policy layer. Your agent gets supervised spending, multi-rail routing, and auditable on-chain payments without replacing your existing key management.
+
+## Market Context
+
+The agentic AI SDK market is projected to grow from **$2.4B (2025) to $16B by 2030** (Mordor Intelligence). AI agents are forecast to drive **$262B in bank sales** via embedded payments and lending by 2026. x402 alone has processed **140M+ agent payment transactions** ($43M) in 9 months, with 98.6% USDC settlement.
+
+AgentWallet SDK is [production-validated with NVIDIA NeMo](https://github.com/NVIDIA/NeMo-Agent-Toolkit-Examples/pull/17) — demonstrating enterprise-grade agent payment integration at scale. NVIDIA reports 88% revenue impact and 87% cost reduction from AI agent deployments.
+
 ## Links
 
 - [GitHub](https://github.com/up2itnow0822/agent-wallet-sdk)
 - [npm](https://www.npmjs.com/package/agentwallet-sdk)
 - [ERC-8004 Spec](https://eips.ethereum.org/EIPS/eip-8004)
+- [Open Wallet Standard](https://github.com/moonpay/open-wallet-standard) — wallet key management layer
 - [agentpay-mcp](https://github.com/up2itnow0822/agentpay-mcp) — MCP server wrapping this SDK
 
 ## Patent Notice
