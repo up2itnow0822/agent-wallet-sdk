@@ -551,6 +551,13 @@ export type {
   ValidationStatus, ValidationSummary,
 } from './identity/validation.js';
 
+// ─── UAID: Cross-Chain Identity Resolution (HOL Registry Broker) ────────────
+export { UAIDResolver } from './identity/uaid.js';
+export type {
+  UAIDProtocol, ParsedUAID, UAIDResolution, UniversalAgentIdentity,
+  UAIDResolverConfig, RegisterUAIDParams,
+} from './identity/uaid.js';
+
 // ─── SwapModule — Uniswap V3 token swap aggregator ──────────────────────────
 export { SwapModule, attachSwap, calcProtocolFee, applySlippage, calcDeadline } from './swap/index.js';
 export { UniswapV3RouterAbi, UniswapV3QuoterV2Abi, ERC20Abi } from './swap/index.js';

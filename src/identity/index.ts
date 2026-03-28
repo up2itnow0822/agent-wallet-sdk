@@ -20,3 +20,10 @@ export type {
   ValidationClientConfig, RequestValidationParams, RespondToValidationParams,
   ValidationStatus, ValidationSummary,
 } from './validation.js';
+
+// ─── UAID: Cross-Chain Identity Resolution ─────────────────────────────────
+export { UAIDResolver } from './uaid.js';
+export type {
+  UAIDProtocol, ParsedUAID, UAIDResolution, UniversalAgentIdentity,
+  UAIDResolverConfig, RegisterUAIDParams,
+} from './uaid.js';

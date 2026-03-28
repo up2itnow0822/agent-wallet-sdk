@@ -373,6 +373,44 @@ const rep = await reputation.getAgentReputation(agentId!);
 console.log(`Score: ${rep.totalScore} from ${rep.count} reviews`);
 ```
 
+## Cross-Chain Identity (UAID)
+
+ERC-8004 identities live on EVM chains. For agents on Solana, Hedera, or off-chain frameworks, the UAID (Universal Agent Identifier) resolver bridges identities across all chains via the [HOL Registry](https://hol.org).
+
+```typescript
+import { UAIDResolver, ERC8004Client } from 'agentwallet-sdk';
+
+const resolver = new UAIDResolver();
+
+// Resolve any agent by UAID — works across all chains
+const result = await resolver.resolve(
+  'uaid:aid:eip155:8453:0x8004...;uid=42;proto=erc8004'
+);
+if (result.resolved) {
+  console.log(result.identity?.paymentAddress); // Payment address, any chain
+  console.log(result.trustScore);               // Trust score (0-100)
+}
+
+// Convert your ERC-8004 identity to universal format
+const erc8004 = new ERC8004Client({ chain: 'base' });
+const identity = await erc8004.lookupAgentIdentity(42n);
+const universal = resolver.erc8004ToUniversal(identity, 'base');
+console.log(universal.uaid); // Cross-chain discoverable ID
+
+// Verify any agent before transacting (chain-agnostic)
+const check = await resolver.verify('uaid:aid:hedera:0.0.5678;uid=x;proto=openconvai');
+if (check.verified) { /* safe to transact */ }
+
+// Register for cross-chain discovery (requires HOL API key)
+const registrar = new UAIDResolver({ apiKey: process.env.HOL_API_KEY });
+const uaid = await registrar.registerERC8004Agent({
+  agentId: 42n, chain: 'base',
+  name: 'My Agent', description: 'Trading agent with x402 support',
+});
+```
+
+See [`examples/cross-chain-identity.ts`](./examples/cross-chain-identity.ts) for the full walkthrough.
+
 ## Decimal Helpers
 
 ```typescript
@@ -478,6 +516,7 @@ AgentWallet SDK is [production-validated with NVIDIA NeMo](https://github.com/NV
 - [npm](https://www.npmjs.com/package/agentwallet-sdk)
 - [ERC-8004 Spec](https://eips.ethereum.org/EIPS/eip-8004)
 - [Open Wallet Standard](https://github.com/moonpay/open-wallet-standard) — wallet key management layer
+- [HOL Registry](https://hol.org) — Cross-chain agent identity registry (UAID resolution)
 - [agentpay-mcp](https://github.com/up2itnow0822/agentpay-mcp) — MCP server wrapping this SDK
 
 ## Patent Notice
