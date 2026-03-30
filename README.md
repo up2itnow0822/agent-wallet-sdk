@@ -504,6 +504,23 @@ AgentWallet SDK is designed to work **on top of** [MoonPay's Open Wallet Standar
 
 If your agent framework or wallet provider already implements OWS, AgentWallet SDK plugs in as the payment execution and policy layer. Your agent gets supervised spending, multi-rail routing, and auditable on-chain payments without replacing your existing key management.
 
+## Enterprise Compliance (August 2026)
+
+The EU AI Act's high-risk compliance deadline lands **August 2, 2026**. AI systems that execute or facilitate financial transactions fall under Annex III high-risk classification. For agent developers, this means four mandatory controls:
+
+| Requirement | AgentWallet SDK Feature |
+|---|---|
+| **Spend caps** | `setSpendPolicy()` — per-transaction and daily limits enforced on-chain. The agent cannot override them, even if instructed to. |
+| **Audit trails** | Every transaction recorded on-chain with block number, timestamp, amount, and recipient. Immutable and independently verifiable on basescan.org. |
+| **Session controls** | Session-scoped budgets, safe abort (`safeAbort()`), and NFT-based instant revocation of all agent permissions. |
+| **Human oversight** | Human-in-the-loop approval for transactions above configurable thresholds. Fail-closed — any policy engine error produces rejection. |
+
+These aren't optional features — they're regulatory requirements with fines up to €35M or 7% of global annual revenue. Germany published its national enforcement bill in February 2026.
+
+For enterprises evaluating agent payment infrastructure: AgentWallet SDK satisfies EU AI Act high-risk requirements out of the box, with on-chain enforcement (not application-level trust) and zero third-party custody.
+
+---
+
 ## Market Context
 
 The agentic AI SDK market is projected to grow from **$2.4B (2025) to $16B by 2030** (Mordor Intelligence). AI agents are forecast to drive **$262B in bank sales** via embedded payments and lending by 2026. x402 alone has processed **140M+ agent payment transactions** ($43M) in 9 months, with 98.6% USDC settlement.
