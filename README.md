@@ -58,6 +58,67 @@ await setSpendPolicy(wallet, {
 });
 ```
 
+### Contract Source, Deployment Status, and `AGENT_WALLET_ADDRESS`
+
+Today this package ships the contract ABIs in `src/abi.ts` and the TypeScript deployment helpers in `deployWallet()` and `getWalletAddress()`. It does **not** currently publish Solidity sources or an official multi-network deployment manifest in this repo.
+
+That means:
+
+- `AgentAccountV2Abi` and `AgentAccountFactoryV2Abi` are public and versioned here
+- `deployWallet()` can deploy a new `AgentAccountV2` through a factory you control
+- `getWalletAddress()` returns the deterministic CREATE2 wallet address before deployment
+- `AGENT_WALLET_ADDRESS` is the deployed or predicted `AgentAccountV2` address, not an EOA
+- No canonical Base/Ethereum/Hedera deployment address list is published here yet
+
+If you need reproducible deployments, use your own verified factory deployment and pass its address explicitly:
+
+```typescript
+import { deployWallet, getWalletAddress } from 'agentwallet-sdk';
+
+const walletAddress = await getWalletAddress({
+  factoryAddress: '0xFactory',
+  tokenContract: '0xIdentityToken',
+  tokenId: 1n,
+  chain: 'base',
+});
+
+const deployment = await deployWallet({
+  factoryAddress: '0xFactory',
+  tokenContract: '0xIdentityToken',
+  tokenId: 1n,
+  chain: 'base',
+  walletClient,
+});
+
+console.log(walletAddress, deployment.txHash);
+```
+
+### External Signers and MoonPay OWS
+
+`privateKeyToAccount()` in the quick-start is a convenience path, not a hard requirement. The core SDK entrypoint is `createWallet({ accountAddress, chain, walletClient })`, so any signer that can produce a viem-compatible `WalletClient` can be used.
+
+That includes:
+
+- local private keys
+- HSM-backed signers
+- MPC or custodial signers you control
+- an Open Wallet Standard (OWS) adapter that exposes a viem `WalletClient`
+
+There is **not** a first-party MoonPay OWS adapter bundled in this repo today. The integration point is the injected `walletClient`.
+
+### Custody, Execution Flow, and Gas
+
+The intended model is:
+
+- funds live in the on-chain `AgentAccountV2` smart wallet
+- the signer attached to `walletClient` authorizes contract calls
+- policy enforcement happens in the wallet contract before execution
+- `AGENT_PRIVATE_KEY` signs the contract interaction, not an off-chain bypass transaction that can skip policy checks
+
+So the SDK is not using an "EOA holds the funds and the contract only validates metadata" model. The smart wallet is the custody boundary.
+
+Gas is still paid by the execution signer unless you add your own account-abstraction or paymaster stack. This repo does not ship a first-party paymaster integration yet, so sponsored transactions should currently be treated as an external integration layer.
+
 ### Pay for an API (the 402 Flow)
 
 ```typescript
