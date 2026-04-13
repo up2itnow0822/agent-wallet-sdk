@@ -588,6 +588,20 @@ export type {
   DraftEntry,
 } from './policy/SpendingPolicy.js';
 
+// ─── UptoBillingPolicy — x402 usage-based settlement accounting ─────────────
+export {
+  UptoBillingPolicy,
+} from './policy/UptoBillingPolicy.js';
+export type {
+  UptoAuthorizationStatus,
+  UptoAuthorizationRequest,
+  UptoSettlementOptions,
+  UptoSettlementRecord,
+  UptoAuthorizationRecord,
+  WalletLedgerDelta,
+  UptoBillingSnapshot,
+} from './policy/UptoBillingPolicy.js';
+
 // ─── Mutual Stake Escrow ─────────────────────────────────────────────────────
 export { MutualStakeEscrow } from './escrow/MutualStakeEscrow.js';
 export type {

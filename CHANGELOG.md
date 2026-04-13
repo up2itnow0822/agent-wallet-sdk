@@ -1,3 +1,16 @@
+## [6.2.0] — 2026-04-13
+
+### Added
+- `UptoBillingPolicy` for x402 usage-based billing, with max authorization tracking, actual settlement recording, unused-capacity release, and wallet ledger deltas
+- Test coverage for partial settlement, finalization, over-cap rejection, and multi-settlement flows
+
+### Changed
+- Exported `UptoBillingPolicy` from the main SDK entrypoint
+- Updated README examples and package metadata to position `agentwallet-sdk` as an x402 usage-based billing reference implementation
+- Simplified `PaymentRouter.isRailLive()` boolean handling
+
+---
+
 ## [6.0.0] — 2026-03-21
 
 ### Added

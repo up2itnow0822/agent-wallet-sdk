@@ -197,7 +197,7 @@ export class PaymentRouter {
    * Check if a specific rail is available.
    */
   isRailLive(rail: PaymentRail): boolean {
-    return this.getRail(rail)?.status === 'live' ?? false;
+    return this.getRail(rail)?.status === 'live';
   }
 
   private getRail(rail: PaymentRail): RailConfig | undefined {

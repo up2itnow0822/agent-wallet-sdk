@@ -1,6 +1,6 @@
 # AgentWallet SDK
 
-> **v6.0.0** · MIT · **Patent Pending**
+> **v6.2.0** · MIT · **Patent Pending**
 >
 > USPTO Provisional filed March 2026: "Non-Custodial Multi-Chain Financial Infrastructure System for Autonomous AI Agents"
 
@@ -137,6 +137,35 @@ const data = await response.json();
 // Cost: $0.50 USDC, auto-approved (under $5 threshold)
 // Every payment: tx hash on Base, auditable on basescan.org
 ```
+
+### Usage-based billing with x402 "upto"
+
+```typescript
+import { UptoBillingPolicy } from 'agentwallet-sdk';
+
+const upto = new UptoBillingPolicy();
+
+const auth = upto.authorize({
+  authorizationId: 'req-42',
+  service: 'api.example.com',
+  resource: 'POST /v1/generate',
+  network: 'base:8453',
+  asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+  payTo: '0xMerchant',
+  maxAmount: 2_000_000n, // authorize up to $2.00 USDC
+});
+
+const snapshot = upto.recordSettlement(auth.authorizationId, 740_000n, {
+  txHash: '0xsettlement',
+  finalize: true,
+});
+
+console.log(snapshot.authorization.settledAmount); // 740000n
+console.log(snapshot.authorization.releasedAmount); // 1260000n
+console.log(upto.getNetWalletDelta(auth.authorizationId)); // -740000n
+```
+
+This gives the wallet a clean local ledger for x402 usage-based billing: max authorized, actual settlement, and explicit release of unused capacity.
 
 ## The Trust Layer
 
