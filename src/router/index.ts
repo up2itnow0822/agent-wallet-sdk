@@ -1,8 +1,8 @@
-export { PaymentRouter } from './PaymentRouter';
+export { PaymentRouter } from './PaymentRouter.js';
 export type {
   PaymentRail,
   RailStatus,
   RailConfig,
   PaymentContext,
   RoutingDecision,
-} from './PaymentRouter';
+} from './PaymentRouter.js';
