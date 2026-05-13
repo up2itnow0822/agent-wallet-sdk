@@ -178,7 +178,7 @@
       <a href="#problem">Why</a>
       <a href="#code">Code</a>
       <a href="#compare">Compare</a>
-      <a href="https://github.com/agent-nexus/agent-wallet" target="_blank">GitHub</a>
+      <a href="https://github.com/up2itnow0822/agent-wallet-sdk" target="_blank">GitHub</a>
     </div>
   </div>
 </nav>
@@ -186,12 +186,13 @@
 <section class="hero">
   <div class="container">
     <h1>Let your agent spend.<br>Stay in control.</h1>
-    <p>On-chain spend limits for autonomous AI agents. Set a budget, let your agent trade — anything over-limit queues for your approval.</p>
+    <p>Non-custodial smart wallets for AI agents: enforce on-chain spend caps, run x402 payments, and keep high-value actions behind human approval.</p>
     <div class="cta-row">
-      <a href="https://github.com/agent-nexus/agent-wallet" class="btn btn-primary">View on GitHub</a>
+      <a href="https://www.npmjs.com/package/agentwallet-sdk" class="btn btn-primary">Install from npm</a>
+      <a href="https://github.com/up2itnow0822/agent-wallet-sdk" class="btn btn-secondary">View on GitHub</a>
       <a href="#code" class="btn btn-secondary">See the code</a>
     </div>
-    <div class="install-cmd">npm install @agentwallet/sdk</div>
+    <div class="install-cmd">npm install agentwallet-sdk viem</div>
   </div>
 </section>
 
@@ -226,8 +227,8 @@
 
 <section id="code" class="code-section">
   <div class="container">
-    <h2>5 Lines to Production</h2>
-    <p class="subtitle">Connect your agent to a spend-limited wallet in seconds.</p>
+    <h2>Production-shaped in 5 lines</h2>
+    <p class="subtitle">Create a wallet, set policy, then let the contract enforce limits before execution.</p>
     <pre><span class="cm">// 1. Connect to the agent's wallet</span>
 <span class="kw">const</span> wallet = <span class="fn">createWallet</span>({ accountAddress, chain: <span class="str">'base'</span>, walletClient });
 
@@ -245,8 +246,8 @@
     <div class="grid-3">
       <div class="card feature">
         <div class="icon">⛽</div>
-        <h3>ERC-4337 Ready</h3>
-        <p>Gasless transactions via paymasters. Your agent never needs ETH for gas.</p>
+        <h3>Paymaster-ready</h3>
+        <p>Bring your own account-abstraction or sponsored-gas layer; the SDK keeps policy enforcement at the smart-wallet boundary.</p>
       </div>
       <div class="card feature">
         <div class="icon">🏭</div>
@@ -271,7 +272,7 @@
       <div class="card feature">
         <div class="icon">🧪</div>
         <h3>Thoroughly Tested</h3>
-        <p>33 tests (unit + exploit verification). 2 rounds of internal AI-assisted security review. Auditable Solidity with no off-chain dependencies.</p>
+        <p>176 automated tests cover policy limits, x402 flows, CCTP helpers, reputation primitives, and exploit-style edge cases.</p>
       </div>
     </div>
   </div>
@@ -314,8 +315,8 @@
           <td>Varies</td>
         </tr>
         <tr>
-          <td>Gasless (ERC-4337)</td>
-          <td class="check">✓</td>
+          <td>Sponsored gas path</td>
+          <td>External paymaster integration</td>
           <td class="cross">✗</td>
           <td class="cross">✗</td>
           <td class="check">✓</td>
@@ -348,9 +349,10 @@
 
 <footer>
   <div class="container">
-    <p>Agent Wallet — Open source under MIT · <a href="https://github.com/agent-nexus/agent-wallet">GitHub</a></p>
+    <p>Agent Wallet — MIT · Patent Pending · <a href="https://www.npmjs.com/package/agentwallet-sdk">npm</a> · <a href="https://github.com/up2itnow0822/agent-wallet-sdk">GitHub</a></p>
   </div>
 </footer>
 
 </body>
 </html>
+
