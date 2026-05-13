@@ -694,3 +694,6 @@ export type {
   PaymentContext,
   RoutingDecision,
 } from './router/index.js';
+
+export { normalizeCircleAgentPaymentReceipt } from './receipts/index.js';
+export type { AgentPaymentMode, CircleAgentPaymentInput, PortableAgentPaymentReceipt } from './receipts/index.js';
