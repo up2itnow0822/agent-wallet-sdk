@@ -1,11 +1,15 @@
 // [MAX-ADDED] Tests for x402 Client — protocol parsing and payment selection
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { X402Client } from '../client.js';
 import { USDC_ADDRESSES } from '../types.js';
 import type { X402PaymentRequired, X402PaymentRequirements } from '../types.js';
 
 // Mock wallet (we test protocol logic, not on-chain execution)
 const mockWallet = {} as any;
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe('X402Client', () => {
   describe('parse402Response', () => {
@@ -69,11 +73,60 @@ describe('X402Client', () => {
       expect(parsed!.accepts[0].amount).toBe('500000');
     });
 
-    it('returns null for unparsable 402', async () => {
+
+    it('rejects malformed header payloads before payment selection', async () => {
       const client = new X402Client(mockWallet, { autoPay: false });
-      const response = new Response('Payment Required', { status: 402 });
-      const parsed = await client.parse402Response(response);
-      expect(parsed).toBeNull();
+      const malformed = {
+        x402Version: 1,
+        resource: { url: '/api/data', description: 'Data', mimeType: 'application/json' },
+        accepts: [
+          {
+            scheme: 'exact',
+            network: 'base:8453',
+            asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+            amount: '-1000000',
+            payTo: '0xRecipient',
+            maxTimeoutSeconds: 30,
+            extra: {},
+          },
+        ],
+      };
+
+      const response = new Response(null, {
+        status: 402,
+        headers: { 'payment-required': btoa(JSON.stringify(malformed)) },
+      });
+
+      await expect(client.parse402Response(response)).resolves.toBeNull();
+    });
+
+    it('does not pay when the 402 resource is bound to a different path', async () => {
+      const client = new X402Client(mockWallet);
+      const paymentRequired: X402PaymentRequired = {
+        x402Version: 1,
+        resource: { url: '/premium/other', description: 'Other API', mimeType: 'application/json' },
+        accepts: [
+          {
+            scheme: 'exact',
+            network: 'base:8453',
+            asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+            amount: '1000000',
+            payTo: '0x1111111111111111111111111111111111111111',
+            maxTimeoutSeconds: 30,
+            extra: {},
+          },
+        ],
+      };
+      const challenged = new Response(null, {
+        status: 402,
+        headers: { 'payment-required': btoa(JSON.stringify(paymentRequired)) },
+      });
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(challenged);
+
+      const result = await client.fetch('https://api.example.com/premium/data');
+
+      expect(result).toBe(challenged);
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -205,3 +258,4 @@ describe('USDC_ADDRESSES multi-chain coverage', () => {
     expect(USDC_ADDRESSES['base-sepolia:84532']).toBe('0x036CbD53842c5426634e7929541eC2318f3dCF7e');
   });
 });
+

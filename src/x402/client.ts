@@ -25,6 +25,8 @@ import { X402BudgetTracker } from './budget.js';
 import { agentTransferToken, checkBudget } from '../index.js';
 import { resolveAssetAddress } from './multi-asset.js';
 
+const MAX_PAYMENT_REQUIRED_HEADER_BYTES = 64 * 1024;
+
 /**
  * [MAX-ADDED] x402 Payment Client for AgentWallet.
  *
@@ -72,6 +74,10 @@ export class X402Client {
     const paymentRequired = await this.parse402Response(response);
     if (!paymentRequired) {
       return response; // Couldn't parse — return original 402
+    }
+
+    if (!this.isResourceBoundToRequest(paymentRequired, urlStr)) {
+      return response;
     }
 
     // Find a compatible payment option
@@ -149,8 +155,9 @@ export class X402Client {
 
     if (headerValue) {
       try {
+        if (headerValue.length > MAX_PAYMENT_REQUIRED_HEADER_BYTES) return null;
         const decoded = JSON.parse(atob(headerValue));
-        return decoded as X402PaymentRequired;
+        if (this.isValidPaymentRequired(decoded)) return decoded as X402PaymentRequired;
       } catch {
         // Fall through to body parsing
       }
@@ -159,7 +166,7 @@ export class X402Client {
     // Try JSON body as fallback
     try {
       const body = await response.clone().json();
-      if (body.x402Version && body.accepts) {
+      if (this.isValidPaymentRequired(body)) {
         return body as X402PaymentRequired;
       }
     } catch {
@@ -167,6 +174,48 @@ export class X402Client {
     }
 
     return null;
+  }
+
+  /**
+   * Validate basic x402 shape before any payment selection.
+   * Rejects malformed header/body payloads so untrusted 402 responses cannot
+   * smuggle incomplete payment instructions into the wallet flow.
+   */
+  private isValidPaymentRequired(value: unknown): value is X402PaymentRequired {
+    if (!value || typeof value !== 'object') return false;
+    const candidate = value as X402PaymentRequired;
+    if (candidate.x402Version !== 1) return false;
+    if (!candidate.resource || typeof candidate.resource.url !== 'string') return false;
+    if (!Array.isArray(candidate.accepts) || candidate.accepts.length === 0) return false;
+
+    return candidate.accepts.every(req => (
+      req
+      && typeof req.scheme === 'string'
+      && typeof req.network === 'string'
+      && typeof req.asset === 'string'
+      && typeof req.amount === 'string'
+      && /^\d+$/.test(req.amount)
+      && typeof req.payTo === 'string'
+      && typeof req.maxTimeoutSeconds === 'number'
+      && req.maxTimeoutSeconds > 0
+      && req.maxTimeoutSeconds <= 300
+    ));
+  }
+
+  /**
+   * Bind the 402 payment demand to the exact request origin/path.
+   * Allows relative resource URLs from the challenged server, but rejects
+   * cross-origin or cross-path demands that could redirect payment to another
+   * resource after a malicious/intercepted 402 response.
+   */
+  private isResourceBoundToRequest(paymentRequired: X402PaymentRequired, requestUrl: string): boolean {
+    try {
+      const requested = new URL(requestUrl);
+      const resource = new URL(paymentRequired.resource.url, requested.origin);
+      return resource.origin === requested.origin && resource.pathname === requested.pathname;
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -300,3 +349,4 @@ export class X402BudgetExceededError extends Error {
     this.name = 'X402BudgetExceededError';
   }
 }
+

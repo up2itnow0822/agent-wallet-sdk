@@ -178,3 +178,13 @@ print(response.json())
 ---
 
 *Built by the agent-wallet-sdk team. Non-custodial, developer-first, machine-economy ready.*
+## Security hardening checklist
+
+The SDK rejects malformed payment demands and binds every automatic payment to the challenged request origin and path before it considers payment. Keep these controls enabled when integrating x402:
+
+- **Authorization/resource binding:** pay only when `resource.url` matches the request being retried. Cross-origin or cross-path 402 demands are treated as untrusted.
+- **Replay protection:** keep per-service budgets low and prefer short `maxTimeoutSeconds` windows; do not reuse `X-PAYMENT` headers across resources.
+- **Recipient binding:** configure explicit supported assets/networks and verify expected recipients in `onBeforePayment` for high-value endpoints.
+- **Paid-but-denied handling:** treat non-2xx retry responses as unresolved service delivery and reconcile against transaction logs before retrying manually.
+- **Header/body parsing:** accept only valid x402 versioned JSON; oversized or malformed `PAYMENT-REQUIRED` / `x-payment-required` headers are ignored.
+
