@@ -209,6 +209,7 @@ if (result.executed) {
 ### Explainability — Agent Must Show Its Work
 
 Before any payment above your threshold, the agent surfaces:
+
 - What it's paying for
 - What the expected outcome is
 - What it will do if the payment fails
@@ -516,10 +517,11 @@ const display = formatBalance(100_500_000n, 6, 'USDC', 2); // → "100.50 USDC"
 **What the on-chain spend policy enforces:**
 
 Even if an agent is compromised (prompt injection, jailbreak, runaway loop), it cannot:
+
 1. Spend more than the per-transaction limit you set
-2. Exceed the daily/weekly cap you configured
-3. Access funds outside its ERC-6551 token-bound account
-4. Modify its own spend policy (only the owner wallet can do that)
+1. Exceed the daily/weekly cap you configured
+1. Access funds outside its ERC-6551 token-bound account
+1. Modify its own spend policy (only the owner wallet can do that)
 
 **Recommendation:** Start with $1/tx, $10/day. Raise caps only after you've watched the agent run for a week and it behaves exactly as expected.
 
@@ -541,6 +543,7 @@ docker run \
 Stateless design — wallet state lives on-chain, not in application memory. Multiple SDK instances can safely share a wallet address. Nonce management handled.
 
 ### Key compliance properties
+
 - All private keys generated and stored locally — no external key management service
 - No telemetry, analytics, or usage data transmitted to any third party
 - Every transaction on-chain with block number, timestamp, and gas cost — immutable audit log
@@ -609,7 +612,7 @@ These aren't optional features — they're regulatory requirements with fines up
 
 For enterprises evaluating agent payment infrastructure: AgentWallet SDK satisfies EU AI Act high-risk requirements out of the box, with on-chain enforcement (not application-level trust) and zero third-party custody.
 
----
+______________________________________________________________________
 
 ## Market Context
 

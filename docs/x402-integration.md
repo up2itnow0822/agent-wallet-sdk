@@ -7,6 +7,7 @@
 x402 is an HTTP payment protocol for AI agents. When an agent hits a paid endpoint, the server responds with HTTP 402 (Payment Required). The agent pays in USDC, the server verifies, and the resource unlocks — no human, no credit card, no custody transfer.
 
 **2026 Milestones:**
+
 - Stripe integrated x402 on Base (Feb 2026)
 - Etherlink (Tezos EVM) shipped x402 support (Mar 2026)
 - Hyperbolic and CoinGecko live as x402 consumers
@@ -175,9 +176,10 @@ print(response.json())
 - [GitHub](https://github.com/up2itnow0822/agent-wallet-sdk)
 - [WebMCP Integration](https://github.com/up2itnow0822/agent-wallet-sdk/docs/webmcp-integration.md)
 
----
+______________________________________________________________________
 
 *Built by the agent-wallet-sdk team. Non-custodial, developer-first, machine-economy ready.*
+
 ## Security hardening checklist
 
 The SDK rejects malformed payment demands and binds every automatic payment to the challenged request origin and path before it considers payment. Keep these controls enabled when integrating x402:
@@ -187,4 +189,3 @@ The SDK rejects malformed payment demands and binds every automatic payment to t
 - **Recipient binding:** configure explicit supported assets/networks and verify expected recipients in `onBeforePayment` for high-value endpoints.
 - **Paid-but-denied handling:** treat non-2xx retry responses as unresolved service delivery and reconcile against transaction logs before retrying manually.
 - **Header/body parsing:** accept only valid x402 versioned JSON; oversized or malformed `PAYMENT-REQUIRED` / `x-payment-required` headers are ignored.
-

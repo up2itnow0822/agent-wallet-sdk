@@ -16,9 +16,9 @@ AI agents are increasingly acting as economic participants — making purchases,
 
 1. **Human verification fails.** CAPTCHAs, device fingerprinting, behavioral biometrics — all designed to detect humans — fail or produce false negatives when the "user" is a legitimate AI agent.
 
-2. **Authorization is binary.** Current systems authorize or deny. Agents need graduated authorization: spend up to $X per transaction, access these APIs but not those, transact on these chains but not those.
+1. **Authorization is binary.** Current systems authorize or deny. Agents need graduated authorization: spend up to $X per transaction, access these APIs but not those, transact on these chains but not those.
 
-3. **Reputation is non-portable.** An agent's track record on one platform doesn't transfer to another. Each new platform starts from zero trust.
+1. **Reputation is non-portable.** An agent's track record on one platform doesn't transfer to another. Each new platform starts from zero trust.
 
 ## 2. KYA Layers
 
@@ -87,6 +87,7 @@ trust_score = w1 * human_backing_score + w2 * identity_score + w3 * reputation_s
 ```
 
 Where:
+
 - `human_backing_score`: 0-1 based on attestation method (World ID biometric = 1.0, ERC-8004 = 0.7, OAuth = 0.5)
 - `identity_score`: 0-1 based on identity completeness and age
 - `reputation_score`: 0-1 based on transaction history and policy compliance
