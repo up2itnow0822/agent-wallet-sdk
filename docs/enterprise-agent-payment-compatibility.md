@@ -5,8 +5,8 @@ _Last verified: 2026-05-12 19:00 CT_
 Agent-payment infrastructure is converging on three complementary modes:
 
 1. **User-delegated checkout credentials** — Stripe Link for agents can grant a one-time-use card or Shared Payment Token without exposing raw payment credentials. Sellers should treat the token as a bounded mandate with usage limits, currency, max amount, and expiry.
-2. **Autonomous machine micropayments** — Amazon Bedrock AgentCore Payments (preview), built with Coinbase and Stripe, handles x402 negotiation, wallet authentication, stablecoin payment execution, session spending limits, governance, and observability for agents paying APIs, MCP servers, web content, and other agents.
-3. **Stablecoin agent wallets and marketplaces** - Circle Agent Stack adds Agent Wallets, Agent Marketplace, Circle CLI, Circle Skills, and USDC nanopayments. Treat these as the same portable policy/audit problem: agent identity, wallet provider, max spend, resource, proof, receipt, and trace correlation must normalize into agentwallet logs.
+1. **Autonomous machine micropayments** — Amazon Bedrock AgentCore Payments (preview), built with Coinbase and Stripe, handles x402 negotiation, wallet authentication, stablecoin payment execution, session spending limits, governance, and observability for agents paying APIs, MCP servers, web content, and other agents.
+1. **Stablecoin agent wallets and marketplaces** - Circle Agent Stack adds Agent Wallets, Agent Marketplace, Circle CLI, Circle Skills, and USDC nanopayments. Treat these as the same portable policy/audit problem: agent identity, wallet provider, max spend, resource, proof, receipt, and trace correlation must normalize into agentwallet logs.
 
 ## Portable mandate / receipt fields
 
