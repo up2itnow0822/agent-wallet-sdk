@@ -212,7 +212,9 @@ export class X402Client {
     try {
       const requested = new URL(requestUrl);
       const resource = new URL(paymentRequired.resource.url, requested.origin);
-      return resource.origin === requested.origin && resource.pathname === requested.pathname;
+      return resource.origin === requested.origin
+        && resource.pathname === requested.pathname
+        && resource.search === requested.search;
     } catch {
       return false;
     }
@@ -293,7 +295,7 @@ export class X402Client {
 
     if (feeAmount > 0n) {
       await agentTransferToken(this.wallet, {
-        token: req.asset as Address,
+        token: resolvedAddress,
         to: FEE_COLLECTOR,
         amount: feeAmount,
       });

@@ -1,5 +1,23 @@
-// [MAX-ADDED] Tests for x402 Client — protocol parsing and payment selection
 import { describe, it, expect, vi, afterEach } from 'vitest';
+
+const transferCalls = vi.hoisted(() => [] as Array<{
+  token: string;
+  to: string;
+  amount: bigint;
+}>);
+
+vi.mock('../../index.js', () => ({
+  agentTransferToken: vi.fn(async (_wallet, params) => {
+    transferCalls.push(params);
+    return `0x${transferCalls.length.toString().padStart(64, '0')}`;
+  }),
+  checkBudget: vi.fn(async () => ({
+    perTxLimit: 10_000_000_000n,
+    remainingInPeriod: 10_000_000_000n,
+  })),
+}));
+
+// [MAX-ADDED] Tests for x402 Client — protocol parsing and payment selection
 import { X402Client } from '../client.js';
 import { USDC_ADDRESSES } from '../types.js';
 import type { X402PaymentRequired, X402PaymentRequirements } from '../types.js';
@@ -9,6 +27,7 @@ const mockWallet = {} as any;
 
 afterEach(() => {
   vi.restoreAllMocks();
+  transferCalls.length = 0;
 });
 
 describe('X402Client', () => {
@@ -127,6 +146,83 @@ describe('X402Client', () => {
 
       expect(result).toBe(challenged);
       expect(fetchSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not pay when the 402 resource query differs from the request', async () => {
+      const client = new X402Client(mockWallet);
+      const paymentRequired: X402PaymentRequired = {
+        x402Version: 1,
+        resource: { url: '/premium/data?sku=enterprise', description: 'Other SKU', mimeType: 'application/json' },
+        accepts: [
+          {
+            scheme: 'exact',
+            network: 'base:8453',
+            asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+            amount: '1000000',
+            payTo: '0x1111111111111111111111111111111111111111',
+            maxTimeoutSeconds: 30,
+            extra: {},
+          },
+        ],
+      };
+      const challenged = new Response(null, {
+        status: 402,
+        headers: { 'payment-required': btoa(JSON.stringify(paymentRequired)) },
+      });
+      const paid = new Response(JSON.stringify({ ok: true }), { status: 200 });
+      const fetchSpy = vi.spyOn(globalThis, 'fetch')
+        .mockResolvedValueOnce(challenged)
+        .mockResolvedValueOnce(paid);
+
+      const result = await client.fetch('https://api.example.com/premium/data?sku=basic');
+
+      expect(result).toBe(challenged);
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(transferCalls).toHaveLength(0);
+    });
+  });
+
+  describe('fetch', () => {
+    it('uses the resolved token address for symbol-based fee and recipient transfers', async () => {
+      const client = new X402Client(mockWallet, { supportedNetworks: ['base:8453'] });
+      const paymentRequired: X402PaymentRequired = {
+        x402Version: 1,
+        resource: { url: '/premium/data', description: 'Premium API', mimeType: 'application/json' },
+        accepts: [
+          {
+            scheme: 'exact',
+            network: 'base:8453',
+            asset: 'USDC',
+            amount: '1000000',
+            payTo: '0x1111111111111111111111111111111111111111',
+            maxTimeoutSeconds: 30,
+            extra: {},
+          },
+        ],
+      };
+      const challenged = new Response(null, {
+        status: 402,
+        headers: { 'payment-required': btoa(JSON.stringify(paymentRequired)) },
+      });
+      const paid = new Response(JSON.stringify({ ok: true }), { status: 200 });
+      const fetchSpy = vi.spyOn(globalThis, 'fetch')
+        .mockResolvedValueOnce(challenged)
+        .mockResolvedValueOnce(paid);
+
+      const result = await client.fetch('https://api.example.com/premium/data');
+
+      expect(result).toBe(paid);
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+      expect(transferCalls).toHaveLength(2);
+      expect(transferCalls[0]).toMatchObject({
+        token: USDC_ADDRESSES['base:8453'],
+        amount: 7700n,
+      });
+      expect(transferCalls[1]).toMatchObject({
+        token: USDC_ADDRESSES['base:8453'],
+        to: '0x1111111111111111111111111111111111111111',
+        amount: 1000000n,
+      });
     });
   });
 
