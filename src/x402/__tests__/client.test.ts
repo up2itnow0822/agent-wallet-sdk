@@ -100,6 +100,32 @@ describe('X402Client', () => {
       await expect(client.parse402Response(response)).resolves.toBeNull();
     });
 
+    it('rejects zero-amount payment demands before payment selection', async () => {
+      const client = new X402Client(mockWallet, { autoPay: false });
+      const zeroAmount = {
+        x402Version: 1,
+        resource: { url: '/api/data', description: 'Data', mimeType: 'application/json' },
+        accepts: [
+          {
+            scheme: 'exact',
+            network: 'base:8453',
+            asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+            amount: '0',
+            payTo: '0xRecipient',
+            maxTimeoutSeconds: 30,
+            extra: {},
+          },
+        ],
+      };
+
+      const response = new Response(null, {
+        status: 402,
+        headers: { 'payment-required': btoa(JSON.stringify(zeroAmount)) },
+      });
+
+      await expect(client.parse402Response(response)).resolves.toBeNull();
+    });
+
     it('does not pay when the 402 resource is bound to a different path', async () => {
       const client = new X402Client(mockWallet);
       const paymentRequired: X402PaymentRequired = {
@@ -124,6 +150,35 @@ describe('X402Client', () => {
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(challenged);
 
       const result = await client.fetch('https://api.example.com/premium/data');
+
+      expect(result).toBe(challenged);
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not pay when the 402 resource has a different query string', async () => {
+      const client = new X402Client(mockWallet);
+      const paymentRequired: X402PaymentRequired = {
+        x402Version: 1,
+        resource: { url: '/search?q=premium-tier', description: 'Premium API', mimeType: 'application/json' },
+        accepts: [
+          {
+            scheme: 'exact',
+            network: 'base:8453',
+            asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+            amount: '1000000',
+            payTo: '0x1111111111111111111111111111111111111111',
+            maxTimeoutSeconds: 30,
+            extra: {},
+          },
+        ],
+      };
+      const challenged = new Response(null, {
+        status: 402,
+        headers: { 'payment-required': btoa(JSON.stringify(paymentRequired)) },
+      });
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(challenged);
+
+      const result = await client.fetch('https://api.example.com/search?q=free-tier');
 
       expect(result).toBe(challenged);
       expect(fetchSpy).toHaveBeenCalledTimes(1);
@@ -229,6 +284,15 @@ describe('X402Client', () => {
 
       const selected = client.selectPaymentOption(accepts);
       expect(selected!.scheme).toBe('exact');
+    });
+
+    it('does not auto-select unsupported non-exact schemes', () => {
+      const client = new X402Client(mockWallet, { supportedNetworks: ['base:8453'] });
+      const accepts: X402PaymentRequirements[] = [
+        { scheme: 'upto', network: 'base:8453', asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', amount: '5000000', payTo: '0x1', maxTimeoutSeconds: 30, extra: {} },
+      ];
+
+      expect(client.selectPaymentOption(accepts)).toBeNull();
     });
   });
 });
