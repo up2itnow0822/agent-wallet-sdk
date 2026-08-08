@@ -76,7 +76,15 @@ export class X402Client {
       return response; // Couldn't parse — return original 402
     }
 
-    if (!this.isResourceBoundToRequest(paymentRequired, urlStr)) {
+    // Bind against the final response URL (after redirects). Refuse auto-pay when
+    // fetch followed a cross-origin redirect — otherwise a 402 on the redirected
+    // host with a relative resource.url matching the original path can siphon funds.
+    const finalUrl = response.url && response.url.length > 0 ? response.url : urlStr;
+    if (!this.isSafePaymentResponseUrl(urlStr, finalUrl)) {
+      return response;
+    }
+
+    if (!this.isResourceBoundToRequest(paymentRequired, finalUrl)) {
       return response;
     }
 
@@ -203,7 +211,19 @@ export class X402Client {
   }
 
   /**
-   * Bind the 402 payment demand to the exact request origin/path.
+   * Refuse auto-pay when the 402 was reached via a cross-origin redirect.
+   * Same-origin redirects are still subject to resource path binding below.
+   */
+  private isSafePaymentResponseUrl(requestUrl: string, responseUrl: string): boolean {
+    try {
+      return new URL(requestUrl).origin === new URL(responseUrl).origin;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Bind the 402 payment demand to the exact response origin/path.
    * Allows relative resource URLs from the challenged server, but rejects
    * cross-origin or cross-path demands that could redirect payment to another
    * resource after a malicious/intercepted 402 response.
