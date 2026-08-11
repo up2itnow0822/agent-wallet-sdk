@@ -24,6 +24,11 @@ import { DEFAULT_SUPPORTED_NETWORKS } from './types.js';
 import { X402BudgetTracker } from './budget.js';
 import { agentTransferToken, checkBudget } from '../index.js';
 import { resolveAssetAddress } from './multi-asset.js';
+import {
+  X402_FEE_COLLECTOR,
+  x402ProtocolFee,
+  x402TotalDebit,
+} from './fees.js';
 
 const MAX_PAYMENT_REQUIRED_HEADER_BYTES = 64 * 1024;
 
@@ -86,10 +91,11 @@ export class X402Client {
       return response; // No compatible payment option
     }
 
-    // Check budget
+    // Check budget against principal + protocol fee (fee is debited from the wallet too)
     const amount = BigInt(selected.amount);
+    const totalDebit = x402TotalDebit(amount);
     const service = new URL(urlStr).hostname;
-    const budgetCheck = this.budget.checkBudget(service, amount);
+    const budgetCheck = this.budget.checkBudget(service, totalDebit);
     if (!budgetCheck.allowed) {
       throw new X402BudgetExceededError(budgetCheck.reason!, urlStr, selected);
     }
@@ -116,13 +122,13 @@ export class X402Client {
       },
     };
 
-    // Log the transaction
+    // Log the transaction (amount = total wallet debit including protocol fee)
     const log: X402TransactionLog = {
       timestamp: Math.floor(Date.now() / 1000),
       service,
       url: urlStr,
-      amount,
-      token: selected.asset as Address,
+      amount: totalDebit,
+      token: paymentResult.token,
       recipient: selected.payTo as Address,
       txHash: paymentResult.txHash,
       network: selected.network,
@@ -258,7 +264,9 @@ export class X402Client {
    * v6 change: resolves asset address via TokenRegistry before executing.
    * The 402 response may specify an asset by symbol ("USDC") or by address.
    */
-  private async executePayment(req: X402PaymentRequirements): Promise<{ txHash: Hash }> {
+  private async executePayment(
+    req: X402PaymentRequirements
+  ): Promise<{ txHash: Hash; token: Address }> {
     // Resolve the actual contract address for the requested asset
     const resolvedAddress = resolveAssetAddress(req.asset, req.network);
     if (!resolvedAddress) {
@@ -268,45 +276,51 @@ export class X402Client {
       );
     }
 
-    // First check on-chain budget
-    const onChainBudget = await checkBudget(this.wallet, resolvedAddress);
     const amount = BigInt(req.amount);
+    const feeAmount = x402ProtocolFee(amount);
+    const totalDebit = amount + feeAmount;
 
-    if (amount > onChainBudget.perTxLimit) {
+    // On-chain budget must cover principal + protocol fee. Checking principal alone
+    // allows fee-then-principal to debit the fee and then revert the merchant leg
+    // when remaining budget sits between amount and amount+fee.
+    const onChainBudget = await checkBudget(this.wallet, resolvedAddress);
+
+    if (totalDebit > onChainBudget.perTxLimit) {
       throw new X402PaymentError(
-        `Amount ${amount} exceeds on-chain per-tx limit ${onChainBudget.perTxLimit}`,
+        `Total debit ${totalDebit} (amount ${amount} + fee ${feeAmount}) exceeds on-chain per-tx limit ${onChainBudget.perTxLimit}`,
         req
       );
     }
 
-    if (amount > onChainBudget.remainingInPeriod) {
+    if (totalDebit > onChainBudget.remainingInPeriod) {
       throw new X402PaymentError(
-        `Amount ${amount} exceeds remaining period budget ${onChainBudget.remainingInPeriod}`,
+        `Total debit ${totalDebit} (amount ${amount} + fee ${feeAmount}) exceeds remaining period budget ${onChainBudget.remainingInPeriod}`,
         req
       );
     }
 
-    // Calculate and transfer protocol fee (0.77% = 77 bps)
-    const X402_PROTOCOL_FEE_BPS = 77n;
-    const FEE_COLLECTOR: Address = '0xff86829393C6C26A4EC122bE0Cc3E466Ef876AdD';
-    const feeAmount = (amount * X402_PROTOCOL_FEE_BPS) / 10000n;
-
-    if (feeAmount > 0n) {
-      await agentTransferToken(this.wallet, {
-        token: req.asset as Address,
-        to: FEE_COLLECTOR,
-        amount: feeAmount,
-      });
-    }
-
-    // Execute the ERC20 transfer via AgentWallet (full amount to payee)
+    // Pay merchant first so a post-fee principal revert cannot strand fee-only funds.
+    // If the fee transfer fails after principal settles, still return success — failing
+    // the call would invite client retries and duplicate merchant payments.
     const txHash = await agentTransferToken(this.wallet, {
       token: resolvedAddress,
       to: req.payTo as Address,
       amount,
     });
 
-    return { txHash };
+    if (feeAmount > 0n) {
+      try {
+        await agentTransferToken(this.wallet, {
+          token: resolvedAddress,
+          to: X402_FEE_COLLECTOR,
+          amount: feeAmount,
+        });
+      } catch {
+        // Principal already settled; fee can be reconciled out-of-band.
+      }
+    }
+
+    return { txHash, token: resolvedAddress };
   }
 
   // ─── Budget Access ───
