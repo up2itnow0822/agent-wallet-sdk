@@ -27,6 +27,10 @@ import { resolveAssetAddress } from './multi-asset.js';
 
 const MAX_PAYMENT_REQUIRED_HEADER_BYTES = 64 * 1024;
 
+// Must match agentExecute queue detection in src/index.ts.
+const TRANSACTION_QUEUED_TOPIC =
+  '0x338e4b9b04df0b67a953d7ea6a7037128b8c6948e3d8c09a9d51a5f5be6c2284';
+
 /**
  * [MAX-ADDED] x402 Payment Client for AgentWallet.
  *
@@ -292,11 +296,12 @@ export class X402Client {
     const feeAmount = (amount * X402_PROTOCOL_FEE_BPS) / 10000n;
 
     if (feeAmount > 0n) {
-      await agentTransferToken(this.wallet, {
+      const feeHash = await agentTransferToken(this.wallet, {
         token: req.asset as Address,
         to: FEE_COLLECTOR,
         amount: feeAmount,
       });
+      await this.assertPaymentSettled(feeHash, req);
     }
 
     // Execute the ERC20 transfer via AgentWallet (full amount to payee)
@@ -305,8 +310,38 @@ export class X402Client {
       to: req.payTo as Address,
       amount,
     });
+    await this.assertPaymentSettled(txHash, req);
 
     return { txHash };
+  }
+
+  /**
+   * x402 retries with X-PAYMENT as soon as executePayment returns.
+   * agentTransferToken only submits the tx, so a pending, reverted, or
+   * owner-queued transfer must not be treated as a settled payment.
+   */
+  private async assertPaymentSettled(
+    hash: Hash,
+    req: X402PaymentRequirements
+  ): Promise<void> {
+    const receipt = await this.wallet.publicClient.waitForTransactionReceipt({ hash });
+    if (receipt.status === 'reverted') {
+      throw new X402PaymentError(`Payment transaction ${hash} reverted`, req);
+    }
+
+    const walletAddr = String(this.wallet.address ?? '').toLowerCase();
+    const queued = (receipt.logs ?? []).some(
+      (log: { address?: string; topics?: readonly string[] }) =>
+        typeof log.address === 'string'
+        && log.address.toLowerCase() === walletAddr
+        && log.topics?.[0] === TRANSACTION_QUEUED_TOPIC
+    );
+    if (queued) {
+      throw new X402PaymentError(
+        'Payment queued for owner approval and is not settled',
+        req
+      );
+    }
   }
 
   // ─── Budget Access ───

@@ -1,14 +1,63 @@
 // [MAX-ADDED] Tests for x402 Client — protocol parsing and payment selection
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { X402Client } from '../client.js';
+import { X402Client, X402PaymentError } from '../client.js';
 import { USDC_ADDRESSES } from '../types.js';
 import type { X402PaymentRequired, X402PaymentRequirements } from '../types.js';
+
+const mockCheckBudget = vi.fn();
+const mockAgentTransferToken = vi.fn();
+
+vi.mock('../../index.js', () => ({
+  checkBudget: (...args: unknown[]) => mockCheckBudget(...args),
+  agentTransferToken: (...args: unknown[]) => mockAgentTransferToken(...args),
+}));
+
+const WALLET_ADDRESS = '0x1234567890abcdef1234567890abcdef12345678';
+const TRANSACTION_QUEUED_TOPIC =
+  '0x338e4b9b04df0b67a953d7ea6a7037128b8c6948e3d8c09a9d51a5f5be6c2284';
+const TX_HASH = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+const FEE_HASH = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+const BASE_USDC = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
+
+function makeWallet(waitForTransactionReceipt: ReturnType<typeof vi.fn>) {
+  return {
+    address: WALLET_ADDRESS,
+    publicClient: { waitForTransactionReceipt },
+  } as any;
+}
+
+function exactPaymentRequired(url = 'https://api.example.com/premium/data'): X402PaymentRequired {
+  return {
+    x402Version: 1,
+    resource: { url, description: 'Data API', mimeType: 'application/json' },
+    accepts: [
+      {
+        scheme: 'exact',
+        network: 'base:8453',
+        asset: BASE_USDC,
+        amount: '1000000',
+        payTo: '0x1111111111111111111111111111111111111111',
+        maxTimeoutSeconds: 30,
+        extra: {},
+      },
+    ],
+  };
+}
+
+function paymentRequiredResponse(paymentRequired: X402PaymentRequired): Response {
+  return new Response(null, {
+    status: 402,
+    headers: { 'payment-required': btoa(JSON.stringify(paymentRequired)) },
+  });
+}
 
 // Mock wallet (we test protocol logic, not on-chain execution)
 const mockWallet = {} as any;
 
 afterEach(() => {
   vi.restoreAllMocks();
+  mockCheckBudget.mockReset();
+  mockAgentTransferToken.mockReset();
 });
 
 describe('X402Client', () => {
@@ -229,6 +278,86 @@ describe('X402Client', () => {
 
       const selected = client.selectPaymentOption(accepts);
       expect(selected!.scheme).toBe('exact');
+    });
+  });
+
+  describe('payment settlement', () => {
+    it('retries with X-PAYMENT only after the transfer receipt confirms', async () => {
+      const waitForReceipt = vi.fn()
+        .mockResolvedValueOnce({ status: 'success', logs: [] })
+        .mockResolvedValueOnce({ status: 'success', logs: [] });
+      const client = new X402Client(makeWallet(waitForReceipt));
+      mockCheckBudget.mockResolvedValue({
+        token: BASE_USDC,
+        perTxLimit: 10_000_000n,
+        remainingInPeriod: 10_000_000n,
+      });
+      mockAgentTransferToken
+        .mockResolvedValueOnce(FEE_HASH)
+        .mockResolvedValueOnce(TX_HASH);
+
+      const paid = new Response(JSON.stringify({ ok: true }), { status: 200 });
+      const fetchSpy = vi.spyOn(globalThis, 'fetch')
+        .mockResolvedValueOnce(paymentRequiredResponse(exactPaymentRequired()))
+        .mockResolvedValueOnce(paid);
+
+      const result = await client.fetch('https://api.example.com/premium/data');
+
+      expect(result).toBe(paid);
+      expect(waitForReceipt).toHaveBeenNthCalledWith(1, { hash: FEE_HASH });
+      expect(waitForReceipt).toHaveBeenNthCalledWith(2, { hash: TX_HASH });
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+      expect(client.getTransactionLog()).toHaveLength(1);
+      expect(client.getTransactionLog()[0].success).toBe(true);
+    });
+
+    it('does not retry or record spend when the transfer is queued', async () => {
+      const waitForReceipt = vi.fn()
+        .mockResolvedValueOnce({ status: 'success', logs: [] })
+        .mockResolvedValueOnce({
+          status: 'success',
+          logs: [{ address: WALLET_ADDRESS, topics: [TRANSACTION_QUEUED_TOPIC] }],
+        });
+      const client = new X402Client(makeWallet(waitForReceipt));
+      mockCheckBudget.mockResolvedValue({
+        token: BASE_USDC,
+        perTxLimit: 10_000_000n,
+        remainingInPeriod: 10_000_000n,
+      });
+      mockAgentTransferToken
+        .mockResolvedValueOnce(FEE_HASH)
+        .mockResolvedValueOnce(TX_HASH);
+
+      const fetchSpy = vi.spyOn(globalThis, 'fetch')
+        .mockResolvedValueOnce(paymentRequiredResponse(exactPaymentRequired()));
+
+      await expect(client.fetch('https://api.example.com/premium/data'))
+        .rejects.toBeInstanceOf(X402PaymentError);
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(client.getTransactionLog()).toHaveLength(0);
+    });
+
+    it('does not retry or record spend when the transfer reverts', async () => {
+      const waitForReceipt = vi.fn()
+        .mockResolvedValueOnce({ status: 'success', logs: [] })
+        .mockResolvedValueOnce({ status: 'reverted', logs: [] });
+      const client = new X402Client(makeWallet(waitForReceipt));
+      mockCheckBudget.mockResolvedValue({
+        token: BASE_USDC,
+        perTxLimit: 10_000_000n,
+        remainingInPeriod: 10_000_000n,
+      });
+      mockAgentTransferToken
+        .mockResolvedValueOnce(FEE_HASH)
+        .mockResolvedValueOnce(TX_HASH);
+
+      const fetchSpy = vi.spyOn(globalThis, 'fetch')
+        .mockResolvedValueOnce(paymentRequiredResponse(exactPaymentRequired()));
+
+      await expect(client.fetch('https://api.example.com/premium/data'))
+        .rejects.toBeInstanceOf(X402PaymentError);
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(client.getTransactionLog()).toHaveLength(0);
     });
   });
 });
