@@ -62,7 +62,9 @@ export async function toReplayableFetchArgs(
     if (isReplayableBody(init?.body)) {
       return { url, init };
     }
-    return materializeRequest(new Request(url, init));
+    // Undici requires duplex when the body is a stream (Request / ReadableStream).
+    const streamInit = { ...init, duplex: 'half' } as RequestInit;
+    return materializeRequest(new Request(url, streamInit));
   }
 
   const request = init !== undefined ? new Request(input, init) : input;
