@@ -14,7 +14,7 @@ export type ReplayableFetchArgs = {
 };
 
 function isReplayableBody(body: BodyInit | null | undefined): boolean {
-  if (body == null) return true;
+  if (body === null || body === undefined) return true;
   if (typeof body === 'string') return true;
   if (typeof ArrayBuffer !== 'undefined' && body instanceof ArrayBuffer) return true;
   if (typeof ArrayBuffer !== 'undefined' && ArrayBuffer.isView(body)) return true;
