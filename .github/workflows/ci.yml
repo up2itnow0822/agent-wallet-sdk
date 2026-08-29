@@ -5,17 +5,27 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
-  build:
+  verify:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Use Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "20"
+          cache: npm
       - name: Install dependencies
-        run: npm install --if-present || true
+        run: npm ci
+      - name: Build package
+        run: npm run build
       - name: Run tests
-        run: npm test --if-present || echo "No tests configured yet"
+        run: npm test
+      - name: Lint source
+        run: npm run lint
