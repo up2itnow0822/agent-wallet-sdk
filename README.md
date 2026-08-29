@@ -33,13 +33,18 @@ npm install agentwallet-sdk viem
 Solana helpers use an optional peer dependency:
 
 ```bash
-npm install @solana/web3.js
+npm install @solana/web3.js @solana/spl-token
 ```
+
+`@solana/web3.js` supports native SOL operations. Install
+`@solana/spl-token` as well when using SPL-token balance or transfer helpers.
 
 ## Connect to an existing smart wallet
 
-The SDK requires an existing or predicted `AgentAccountV2` address and a viem
-wallet client. Start on a test network or a deployment you control.
+The SDK requires a viem wallet client. This budget-reading example also
+requires an already deployed `AgentAccountV2` address; a predicted address is
+not sufficient because `checkBudget()` reads contract state. Start on a test
+network or a deployment you control.
 
 ```typescript
 import {
@@ -55,7 +60,9 @@ const privateKey = process.env.AGENT_PRIVATE_KEY;
 const accountAddress = process.env.AGENT_WALLET_ADDRESS;
 
 if (!privateKey || !accountAddress) {
-  throw new Error("Set AGENT_PRIVATE_KEY and AGENT_WALLET_ADDRESS");
+  throw new Error(
+    "Set AGENT_PRIVATE_KEY and a deployed AGENT_WALLET_ADDRESS",
+  );
 }
 
 const account = privateKeyToAccount(privateKey as `0x${string}`);
