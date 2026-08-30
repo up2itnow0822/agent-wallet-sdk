@@ -24,6 +24,7 @@ import { DEFAULT_SUPPORTED_NETWORKS } from './types.js';
 import { X402BudgetTracker } from './budget.js';
 import { agentTransferToken, checkBudget } from '../index.js';
 import { resolveAssetAddress } from './multi-asset.js';
+import { toReplayableFetchArgs } from './fetch-args.js';
 
 const MAX_PAYMENT_REQUIRED_HEADER_BYTES = 64 * 1024;
 
@@ -57,10 +58,14 @@ export class X402Client {
 
   /**
    * Make an x402-aware fetch request. Automatically handles 402 responses.
+   *
+   * Accepts the same `(input, init)` shape as native fetch, including `Request`.
+   * Method, headers, and body are materialized before the first hop so a 402
+   * retry cannot silently become a GET with an empty body.
    */
-  async fetch(url: string | URL, init?: RequestInit): Promise<Response> {
-    const urlStr = url.toString();
-    const response = await globalThis.fetch(url, init);
+  async fetch(input: string | URL | Request, init?: RequestInit): Promise<Response> {
+    const { url, init: replayInit } = await toReplayableFetchArgs(input, init);
+    const response = await globalThis.fetch(url, replayInit);
 
     if (response.status !== 402) {
       return response;
@@ -70,42 +75,52 @@ export class X402Client {
       return response;
     }
 
-    // Parse the 402 response
+    return this.settle402AndRetry(response, url, replayInit);
+  }
+
+  /**
+   * Pay an already-received 402 challenge and retry with `X-PAYMENT`.
+   *
+   * Used by wrapWithX402 so the unpaid challenge is not fetched a second time
+   * (a second hop that dropped Request method/body used to turn POST 402s into
+   * unpaid GETs) and so the paid retry goes through the wrapped fetch.
+   */
+  async settle402AndRetry(
+    response: Response,
+    url: string,
+    init?: RequestInit,
+    fetchImpl: typeof globalThis.fetch = globalThis.fetch,
+  ): Promise<Response> {
     const paymentRequired = await this.parse402Response(response);
     if (!paymentRequired) {
-      return response; // Couldn't parse — return original 402
-    }
-
-    if (!this.isResourceBoundToRequest(paymentRequired, urlStr)) {
       return response;
     }
 
-    // Find a compatible payment option
+    if (!this.isResourceBoundToRequest(paymentRequired, url)) {
+      return response;
+    }
+
     const selected = this.selectPaymentOption(paymentRequired.accepts);
     if (!selected) {
-      return response; // No compatible payment option
+      return response;
     }
 
-    // Check budget
     const amount = BigInt(selected.amount);
-    const service = new URL(urlStr).hostname;
+    const service = new URL(url).hostname;
     const budgetCheck = this.budget.checkBudget(service, amount);
     if (!budgetCheck.allowed) {
-      throw new X402BudgetExceededError(budgetCheck.reason!, urlStr, selected);
+      throw new X402BudgetExceededError(budgetCheck.reason!, url, selected);
     }
 
-    // Callback check
     if (this.config.onBeforePayment) {
-      const proceed = await this.config.onBeforePayment(selected, urlStr);
+      const proceed = await this.config.onBeforePayment(selected, url);
       if (!proceed) {
         return response;
       }
     }
 
-    // Execute payment
     const paymentResult = await this.executePayment(selected);
 
-    // Build payment payload
     const paymentPayload: X402PaymentPayload = {
       x402Version: paymentRequired.x402Version,
       resource: paymentRequired.resource,
@@ -116,11 +131,10 @@ export class X402Client {
       },
     };
 
-    // Log the transaction
     const log: X402TransactionLog = {
       timestamp: Math.floor(Date.now() / 1000),
       service,
-      url: urlStr,
+      url,
       amount,
       token: selected.asset as Address,
       recipient: selected.payTo as Address,
@@ -132,17 +146,13 @@ export class X402Client {
     this.budget.recordPayment(log);
     this.config.onPaymentComplete?.(log);
 
-    // Retry request with payment proof
     const retryHeaders = new Headers(init?.headers);
-    const payloadB64 = btoa(JSON.stringify(paymentPayload));
-    retryHeaders.set('X-PAYMENT', payloadB64);
+    retryHeaders.set('X-PAYMENT', btoa(JSON.stringify(paymentPayload)));
 
-    const retryResponse = await globalThis.fetch(url, {
+    return fetchImpl(url, {
       ...init,
       headers: retryHeaders,
     });
-
-    return retryResponse;
   }
 
   /**
