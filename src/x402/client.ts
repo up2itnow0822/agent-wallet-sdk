@@ -188,18 +188,25 @@ export class X402Client {
     if (!candidate.resource || typeof candidate.resource.url !== 'string') return false;
     if (!Array.isArray(candidate.accepts) || candidate.accepts.length === 0) return false;
 
-    return candidate.accepts.every(req => (
-      req
-      && typeof req.scheme === 'string'
-      && typeof req.network === 'string'
-      && typeof req.asset === 'string'
-      && typeof req.amount === 'string'
-      && /^\d+$/.test(req.amount)
-      && typeof req.payTo === 'string'
-      && typeof req.maxTimeoutSeconds === 'number'
-      && req.maxTimeoutSeconds > 0
-      && req.maxTimeoutSeconds <= 300
-    ));
+    return candidate.accepts.every(req => {
+      if (
+        !req
+        || typeof req.scheme !== 'string'
+        || typeof req.network !== 'string'
+        || typeof req.asset !== 'string'
+        || typeof req.amount !== 'string'
+        || !/^\d+$/.test(req.amount)
+        || BigInt(req.amount) <= 0n
+        || typeof req.payTo !== 'string'
+        || typeof req.maxTimeoutSeconds !== 'number'
+        || req.maxTimeoutSeconds <= 0
+        || req.maxTimeoutSeconds > 300
+      ) {
+        return false;
+      }
+
+      return true;
+    });
   }
 
   /**
@@ -212,7 +219,11 @@ export class X402Client {
     try {
       const requested = new URL(requestUrl);
       const resource = new URL(paymentRequired.resource.url, requested.origin);
-      return resource.origin === requested.origin && resource.pathname === requested.pathname;
+      return (
+        resource.origin === requested.origin
+        && resource.pathname === requested.pathname
+        && resource.search === requested.search
+      );
     } catch {
       return false;
     }
@@ -244,9 +255,12 @@ export class X402Client {
 
     if (compatible.length === 0) return null;
 
-    // Prefer "exact" scheme, then lowest amount
+    // Auto-pay only supports immediate exact-settlement transfers. Usage-based
+    // schemes such as "upto" need their own authorization/settlement flow.
     const exact = compatible.filter(r => r.scheme === 'exact');
-    const candidates = exact.length > 0 ? exact : compatible;
+    if (exact.length === 0) return null;
+
+    const candidates = exact;
     candidates.sort((a, b) => Number(BigInt(a.amount) - BigInt(b.amount)));
 
     return candidates[0];
