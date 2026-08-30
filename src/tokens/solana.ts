@@ -77,6 +77,19 @@ export const SOLANA_TOKEN_DECIMALS: Record<SolanaTokenSymbol, number> = {
 
 const BASE58_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
 
+export function formatSolanaUnits(rawAmount: bigint, decimals: number): string {
+  const divisor = 10n ** BigInt(decimals);
+  const whole = rawAmount / divisor;
+  const fraction = rawAmount % divisor;
+
+  if (decimals === 0 || fraction === 0n) {
+    return whole.toString();
+  }
+
+  const fractionStr = fraction.toString().padStart(decimals, '0').replace(/0+$/, '');
+  return `${whole}.${fractionStr}`;
+}
+
 function base58Decode(str: string): Uint8Array {
   const bytes: number[] = [0];
   for (const char of str) {
@@ -271,7 +284,7 @@ export class SolanaWallet {
       // Token account doesn't exist — balance is 0
     }
 
-    const humanBalance = (Number(rawBalance) / 10 ** decimals).toFixed(decimals).replace(/\.?0+$/, '') || '0';
+    const humanBalance = formatSolanaUnits(rawBalance, decimals);
 
     return { mint: mintAddress, rawBalance, humanBalance, decimals };
   }
