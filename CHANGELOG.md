@@ -1,3 +1,18 @@
+## [6.1.0] — 2026-08-30
+
+### Added
+- Public `unity-sdk/` package path for the Unity x402 beta
+- Unity package docs, samples, EditMode tests, and Docker runner assets in the
+  public repository
+
+### Changed
+- Root README now documents the Unity beta, local-first verification, and
+  Docker-runner workflow
+- Security policy now reflects the actual SDK boundary and supported release
+  surfaces
+- GitHub-hosted workflows are manual-only so the repo does not imply a default
+  hosted CI path
+
 ## [6.0.0] — 2026-03-21
 
 ### Added

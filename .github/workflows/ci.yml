@@ -1,10 +1,9 @@
-name: CI
+name: CI (manual only)
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+  # GitHub-hosted CI is disabled by default for this repo.
+  # Use the documented local and Docker runner flows instead.
+  workflow_dispatch:
 
 jobs:
   build:

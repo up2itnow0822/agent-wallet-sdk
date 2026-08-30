@@ -2,58 +2,63 @@
 
 ## Supported Versions
 
-| Version | Supported |
-|---------|-----------|
-| 5.x     | Yes       |
-| 4.x     | Security patches only |
-| < 4.0   | No        |
+| Surface | Supported |
+| --- | --- |
+| TypeScript SDK `6.x` | Yes |
+| Unity x402 SDK `1.x` beta | Yes |
+| TypeScript SDK `5.x` | Security patches only |
+| Older releases and pre-release snapshots | No |
 
 ## Reporting a Vulnerability
 
-Report security vulnerabilities to: **security@ai-agent-economy.com**
+Report security vulnerabilities to:
+<security@ai-agent-economy.com>
 
-We will acknowledge receipt within 48 hours and provide a detailed response within 7 days.
+We will acknowledge receipt within 48 hours and provide a detailed response
+within 7 days.
 
-Do NOT open a public GitHub issue for security vulnerabilities.
+Do not open a public GitHub issue for security vulnerabilities.
 
-## Key Isolation Architecture
+## Security Model
 
-agent-wallet-sdk is designed with the assumption that the host orchestration layer (OpenClaw or any agent framework) will eventually be compromised. Our key management architecture reflects this threat model.
+`agent-wallet-sdk` is non-custodial developer tooling. The SDK does not run a
+hosted custody service or take possession of your funds.
 
-### Architectural Principles
+What the SDK does provide:
 
-1. **Private keys never enter the orchestration process space.** Keys are managed in an isolated key vault with its own memory space. The orchestration layer communicates through a structured API boundary - it can request signatures but never accesses raw key material.
+1. On-chain policy and payment primitives such as x402 flows and spend-policy
+   integrations where the underlying chain/contracts support them.
+2. Auditable transaction execution through your wallet client or signer.
+3. Integration points so you can keep signing in your own infrastructure.
 
-2. **On-chain spending guardrails.** SpendingPolicy contracts enforce per-transaction limits, daily caps, and recipient allowlists at the smart contract level. These limits are enforced on-chain regardless of how the transaction request originated - a compromised orchestration layer cannot bypass them.
+What the SDK does not guarantee by itself:
 
-3. **ERC-6551 token-bound accounts.** Each agent wallet is bound to an NFT, providing auditable on-chain identity. All wallet activity is traceable and anomalous patterns are detectable independently of the orchestration layer.
+1. Host-process isolation for raw private keys.
+2. Protection from a compromised application process if you load secrets
+   directly into that process.
+3. A managed approval, HSM, or vault service.
 
-4. **No shared secrets.** Orchestration auth tokens (like those targeted by CVE-2026-25253) are completely separate from agent-wallet-sdk's key hierarchy. Compromising an OpenClaw session does not grant access to wallet keys.
+## Recommended Hardening
 
-### CVE-2026-25253 Impact Assessment
-
-**CVE-2026-25253** (CVSS 8.8) affects OpenClaw's authentication token handling, allowing malicious MCP plugins to intercept and replay auth tokens from the host process.
-
-**agent-wallet-sdk is NOT affected by this CVE.** The vulnerability targets OpenClaw's session tokens, which are architecturally separate from agent-wallet-sdk's cryptographic key management. Specifically:
-
-- agent-wallet-sdk private keys are stored in an isolated process, not in OpenClaw's memory space
-- SpendingPolicy guardrails are enforced on-chain and cannot be bypassed by replaying OpenClaw auth tokens
-- ERC-6551 wallet operations require cryptographic signatures from the isolated key vault, not OpenClaw session tokens
-
-### Recommended Deployment Hardening
-
-Even though agent-wallet-sdk keys are isolated from orchestration-layer vulnerabilities, we recommend:
-
-- Run MCP tools in Docker containers with `read_only: true` and `no-new-privileges`
-- Rotate orchestration auth tokens every 24 hours
-- Network-segment the wallet service from the orchestration host
-- Monitor for token reuse from unexpected IP addresses
-- Keep agent-wallet-sdk updated to the latest 5.x release
+- Keep signing keys in a hardware wallet, HSM, vault, or dedicated signer
+  service whenever your stack allows it.
+- Prefer signer injection or file-based secret mounts over passing secrets on
+  CLI arguments.
+- Set low per-transaction and period caps before allowing autonomous payment
+  flows.
+- Run automation and MCP-adjacent tooling in isolated containers or dedicated
+  service accounts.
+- Pin dependencies and review changes before production rollout.
 
 ## Dependency Security
 
-We run `npm audit` on every release. Critical or high severity dependency vulnerabilities block releases until resolved.
+We run dependency audits as part of release preparation. Critical or high
+severity dependency vulnerabilities block a release until resolved or formally
+waived with a documented mitigation.
 
 ## Disclosure Timeline
 
-We follow coordinated disclosure with a 90-day window. If we discover a vulnerability in a dependency or related project, we will notify the maintainers and allow 90 days before public disclosure.
+We follow coordinated disclosure with a 90-day window. If we discover a
+vulnerability in a dependency or related project, we notify the maintainers and
+allow up to 90 days before public disclosure unless active exploitation
+requires a faster response.

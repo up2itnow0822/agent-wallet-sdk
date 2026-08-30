@@ -1,8 +1,6 @@
 # AgentWallet SDK
 
-> **v6.0.0** · MIT · **Patent Pending**
->
-> USPTO Provisional filed March 2026: "Non-Custodial Multi-Chain Financial Infrastructure System for Autonomous AI Agents"
+> **v6.1.0** · MIT · TypeScript SDK + Unity x402 beta
 
 **Your AI agent needs to pay for things. Giving it your credit card is insane.**
 
@@ -15,6 +13,28 @@ Agent spent $9.50 today     → 🛑 Next tx blocked ($10/day cap hit)
 ```
 
 The caps are enforced by smart contract. Application code — including the agent itself — cannot override them.
+
+## Launch Status
+
+- The TypeScript SDK in this repo is the canonical npm package.
+- The Unity x402 beta now ships from [`unity-sdk/`](./unity-sdk) and installs
+  through Unity Package Manager.
+- Verification is local-first: `npm test` for the TypeScript package, Unity
+  EditMode tests for the Unity beta, and Docker runners for headless Unity
+  validation.
+- GitHub-hosted workflows are disabled by default for this repo. Use the local
+  and Docker runner paths documented here instead.
+
+### Unity Beta Install
+
+Use Unity Package Manager with this Git URL:
+
+```text
+https://github.com/up2itnow0822/agent-wallet-sdk.git?path=unity-sdk
+```
+
+Unity package docs and test runner details live in
+[`unity-sdk/README.md`](./unity-sdk/README.md).
 
 ## Why Not Just Give the Agent a Wallet?
 
@@ -163,7 +183,7 @@ if (!result.ok) {
 }
 ```
 
-## Production-Ready: Failure Handling, Retries, Fallbacks
+## Operational Hardening Patterns
 
 Real agent deployments fail. Here's how to handle it.
 
@@ -440,7 +460,7 @@ Key management: your private key stays in your infrastructure. Compatible with V
 The SDK runs in your infrastructure — no third-party custody, no shared key management, no data leaving your network.
 
 ```bash
-# Docker deployment
+# Docker deployment example
 docker run \
   -e WALLET_PRIVATE_KEY_FILE=/secrets/key \
   -e RPC_URL=https://mainnet.base.org \
@@ -485,7 +505,7 @@ import { createX402Client } from 'agentwallet-sdk';
 
 // Same API regardless of underlying rail
 const client = createX402Client(wallet, {
-  supportedNetworks: ['base:8453'],  // Solana coming soon
+  supportedNetworks: ['base:8453'],
   globalDailyLimit: 50_000_000n,
 });
 ```
@@ -504,16 +524,23 @@ AgentWallet SDK is designed to work **on top of** [MoonPay's Open Wallet Standar
 
 If your agent framework or wallet provider already implements OWS, AgentWallet SDK plugs in as the payment execution and policy layer. Your agent gets supervised spending, multi-rail routing, and auditable on-chain payments without replacing your existing key management.
 
-## Market Context
+## Current Scope
 
-The agentic AI SDK market is projected to grow from **$2.4B (2025) to $16B by 2030** (Mordor Intelligence). AI agents are forecast to drive **$262B in bank sales** via embedded payments and lending by 2026. x402 alone has processed **140M+ agent payment transactions** ($43M) in 9 months, with 98.6% USDC settlement.
+This repo currently has two public launch surfaces:
 
-AgentWallet SDK is [production-validated with NVIDIA NeMo](https://github.com/NVIDIA/NeMo-Agent-Toolkit-Examples/pull/17) — demonstrating enterprise-grade agent payment integration at scale. NVIDIA reports 88% revenue impact and 87% cost reduction from AI agent deployments.
+- The TypeScript SDK for wallet policies, x402 flows, token utilities, bridge
+  helpers, and related integrations.
+- The Unity x402 beta for NPC or agent-initiated HTTP 402 payment retries in
+  Unity 2021.3+ projects.
+
+Roadmap items stay roadmap items. If a rail or chain is labeled "Roadmap" in
+this README, treat it as not yet launch-ready.
 
 ## Links
 
 - [GitHub](https://github.com/up2itnow0822/agent-wallet-sdk)
 - [npm](https://www.npmjs.com/package/agentwallet-sdk)
+- [Unity x402 beta](https://github.com/up2itnow0822/agent-wallet-sdk/tree/main/unity-sdk)
 - [ERC-8004 Spec](https://eips.ethereum.org/EIPS/eip-8004)
 - [Open Wallet Standard](https://github.com/moonpay/open-wallet-standard) — wallet key management layer
 - [HOL Registry](https://hol.org) — Cross-chain agent identity registry (UAID resolution)

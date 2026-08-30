@@ -1,9 +1,8 @@
-name: AI Security Review
+name: AI Security Review (manual only)
 on:
-  pull_request:
-    types: [opened, synchronize]
-    branches: [main]
-    paths: ['src/**/*.ts', 'src/**/*.sol', 'contracts/**/*.sol']
+  # GitHub-hosted review is disabled by default for this repo.
+  # Trigger manually only when you explicitly want a hosted scan.
+  workflow_dispatch:
 permissions:
   contents: read
   pull-requests: write

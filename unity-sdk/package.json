@@ -1,0 +1,34 @@
+{
+  "name": "com.agentwallet.x402",
+  "version": "1.0.0",
+  "displayName": "Agent Wallet x402 SDK",
+  "description": "x402 HTTP payment protocol for Unity. Let AI agents and NPCs pay for APIs, assets, and services over HTTP with stablecoin micropayments.",
+  "unity": "2021.3",
+  "unityRelease": "0f1",
+  "documentationUrl": "https://github.com/up2itnow0822/agent-wallet-sdk/tree/main/unity-sdk",
+  "changelogUrl": "https://github.com/up2itnow0822/agent-wallet-sdk/blob/main/unity-sdk/CHANGELOG.md",
+  "licensesUrl": "https://github.com/up2itnow0822/agent-wallet-sdk/blob/main/LICENSE",
+  "keywords": [
+    "x402",
+    "payments",
+    "ai-agents",
+    "stablecoin",
+    "micropayments",
+    "web3",
+    "base",
+    "usdc"
+  ],
+  "author": {
+    "name": "AI Agent Economy",
+    "email": "bill@ai-agent-economy.com",
+    "url": "https://ai-agent-economy.com"
+  },
+  "dependencies": {},
+  "samples": [
+    {
+      "displayName": "Basic x402 Payment",
+      "description": "Shows how an NPC agent pays for an API call using x402.",
+      "path": "Samples~/BasicPayment"
+    }
+  ]
+}
