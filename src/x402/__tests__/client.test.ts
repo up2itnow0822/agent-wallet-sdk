@@ -1,11 +1,20 @@
 // [MAX-ADDED] Tests for x402 Client — protocol parsing and payment selection
-import { describe, it, expect, vi, afterEach } from 'vitest';
-import { X402Client } from '../client.js';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
+import { X402Client, X402PaymentError, X402BudgetExceededError } from '../client.js';
 import { USDC_ADDRESSES } from '../types.js';
 import type { X402PaymentRequired, X402PaymentRequirements } from '../types.js';
+import { X402_FEE_COLLECTOR, x402TotalDebit } from '../fees.js';
+import { agentTransferToken, checkBudget } from '../../index.js';
+
+vi.mock('../../index.js', () => ({
+  agentTransferToken: vi.fn(),
+  checkBudget: vi.fn(),
+}));
 
 // Mock wallet (we test protocol logic, not on-chain execution)
 const mockWallet = {} as any;
+
+const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -229,6 +238,114 @@ describe('X402Client', () => {
 
       const selected = client.selectPaymentOption(accepts);
       expect(selected!.scheme).toBe('exact');
+    });
+  });
+
+  describe('executePayment fee + budget safety', () => {
+    const payTo = '0x1111111111111111111111111111111111111111';
+    const amount = 100_000_000n; // 100 USDC
+    const totalDebit = x402TotalDebit(amount); // 100.77 USDC
+
+    function paymentRequired(asset: string = USDC_BASE): X402PaymentRequired {
+      return {
+        x402Version: 1,
+        resource: { url: 'https://api.example.com/premium/data', description: 'Data', mimeType: 'application/json' },
+        accepts: [
+          {
+            scheme: 'exact',
+            network: 'base:8453',
+            asset,
+            amount: amount.toString(),
+            payTo,
+            maxTimeoutSeconds: 30,
+            extra: {},
+          },
+        ],
+      };
+    }
+
+    beforeEach(() => {
+      vi.mocked(agentTransferToken).mockReset();
+      vi.mocked(checkBudget).mockReset();
+      vi.mocked(agentTransferToken).mockResolvedValue(
+        '0xabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabca' as `0x${string}`
+      );
+    });
+
+    it('rejects when remaining budget covers principal but not principal+fee', async () => {
+      vi.mocked(checkBudget).mockResolvedValue({
+        token: USDC_BASE as `0x${string}`,
+        perTxLimit: totalDebit + 1n,
+        remainingInPeriod: amount, // enough for principal only
+      });
+
+      const client = new X402Client(mockWallet, { supportedNetworks: ['base:8453'] });
+      const challenged = new Response(null, {
+        status: 402,
+        headers: { 'payment-required': btoa(JSON.stringify(paymentRequired())) },
+      });
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(challenged);
+
+      await expect(client.fetch('https://api.example.com/premium/data')).rejects.toBeInstanceOf(
+        X402PaymentError
+      );
+      expect(agentTransferToken).not.toHaveBeenCalled();
+    });
+
+    it('rejects client daily budget against total debit including fee', async () => {
+      const client = new X402Client(mockWallet, {
+        supportedNetworks: ['base:8453'],
+        globalDailyLimit: amount, // principal fits, total debit does not
+      });
+      const challenged = new Response(null, {
+        status: 402,
+        headers: { 'payment-required': btoa(JSON.stringify(paymentRequired())) },
+      });
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(challenged);
+
+      await expect(client.fetch('https://api.example.com/premium/data')).rejects.toBeInstanceOf(
+        X402BudgetExceededError
+      );
+      expect(checkBudget).not.toHaveBeenCalled();
+      expect(agentTransferToken).not.toHaveBeenCalled();
+    });
+
+    it('transfers principal before fee and uses resolved token address for both', async () => {
+      vi.mocked(checkBudget).mockResolvedValue({
+        token: USDC_BASE as `0x${string}`,
+        perTxLimit: totalDebit,
+        remainingInPeriod: totalDebit,
+      });
+
+      const client = new X402Client(mockWallet, { supportedNetworks: ['base:8453'] });
+      const challenged = new Response(null, {
+        status: 402,
+        headers: { 'payment-required': btoa(JSON.stringify(paymentRequired('USDC'))) },
+      });
+      const paid = new Response(JSON.stringify({ ok: true }), { status: 200 });
+      const fetchSpy = vi
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValueOnce(challenged)
+        .mockResolvedValueOnce(paid);
+
+      const result = await client.fetch('https://api.example.com/premium/data');
+
+      expect(result.status).toBe(200);
+      expect(agentTransferToken).toHaveBeenCalledTimes(2);
+      expect(vi.mocked(agentTransferToken).mock.calls[0][1]).toEqual({
+        token: USDC_BASE,
+        to: payTo,
+        amount,
+      });
+      expect(vi.mocked(agentTransferToken).mock.calls[1][1]).toEqual({
+        token: USDC_BASE,
+        to: X402_FEE_COLLECTOR,
+        amount: totalDebit - amount,
+      });
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+
+      const summary = client.getDailySpendSummary();
+      expect(summary.global).toBe(totalDebit);
     });
   });
 });
