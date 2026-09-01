@@ -244,12 +244,14 @@ export class X402Client {
 
     if (compatible.length === 0) return null;
 
-    // Prefer "exact" scheme, then lowest amount
+    // Only "exact" is implemented as an ERC-20 transfer of req.amount.
+    // "upto" is a max-authorization scheme (seller settles actual usage later).
+    // Treating req.amount as a one-shot transfer would overpay the cap.
     const exact = compatible.filter(r => r.scheme === 'exact');
-    const candidates = exact.length > 0 ? exact : compatible;
-    candidates.sort((a, b) => Number(BigInt(a.amount) - BigInt(b.amount)));
+    if (exact.length === 0) return null;
+    exact.sort((a, b) => Number(BigInt(a.amount) - BigInt(b.amount)));
 
-    return candidates[0];
+    return exact[0];
   }
 
   /**
@@ -259,6 +261,13 @@ export class X402Client {
    * The 402 response may specify an asset by symbol ("USDC") or by address.
    */
   private async executePayment(req: X402PaymentRequirements): Promise<{ txHash: Hash }> {
+    if (req.scheme !== 'exact') {
+      throw new X402PaymentError(
+        `Unsupported payment scheme "${req.scheme}"; only "exact" transfers are implemented`,
+        req
+      );
+    }
+
     // Resolve the actual contract address for the requested asset
     const resolvedAddress = resolveAssetAddress(req.asset, req.network);
     if (!resolvedAddress) {
