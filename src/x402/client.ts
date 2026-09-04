@@ -23,7 +23,7 @@ import type {
 import { DEFAULT_SUPPORTED_NETWORKS } from './types.js';
 import { X402BudgetTracker } from './budget.js';
 import { agentTransferToken, checkBudget } from '../index.js';
-import { resolveAssetAddress } from './multi-asset.js';
+import { parseNetworkChainId, resolveAssetAddress } from './multi-asset.js';
 
 const MAX_PAYMENT_REQUIRED_HEADER_BYTES = 64 * 1024;
 
@@ -219,16 +219,41 @@ export class X402Client {
   }
 
   /**
+   * Numeric chain id the wallet will actually submit on.
+   * `agentTransferToken` always uses `wallet.chain`; a 402 `network` field is
+   * untrusted and must not pick a token address from a different chain.
+   */
+  private walletChainId(): number | null {
+    const id = this.wallet?.chain?.id;
+    return typeof id === 'number' && Number.isInteger(id) && id > 0 ? id : null;
+  }
+
+  /**
+   * True only when the 402 network's chain id equals the wallet's chain id.
+   * Missing wallet chain, unparseable network, or mismatch all fail closed.
+   */
+  private isNetworkOnWalletChain(network: string): boolean {
+    const walletChainId = this.walletChainId();
+    const networkChainId = parseNetworkChainId(network);
+    return walletChainId !== null && networkChainId !== null && networkChainId === walletChainId;
+  }
+
+  /**
    * Select the best compatible payment option from offered requirements.
    * Prefers: Base network, stablecoins, exact scheme.
    *
    * v6 change: resolves assets via TokenRegistry in addition to USDC_ADDRESSES.
    * Now accepts any ERC-20 whose address is in the TokenRegistry for the network.
+   * Options whose network chain id differs from the wallet chain are rejected —
+   * transfers always execute on wallet.chain, so a foreign network would send
+   * the foreign chain's token address on the wallet chain (or a shared
+   * OP-stack address such as WETH 0x4200…0006).
    */
   selectPaymentOption(accepts: X402PaymentRequirements[]): X402PaymentRequirements | null {
-    // Filter to supported networks and resolvable assets
+    // Filter to supported networks, the wallet's chain, and resolvable assets
     const compatible = accepts.filter(req => {
       if (!this.supportedNetworks.has(req.network)) return false;
+      if (!this.isNetworkOnWalletChain(req.network)) return false;
 
       // Config override: explicit supportedAssets list
       if (this.config.supportedAssets?.[req.network]) {
@@ -259,6 +284,13 @@ export class X402Client {
    * The 402 response may specify an asset by symbol ("USDC") or by address.
    */
   private async executePayment(req: X402PaymentRequirements): Promise<{ txHash: Hash }> {
+    if (!this.isNetworkOnWalletChain(req.network)) {
+      throw new X402PaymentError(
+        `Payment network "${req.network}" does not match wallet chain ${this.walletChainId() ?? 'unknown'}`,
+        req
+      );
+    }
+
     // Resolve the actual contract address for the requested asset
     const resolvedAddress = resolveAssetAddress(req.asset, req.network);
     if (!resolvedAddress) {
