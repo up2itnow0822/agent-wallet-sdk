@@ -4,8 +4,12 @@ import { X402Client } from '../client.js';
 import { USDC_ADDRESSES } from '../types.js';
 import type { X402PaymentRequired, X402PaymentRequirements } from '../types.js';
 
-// Mock wallet (we test protocol logic, not on-chain execution)
-const mockWallet = {} as any;
+// Mock wallet (we test protocol logic, not on-chain execution).
+// chain.id is required: transfers always submit on wallet.chain.
+function walletOnChain(chainId: number) {
+  return { chain: { id: chainId } } as any;
+}
+const mockWallet = walletOnChain(8453);
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -143,8 +147,8 @@ describe('X402Client', () => {
       expect(selected!.network).toBe('base:8453');
     });
 
-    it('selects Arbitrum USDC when configured for arbitrum', () => {
-      const client = new X402Client(mockWallet, { supportedNetworks: ['arbitrum:42161'] });
+    it('selects Arbitrum USDC when the wallet is on Arbitrum', () => {
+      const client = new X402Client(walletOnChain(42161), { supportedNetworks: ['arbitrum:42161'] });
       const accepts: X402PaymentRequirements[] = [
         { scheme: 'exact', network: 'base:8453', asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', amount: '1000000', payTo: '0x1', maxTimeoutSeconds: 30, extra: {} },
         { scheme: 'exact', network: 'arbitrum:42161', asset: '0xaf88d065e77c8cC2239327C5EDb3A432268e5831', amount: '1000000', payTo: '0x1', maxTimeoutSeconds: 30, extra: {} },
@@ -155,8 +159,8 @@ describe('X402Client', () => {
       expect(selected!.network).toBe('arbitrum:42161');
     });
 
-    it('selects Optimism USDC when configured for optimism', () => {
-      const client = new X402Client(mockWallet, { supportedNetworks: ['optimism:10'] });
+    it('selects Optimism USDC when the wallet is on Optimism', () => {
+      const client = new X402Client(walletOnChain(10), { supportedNetworks: ['optimism:10'] });
       const accepts: X402PaymentRequirements[] = [
         { scheme: 'exact', network: 'optimism:10', asset: '0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85', amount: '2000000', payTo: '0x1', maxTimeoutSeconds: 30, extra: {} },
       ];
@@ -166,8 +170,8 @@ describe('X402Client', () => {
       expect(selected!.network).toBe('optimism:10');
     });
 
-    it('selects Polygon USDC when configured for polygon', () => {
-      const client = new X402Client(mockWallet, { supportedNetworks: ['polygon:137'] });
+    it('selects Polygon USDC when the wallet is on Polygon', () => {
+      const client = new X402Client(walletOnChain(137), { supportedNetworks: ['polygon:137'] });
       const accepts: X402PaymentRequirements[] = [
         { scheme: 'exact', network: 'polygon:137', asset: '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359', amount: '500000', payTo: '0x1', maxTimeoutSeconds: 30, extra: {} },
       ];
@@ -177,7 +181,7 @@ describe('X402Client', () => {
       expect(selected!.network).toBe('polygon:137');
     });
 
-    it('selects any supported network when multi-chain configured', () => {
+    it('refuses a foreign-network option even when that network is in supportedNetworks', () => {
       const client = new X402Client(mockWallet, {
         supportedNetworks: ['base:8453', 'ethereum:1', 'arbitrum:42161'],
       });
@@ -185,9 +189,37 @@ describe('X402Client', () => {
         { scheme: 'exact', network: 'arbitrum:42161', asset: '0xaf88d065e77c8cC2239327C5EDb3A432268e5831', amount: '1000000', payTo: '0x1', maxTimeoutSeconds: 30, extra: {} },
       ];
 
-      const selected = client.selectPaymentOption(accepts);
-      expect(selected).not.toBeNull();
-      expect(selected!.network).toBe('arbitrum:42161');
+      expect(client.selectPaymentOption(accepts)).toBeNull();
+    });
+
+    it('refuses OP-stack WETH offered on a different chain than the wallet', () => {
+      // WETH is 0x4200…0006 on both Base and Optimism. A 402 that claims
+      // optimism:10 would otherwise transfer Base WETH to payTo.
+      const client = new X402Client(mockWallet, {
+        supportedNetworks: ['base:8453', 'optimism:10'],
+      });
+      const accepts: X402PaymentRequirements[] = [
+        {
+          scheme: 'exact',
+          network: 'optimism:10',
+          asset: '0x4200000000000000000000000000000000000006',
+          amount: '1000000000000000000',
+          payTo: '0x1111111111111111111111111111111111111111',
+          maxTimeoutSeconds: 30,
+          extra: {},
+        },
+      ];
+
+      expect(client.selectPaymentOption(accepts)).toBeNull();
+    });
+
+    it('returns null when the wallet has no chain id', () => {
+      const client = new X402Client({} as any, { supportedNetworks: ['base:8453'] });
+      const accepts: X402PaymentRequirements[] = [
+        { scheme: 'exact', network: 'base:8453', asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', amount: '1000000', payTo: '0x1', maxTimeoutSeconds: 30, extra: {} },
+      ];
+
+      expect(client.selectPaymentOption(accepts)).toBeNull();
     });
 
     it('prefers lowest amount among compatible options', () => {
@@ -229,6 +261,50 @@ describe('X402Client', () => {
 
       const selected = client.selectPaymentOption(accepts);
       expect(selected!.scheme).toBe('exact');
+    });
+  });
+
+  describe('wallet-chain payment binding', () => {
+    const optimismWeth = {
+      x402Version: 1,
+      resource: { url: '/api/data', description: 'Data API', mimeType: 'application/json' },
+      accepts: [
+        {
+          scheme: 'exact',
+          network: 'optimism:10',
+          asset: '0x4200000000000000000000000000000000000006',
+          amount: '1000000000000000000',
+          payTo: '0x1111111111111111111111111111111111111111',
+          maxTimeoutSeconds: 30,
+          extra: {},
+        },
+      ],
+    } satisfies X402PaymentRequired;
+
+    it('does not auto-pay a 402 whose network is not the wallet chain', async () => {
+      const client = new X402Client(mockWallet, {
+        supportedNetworks: ['base:8453', 'optimism:10'],
+      });
+      const challenged = new Response(null, {
+        status: 402,
+        headers: { 'payment-required': btoa(JSON.stringify(optimismWeth)) },
+      });
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(challenged);
+
+      const result = await client.fetch('https://api.example.com/api/data');
+
+      expect(result).toBe(challenged);
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('throws from executePayment when the selected network is not the wallet chain', async () => {
+      const client = new X402Client(mockWallet, {
+        supportedNetworks: ['base:8453', 'optimism:10'],
+      });
+
+      await expect(
+        (client as any).executePayment(optimismWeth.accepts[0])
+      ).rejects.toThrow(/does not match wallet chain 8453/);
     });
   });
 });
