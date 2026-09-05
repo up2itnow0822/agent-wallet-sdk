@@ -1,6 +1,6 @@
 // [MAX-ADDED] Tests for x402 Client — protocol parsing and payment selection
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { X402Client } from '../client.js';
+import { X402Client, buildX402PaymentIdempotencyKey } from '../client.js';
 import { USDC_ADDRESSES } from '../types.js';
 import type { X402PaymentRequired, X402PaymentRequirements } from '../types.js';
 
@@ -256,6 +256,91 @@ describe('USDC_ADDRESSES multi-chain coverage', () => {
 
   it('includes base-sepolia testnet', () => {
     expect(USDC_ADDRESSES['base-sepolia:84532']).toBe('0x036CbD53842c5426634e7929541eC2318f3dCF7e');
+  });
+});
+
+describe('X402Client retry idempotency', () => {
+  const txHash = ('0x' + 'ab'.repeat(32)) as `0x${string}`;
+  const payTo = '0x1111111111111111111111111111111111111111';
+  const asset = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
+  const url = 'https://api.example.com/premium/data';
+
+  function paymentRequired() {
+    return {
+      x402Version: 1,
+      resource: { url: '/premium/data', description: 'Data API', mimeType: 'application/json' },
+      accepts: [
+        {
+          scheme: 'exact',
+          network: 'base:8453',
+          asset,
+          amount: '1000000',
+          payTo,
+          maxTimeoutSeconds: 30,
+          extra: { nonce: 'intent-1' },
+        },
+      ],
+    };
+  }
+
+  function mock402ThenPaid() {
+    return vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+      const headers = new Headers(init?.headers);
+      if (headers.get('X-PAYMENT')) {
+        return new Response('paid', { status: 200 });
+      }
+      return new Response(null, {
+        status: 402,
+        headers: { 'payment-required': btoa(JSON.stringify(paymentRequired())) },
+      });
+    });
+  }
+
+  it('replays the same settlement instead of transferring twice', async () => {
+    const executeSpy = vi.spyOn(X402Client.prototype as any, 'executePayment')
+      .mockResolvedValue({ txHash });
+    const completions: Array<{ replayed?: boolean; idempotencyKey?: string }> = [];
+    mock402ThenPaid();
+    const client = new X402Client(mockWallet, {
+      onPaymentComplete: (log) => completions.push(log),
+    });
+
+    const first = await client.fetch(url, { method: 'POST' });
+    const second = await client.fetch(url, { method: 'POST' });
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(executeSpy).toHaveBeenCalledTimes(1);
+    expect(client.getTransactionLog()).toHaveLength(1);
+    expect(client.getTransactionLog()[0].idempotencyKey).toBe(
+      buildX402PaymentIdempotencyKey('POST', url, paymentRequired().accepts[0]),
+    );
+    expect(completions).toHaveLength(2);
+    expect(completions[0].replayed).toBe(false);
+    expect(completions[1].replayed).toBe(true);
+    expect(completions[0].idempotencyKey).toBe(completions[1].idempotencyKey);
+  });
+
+  it('keeps concurrent retries on one in-flight settlement', async () => {
+    let release: (value: { txHash: `0x${string}` }) => void = () => {};
+    const gate = new Promise<{ txHash: `0x${string}` }>((resolve) => {
+      release = resolve;
+    });
+    const executeSpy = vi.spyOn(X402Client.prototype as any, 'executePayment')
+      .mockReturnValue(gate);
+    mock402ThenPaid();
+    const client = new X402Client(mockWallet);
+
+    const pending = Promise.all([
+      client.fetch(url, { method: 'POST' }),
+      client.fetch(url, { method: 'POST' }),
+    ]);
+    release({ txHash });
+    const responses = await pending;
+
+    expect(responses.map((response) => response.status)).toEqual([200, 200]);
+    expect(executeSpy).toHaveBeenCalledTimes(1);
+    expect(client.getTransactionLog()).toHaveLength(1);
   });
 });
 

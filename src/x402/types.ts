@@ -83,6 +83,10 @@ export interface X402TransactionLog {
   scheme: string;
   success: boolean;
   error?: string;
+  /** Stable key for the paid intent; retries reuse the same settlement. */
+  idempotencyKey?: string;
+  /** True when this observation reused a prior settlement instead of transferring again. */
+  replayed?: boolean;
 }
 
 /** Configuration for the x402 client */
