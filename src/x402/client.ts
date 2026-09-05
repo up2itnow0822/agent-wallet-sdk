@@ -37,11 +37,36 @@ const MAX_PAYMENT_REQUIRED_HEADER_BYTES = 64 * 1024;
  * 4. Executes USDC payment via AgentWallet contract
  * 5. Retries original request with payment proof
  */
+export function buildX402PaymentIdempotencyKey(
+  method: string,
+  url: string,
+  req: X402PaymentRequirements,
+): string {
+  const extra = req.extra ?? {};
+  const extraKey = typeof extra.idempotencyKey === 'string'
+    ? extra.idempotencyKey
+    : typeof extra.nonce === 'string'
+      ? extra.nonce
+      : '';
+  const normalizedMethod = method.trim().toUpperCase() || 'GET';
+  return [
+    normalizedMethod,
+    url,
+    req.network,
+    req.asset.toLowerCase(),
+    req.amount,
+    req.payTo.toLowerCase(),
+    req.scheme,
+    extraKey,
+  ].join('|');
+}
+
 export class X402Client {
   private wallet: any; // ReturnType<typeof createWallet> — avoid circular import
   private config: X402ClientConfig;
   private budget: X402BudgetTracker;
   private supportedNetworks: Set<string>;
+  private paymentSettlements = new Map<string, Promise<{ txHash: Hash }>>();
 
   constructor(wallet: any, config: X402ClientConfig = {}) {
     this.wallet = wallet;
@@ -86,26 +111,31 @@ export class X402Client {
       return response; // No compatible payment option
     }
 
-    // Check budget
     const amount = BigInt(selected.amount);
     const service = new URL(urlStr).hostname;
-    const budgetCheck = this.budget.checkBudget(service, amount);
-    if (!budgetCheck.allowed) {
-      throw new X402BudgetExceededError(budgetCheck.reason!, urlStr, selected);
-    }
+    const method = typeof init?.method === 'string' && init.method.trim() !== ''
+      ? init.method
+      : 'GET';
+    const idempotencyKey = buildX402PaymentIdempotencyKey(method, urlStr, selected);
+    const alreadySettling = this.paymentSettlements.has(idempotencyKey);
 
-    // Callback check
-    if (this.config.onBeforePayment) {
-      const proceed = await this.config.onBeforePayment(selected, urlStr);
-      if (!proceed) {
-        return response;
+    if (!alreadySettling) {
+      const budgetCheck = this.budget.checkBudget(service, amount);
+      if (!budgetCheck.allowed) {
+        throw new X402BudgetExceededError(budgetCheck.reason!, urlStr, selected);
+      }
+
+      if (this.config.onBeforePayment) {
+        const proceed = await this.config.onBeforePayment(selected, urlStr);
+        if (!proceed) {
+          return response;
+        }
       }
     }
 
-    // Execute payment
-    const paymentResult = await this.executePayment(selected);
+    const paymentResult = await this.settlePayment(idempotencyKey, () => this.executePayment(selected));
+    const replayed = paymentResult.replayed;
 
-    // Build payment payload
     const paymentPayload: X402PaymentPayload = {
       x402Version: paymentRequired.x402Version,
       resource: paymentRequired.resource,
@@ -113,10 +143,11 @@ export class X402Client {
       payload: {
         txHash: paymentResult.txHash,
         network: selected.network,
+        idempotencyKey,
+        replayed,
       },
     };
 
-    // Log the transaction
     const log: X402TransactionLog = {
       timestamp: Math.floor(Date.now() / 1000),
       service,
@@ -128,8 +159,12 @@ export class X402Client {
       network: selected.network,
       scheme: selected.scheme,
       success: true,
+      idempotencyKey,
+      replayed,
     };
-    this.budget.recordPayment(log);
+    if (!replayed) {
+      this.budget.recordPayment(log);
+    }
     this.config.onPaymentComplete?.(log);
 
     // Retry request with payment proof
@@ -143,6 +178,24 @@ export class X402Client {
     });
 
     return retryResponse;
+  }
+
+  private async settlePayment(
+    key: string,
+    execute: () => Promise<{ txHash: Hash }>,
+  ): Promise<{ txHash: Hash; replayed: boolean }> {
+    const existing = this.paymentSettlements.get(key);
+    if (existing) {
+      const settled = await existing;
+      return { txHash: settled.txHash, replayed: true };
+    }
+    const pending = execute().catch((error) => {
+      this.paymentSettlements.delete(key);
+      throw error;
+    });
+    this.paymentSettlements.set(key, pending);
+    const settled = await pending;
+    return { txHash: settled.txHash, replayed: false };
   }
 
   /**
