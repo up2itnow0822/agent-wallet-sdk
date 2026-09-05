@@ -311,10 +311,15 @@ describe('X402Client retry idempotency', () => {
     expect(first.status).toBe(200);
     expect(second.status).toBe(200);
     expect(executeSpy).toHaveBeenCalledTimes(1);
-    expect(client.getTransactionLog()).toHaveLength(1);
-    expect(client.getTransactionLog()[0].idempotencyKey).toBe(
+    const logs = client.getTransactionLog();
+    expect(logs).toHaveLength(2);
+    expect(logs[0].idempotencyKey).toBe(
       buildX402PaymentIdempotencyKey('POST', url, paymentRequired().accepts[0]),
     );
+    expect(logs[0].replayed).toBe(false);
+    expect(logs[1].replayed).toBe(true);
+    expect(logs[0].idempotencyKey).toBe(logs[1].idempotencyKey);
+    expect(client.getDailySpendSummary().global).toBe(1000000n);
     expect(completions).toHaveLength(2);
     expect(completions[0].replayed).toBe(false);
     expect(completions[1].replayed).toBe(true);
@@ -340,7 +345,62 @@ describe('X402Client retry idempotency', () => {
 
     expect(responses.map((response) => response.status)).toEqual([200, 200]);
     expect(executeSpy).toHaveBeenCalledTimes(1);
-    expect(client.getTransactionLog()).toHaveLength(1);
+    const logs = client.getTransactionLog();
+    expect(logs).toHaveLength(2);
+    expect(logs.filter((log) => log.replayed).length).toBe(1);
+    expect(client.getDailySpendSummary().global).toBe(1000000n);
+  });
+
+  it('does not reuse settlement across independent calls without an explicit intent', async () => {
+    const executeSpy = vi.spyOn(X402Client.prototype as any, 'executePayment')
+      .mockResolvedValue({ txHash });
+    const approvals: string[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+      const headers = new Headers(init?.headers);
+      if (headers.get('X-PAYMENT')) {
+        return new Response('paid', { status: 200 });
+      }
+      return new Response(null, {
+        status: 402,
+        headers: {
+          'payment-required': btoa(JSON.stringify({
+            x402Version: 1,
+            resource: { url: '/premium/data', description: 'Data API', mimeType: 'application/json' },
+            accepts: [
+              {
+                scheme: 'exact',
+                network: 'base:8453',
+                asset,
+                amount: '1000000',
+                payTo,
+                maxTimeoutSeconds: 30,
+                extra: {},
+              },
+            ],
+          })),
+        },
+      });
+    });
+    const client = new X402Client(mockWallet, {
+      onBeforePayment: async () => {
+        approvals.push('checked');
+        return true;
+      },
+    });
+
+    const first = await client.fetch(url, { method: 'POST', body: JSON.stringify({ a: 1 }) });
+    const second = await client.fetch(url, { method: 'POST', body: JSON.stringify({ a: 2 }) });
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(executeSpy).toHaveBeenCalledTimes(2);
+    expect(approvals).toEqual(['checked', 'checked']);
+    const logs = client.getTransactionLog();
+    expect(logs).toHaveLength(2);
+    expect(logs[0].replayed).toBe(false);
+    expect(logs[1].replayed).toBe(false);
+    expect(logs[0].idempotencyKey).not.toBe(logs[1].idempotencyKey);
+    expect(client.getDailySpendSummary().global).toBe(2000000n);
   });
 });
 

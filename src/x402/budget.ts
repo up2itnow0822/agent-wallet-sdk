@@ -69,7 +69,7 @@ export class X402BudgetTracker {
     this.maybeResetDaily();
     this.transactionLog.push(log);
 
-    if (log.success) {
+    if (log.success && !log.replayed) {
       const service = log.service;
       this.dailySpend.set(service, (this.dailySpend.get(service) ?? 0n) + log.amount);
       this.globalDailySpend += log.amount;

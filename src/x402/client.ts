@@ -37,17 +37,26 @@ const MAX_PAYMENT_REQUIRED_HEADER_BYTES = 64 * 1024;
  * 4. Executes USDC payment via AgentWallet contract
  * 5. Retries original request with payment proof
  */
+export function explicitX402PaymentIntentId(
+  req: X402PaymentRequirements,
+): string | null {
+  const extra = req.extra ?? {};
+  if (typeof extra.idempotencyKey === 'string' && extra.idempotencyKey.trim() !== '') {
+    return extra.idempotencyKey;
+  }
+  if (typeof extra.nonce === 'string' && extra.nonce.trim() !== '') {
+    return extra.nonce;
+  }
+  return null;
+}
+
 export function buildX402PaymentIdempotencyKey(
   method: string,
   url: string,
   req: X402PaymentRequirements,
+  uniqueFallback?: string,
 ): string {
-  const extra = req.extra ?? {};
-  const extraKey = typeof extra.idempotencyKey === 'string'
-    ? extra.idempotencyKey
-    : typeof extra.nonce === 'string'
-      ? extra.nonce
-      : '';
+  const extraKey = explicitX402PaymentIntentId(req) ?? uniqueFallback ?? '';
   const normalizedMethod = method.trim().toUpperCase() || 'GET';
   return [
     normalizedMethod,
@@ -116,8 +125,14 @@ export class X402Client {
     const method = typeof init?.method === 'string' && init.method.trim() !== ''
       ? init.method
       : 'GET';
-    const idempotencyKey = buildX402PaymentIdempotencyKey(method, urlStr, selected);
-    const alreadySettling = this.paymentSettlements.has(idempotencyKey);
+    const explicitIntent = explicitX402PaymentIntentId(selected);
+    const idempotencyKey = buildX402PaymentIdempotencyKey(
+      method,
+      urlStr,
+      selected,
+      explicitIntent ?? crypto.randomUUID(),
+    );
+    const alreadySettling = explicitIntent !== null && this.paymentSettlements.has(idempotencyKey);
 
     if (!alreadySettling) {
       const budgetCheck = this.budget.checkBudget(service, amount);
@@ -133,7 +148,9 @@ export class X402Client {
       }
     }
 
-    const paymentResult = await this.settlePayment(idempotencyKey, () => this.executePayment(selected));
+    const paymentResult = explicitIntent
+      ? await this.settlePayment(idempotencyKey, () => this.executePayment(selected))
+      : { ...(await this.executePayment(selected)), replayed: false as const };
     const replayed = paymentResult.replayed;
 
     const paymentPayload: X402PaymentPayload = {
@@ -162,9 +179,7 @@ export class X402Client {
       idempotencyKey,
       replayed,
     };
-    if (!replayed) {
-      this.budget.recordPayment(log);
-    }
+    this.budget.recordPayment(log);
     this.config.onPaymentComplete?.(log);
 
     // Retry request with payment proof
