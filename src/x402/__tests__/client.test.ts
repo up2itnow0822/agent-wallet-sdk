@@ -1,6 +1,11 @@
 // [MAX-ADDED] Tests for x402 Client — protocol parsing and payment selection
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { X402Client, buildX402PaymentIdempotencyKey } from '../client.js';
+import {
+  X402Client,
+  buildX402PaymentIdempotencyKey,
+  X402_SETTLEMENT_CACHE_LIMIT,
+  X402_SETTLEMENT_RETRY_WINDOW_MS,
+} from '../client.js';
 import { USDC_ADDRESSES } from '../types.js';
 import type { X402PaymentRequired, X402PaymentRequirements } from '../types.js';
 
@@ -8,6 +13,7 @@ import type { X402PaymentRequired, X402PaymentRequirements } from '../types.js';
 const mockWallet = {} as any;
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -402,5 +408,79 @@ describe('X402Client retry idempotency', () => {
     expect(logs[0].idempotencyKey).not.toBe(logs[1].idempotencyKey);
     expect(client.getDailySpendSummary().global).toBe(2000000n);
   });
+
+  it('expires a successful settlement after the retry window',
+    async () => {
+      vi.useFakeTimers();
+      const executeSpy = vi.spyOn(X402Client.prototype as any, 'executePayment')
+        .mockResolvedValue({ txHash });
+      mock402ThenPaid();
+      const client = new X402Client(mockWallet);
+
+      expect((await client.fetch(url, { method: 'POST' })).status).toBe(200);
+      vi.advanceTimersByTime(X402_SETTLEMENT_RETRY_WINDOW_MS + 1);
+      expect((await client.fetch(url, { method: 'POST' })).status).toBe(200);
+
+      expect(executeSpy).toHaveBeenCalledTimes(2);
+      const logs = client.getTransactionLog();
+      expect(logs).toHaveLength(2);
+      expect(logs[0].replayed).toBe(false);
+      expect(logs[1].replayed).toBe(false);
+      expect(client.getDailySpendSummary().global).toBe(2000000n);
+    },
+  );
+
+  it('evicts the oldest completed settlement once the cache is full',
+    async () => {
+      const executeSpy = vi.spyOn(X402Client.prototype as any, 'executePayment')
+        .mockResolvedValue({ txHash });
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+        const headers = new Headers(init?.headers);
+        if (headers.get('X-PAYMENT')) {
+          return new Response('paid', { status: 200 });
+        }
+        const requested = String(input);
+        const nonce = new URL(requested).searchParams.get('n') ?? 'missing';
+        return new Response(null, {
+          status: 402,
+          headers: {
+            'payment-required': btoa(JSON.stringify({
+              x402Version: 1,
+              resource: {
+                url: new URL(requested).pathname,
+                description: 'Data API',
+                mimeType: 'application/json',
+              },
+              accepts: [
+                {
+                  scheme: 'exact',
+                  network: 'base:8453',
+                  asset,
+                  amount: '1000000',
+                  payTo,
+                  maxTimeoutSeconds: 30,
+                  extra: { nonce },
+                },
+              ],
+            })),
+          },
+        });
+      });
+      const client = new X402Client(mockWallet);
+      const firstUrl = `${url}?n=intent-0`;
+
+      for (let i = 0; i <= X402_SETTLEMENT_CACHE_LIMIT; i++) {
+        const response = await client.fetch(`${url}?n=intent-${i}`, { method: 'POST' });
+        expect(response.status).toBe(200);
+      }
+
+      const overflowCalls = executeSpy.mock.calls.length;
+      expect(overflowCalls).toBe(X402_SETTLEMENT_CACHE_LIMIT + 1);
+
+      const replayAfterEviction = await client.fetch(firstUrl, { method: 'POST' });
+      expect(replayAfterEviction.status).toBe(200);
+      expect(executeSpy).toHaveBeenCalledTimes(overflowCalls + 1);
+    },
+  );
 });
 

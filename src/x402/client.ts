@@ -27,6 +27,17 @@ import { resolveAssetAddress } from './multi-asset.js';
 
 const MAX_PAYMENT_REQUIRED_HEADER_BYTES = 64 * 1024;
 
+/** Max completed settlements retained for retry replay. In-flight entries are never evicted. */
+export const X402_SETTLEMENT_CACHE_LIMIT = 256;
+/** Window during which a successful settlement may be replayed for the same intent. */
+export const X402_SETTLEMENT_RETRY_WINDOW_MS = 120_000;
+
+type CachedSettlement = {
+  promise: Promise<{ txHash: Hash }>;
+  /** null while the settlement is in flight; otherwise epoch ms when the retry window ends. */
+  expiresAt: number | null;
+};
+
 /**
  * [MAX-ADDED] x402 Payment Client for AgentWallet.
  *
@@ -75,7 +86,7 @@ export class X402Client {
   private config: X402ClientConfig;
   private budget: X402BudgetTracker;
   private supportedNetworks: Set<string>;
-  private paymentSettlements = new Map<string, Promise<{ txHash: Hash }>>();
+  private paymentSettlements = new Map<string, CachedSettlement>();
 
   constructor(wallet: any, config: X402ClientConfig = {}) {
     this.wallet = wallet;
@@ -132,6 +143,7 @@ export class X402Client {
       selected,
       explicitIntent ?? crypto.randomUUID(),
     );
+    this.pruneSettlements();
     const alreadySettling = explicitIntent !== null && this.paymentSettlements.has(idempotencyKey);
 
     if (!alreadySettling) {
@@ -195,20 +207,47 @@ export class X402Client {
     return retryResponse;
   }
 
+  private pruneSettlements(now = Date.now()): void {
+    for (const [key, entry] of this.paymentSettlements) {
+      if (entry.expiresAt !== null && entry.expiresAt <= now) {
+        this.paymentSettlements.delete(key);
+      }
+    }
+    if (this.paymentSettlements.size <= X402_SETTLEMENT_CACHE_LIMIT) {
+      return;
+    }
+    for (const [key, entry] of this.paymentSettlements) {
+      if (this.paymentSettlements.size <= X402_SETTLEMENT_CACHE_LIMIT) {
+        break;
+      }
+      if (entry.expiresAt !== null) {
+        this.paymentSettlements.delete(key);
+      }
+    }
+  }
+
   private async settlePayment(
     key: string,
     execute: () => Promise<{ txHash: Hash }>,
   ): Promise<{ txHash: Hash; replayed: boolean }> {
+    this.pruneSettlements();
     const existing = this.paymentSettlements.get(key);
     if (existing) {
-      const settled = await existing;
+      const settled = await existing.promise;
       return { txHash: settled.txHash, replayed: true };
     }
-    const pending = execute().catch((error) => {
+    const pending = execute().then((result) => {
+      const entry = this.paymentSettlements.get(key);
+      if (entry) {
+        entry.expiresAt = Date.now() + X402_SETTLEMENT_RETRY_WINDOW_MS;
+      }
+      this.pruneSettlements();
+      return result;
+    }).catch((error) => {
       this.paymentSettlements.delete(key);
       throw error;
     });
-    this.paymentSettlements.set(key, pending);
+    this.paymentSettlements.set(key, { promise: pending, expiresAt: null });
     const settled = await pending;
     return { txHash: settled.txHash, replayed: false };
   }
