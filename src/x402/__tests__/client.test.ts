@@ -3,6 +3,8 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   X402Client,
   buildX402PaymentIdempotencyKey,
+  canonicalizeX402Amount,
+  canonicalizeX402RequestUrl,
   X402_SETTLEMENT_CACHE_LIMIT,
   X402_SETTLEMENT_RETRY_WINDOW_MS,
 } from '../client.js';
@@ -319,6 +321,18 @@ describe('X402Client retry idempotency', () => {
     ).toBe(
       buildX402PaymentIdempotencyKey('GET', new URL('https://api.example.com'), reqSymbol),
     );
+    expect(canonicalizeX402RequestUrl('https://api.example.com/premium/data#retry'))
+      .toBe(canonicalizeX402RequestUrl('https://api.example.com/premium/data'));
+    expect(canonicalizeX402Amount('01000000')).toBe('1000000');
+    expect(
+      buildX402PaymentIdempotencyKey(
+        'POST',
+        'https://api.example.com/premium/data#retry',
+        { ...reqAddress, amount: '01000000' },
+      ),
+    ).toBe(
+      buildX402PaymentIdempotencyKey('POST', url, reqAddress),
+    );
   });
 
   it('replays equivalent URL and asset representations instead of transferring twice', async () => {
@@ -356,6 +370,53 @@ describe('X402Client retry idempotency', () => {
 
     const first = await client.fetch(url, { method: 'POST' });
     const second = await client.fetch(new URL(url), { method: 'POST' });
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(executeSpy).toHaveBeenCalledTimes(1);
+    const logs = client.getTransactionLog();
+    expect(logs).toHaveLength(2);
+    expect(logs[0].replayed).toBe(false);
+    expect(logs[1].replayed).toBe(true);
+    expect(logs[0].idempotencyKey).toBe(logs[1].idempotencyKey);
+    expect(client.getDailySpendSummary().global).toBe(1000000n);
+  });
+
+  it('replays equivalent URL fragments and amount encodings instead of transferring twice', async () => {
+    const executeSpy = vi.spyOn(X402Client.prototype as any, 'executePayment')
+      .mockResolvedValue({ txHash });
+    let challenges = 0;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+      const headers = new Headers(init?.headers);
+      if (headers.get('X-PAYMENT')) {
+        return new Response('paid', { status: 200 });
+      }
+      challenges += 1;
+      return new Response(null, {
+        status: 402,
+        headers: {
+          'payment-required': btoa(JSON.stringify({
+            x402Version: 1,
+            resource: { url: '/premium/data', description: 'Data API', mimeType: 'application/json' },
+            accepts: [
+              {
+                scheme: 'exact',
+                network: 'base:8453',
+                asset,
+                amount: challenges === 1 ? '01000000' : '1000000',
+                payTo,
+                maxTimeoutSeconds: 30,
+                extra: { nonce: 'intent-1' },
+              },
+            ],
+          })),
+        },
+      });
+    });
+    const client = new X402Client(mockWallet);
+
+    const first = await client.fetch(`${url}#retry`, { method: 'POST' });
+    const second = await client.fetch(url, { method: 'POST' });
 
     expect(first.status).toBe(200);
     expect(second.status).toBe(200);

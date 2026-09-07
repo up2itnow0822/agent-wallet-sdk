@@ -63,9 +63,22 @@ export function explicitX402PaymentIntentId(
 
 export function canonicalizeX402RequestUrl(url: string | URL): string {
   try {
-    return new URL(url).href;
+    const parsed = new URL(url);
+    parsed.hash = '';
+    return parsed.href;
   } catch {
     return String(url);
+  }
+}
+
+export function canonicalizeX402Amount(amount: string): string {
+  if (!/^\d+$/.test(amount)) {
+    return amount;
+  }
+  try {
+    return BigInt(amount).toString();
+  } catch {
+    return amount;
   }
 }
 
@@ -86,7 +99,7 @@ export function buildX402PaymentIdempotencyKey(
     canonicalizeX402RequestUrl(url),
     req.network,
     canonicalizeX402Asset(req.asset, req.network),
-    req.amount,
+    canonicalizeX402Amount(req.amount),
     req.payTo.toLowerCase(),
     req.scheme,
     extraKey,
