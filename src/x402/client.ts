@@ -61,9 +61,21 @@ export function explicitX402PaymentIntentId(
   return null;
 }
 
+export function canonicalizeX402RequestUrl(url: string | URL): string {
+  try {
+    return new URL(url).href;
+  } catch {
+    return String(url);
+  }
+}
+
+export function canonicalizeX402Asset(asset: string, network: string): string {
+  return (resolveAssetAddress(asset, network) ?? asset).toLowerCase();
+}
+
 export function buildX402PaymentIdempotencyKey(
   method: string,
-  url: string,
+  url: string | URL,
   req: X402PaymentRequirements,
   uniqueFallback?: string,
 ): string {
@@ -71,9 +83,9 @@ export function buildX402PaymentIdempotencyKey(
   const normalizedMethod = method.trim().toUpperCase() || 'GET';
   return [
     normalizedMethod,
-    url,
+    canonicalizeX402RequestUrl(url),
     req.network,
-    req.asset.toLowerCase(),
+    canonicalizeX402Asset(req.asset, req.network),
     req.amount,
     req.payTo.toLowerCase(),
     req.scheme,
@@ -104,7 +116,7 @@ export class X402Client {
    * Make an x402-aware fetch request. Automatically handles 402 responses.
    */
   async fetch(url: string | URL, init?: RequestInit): Promise<Response> {
-    const urlStr = url.toString();
+    const urlStr = canonicalizeX402RequestUrl(url);
     const response = await globalThis.fetch(url, init);
 
     if (response.status !== 402) {
