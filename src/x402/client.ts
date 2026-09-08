@@ -168,26 +168,29 @@ export class X402Client {
       selected,
       explicitIntent ?? crypto.randomUUID(),
     );
-    this.pruneSettlements();
-    const alreadySettling = explicitIntent !== null && this.paymentSettlements.has(idempotencyKey);
-
-    if (!alreadySettling) {
+    const ensurePolicyAllowsPayment = async (): Promise<boolean> => {
       const budgetCheck = this.budget.checkBudget(service, amount);
       if (!budgetCheck.allowed) {
         throw new X402BudgetExceededError(budgetCheck.reason!, urlStr, selected);
       }
-
       if (this.config.onBeforePayment) {
-        const proceed = await this.config.onBeforePayment(selected, urlStr);
-        if (!proceed) {
-          return response;
-        }
+        return this.config.onBeforePayment(selected, urlStr);
       }
-    }
+      return true;
+    };
 
     const paymentResult = explicitIntent
-      ? await this.settlePayment(idempotencyKey, () => this.executePayment(selected))
-      : { ...(await this.executePayment(selected)), replayed: false as const };
+      ? await this.settlePayment(
+          idempotencyKey,
+          () => this.executePayment(selected),
+          ensurePolicyAllowsPayment,
+        )
+      : (await ensurePolicyAllowsPayment()
+          ? { ...(await this.executePayment(selected)), replayed: false as const }
+          : null);
+    if (!paymentResult) {
+      return response;
+    }
     const replayed = paymentResult.replayed;
 
     const paymentPayload: X402PaymentPayload = {
@@ -254,12 +257,25 @@ export class X402Client {
   private async settlePayment(
     key: string,
     execute: () => Promise<{ txHash: Hash }>,
-  ): Promise<{ txHash: Hash; replayed: boolean }> {
+    beforeFreshTransfer?: () => Promise<boolean>,
+  ): Promise<{ txHash: Hash; replayed: boolean } | null> {
     this.pruneSettlements();
     const existing = this.paymentSettlements.get(key);
     if (existing) {
       const settled = await existing.promise;
       return { txHash: settled.txHash, replayed: true };
+    }
+    if (beforeFreshTransfer) {
+      const proceed = await beforeFreshTransfer();
+      if (!proceed) {
+        return null;
+      }
+      this.pruneSettlements();
+      const existingAfterPolicy = this.paymentSettlements.get(key);
+      if (existingAfterPolicy) {
+        const settled = await existingAfterPolicy.promise;
+        return { txHash: settled.txHash, replayed: true };
+      }
     }
     const pending = execute().then((result) => {
       const entry = this.paymentSettlements.get(key);

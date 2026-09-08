@@ -557,6 +557,37 @@ describe('X402Client retry idempotency', () => {
     },
   );
 
+  it('rechecks policy when an expired settlement is removed before reuse', async () => {
+    vi.useFakeTimers();
+    const executeSpy = vi.spyOn(X402Client.prototype as any, 'executePayment')
+      .mockResolvedValue({ txHash });
+    const approvals: string[] = [];
+    mock402ThenPaid();
+    const client = new X402Client(mockWallet, {
+      globalDailyLimit: 1000000n,
+      onBeforePayment: async () => {
+        approvals.push('checked');
+        return true;
+      },
+    });
+
+    expect((await client.fetch(url, { method: 'POST' })).status).toBe(200);
+    expect(approvals).toEqual(['checked']);
+    expect(executeSpy).toHaveBeenCalledTimes(1);
+
+    const originalSettle = (client as any).settlePayment.bind(client);
+    vi.spyOn(client as any, 'settlePayment').mockImplementation(async (...args: unknown[]) => {
+      vi.advanceTimersByTime(X402_SETTLEMENT_RETRY_WINDOW_MS + 1);
+      return originalSettle(...args);
+    });
+
+    await expect(client.fetch(url, { method: 'POST' })).rejects.toThrow(/global daily limit/);
+    expect(executeSpy).toHaveBeenCalledTimes(1);
+    expect(approvals).toEqual(['checked']);
+    expect(client.getTransactionLog()).toHaveLength(1);
+    expect(client.getDailySpendSummary().global).toBe(1000000n);
+  });
+
   it('evicts the oldest completed settlement once the cache is full',
     async () => {
       const executeSpy = vi.spyOn(X402Client.prototype as any, 'executePayment')
