@@ -236,21 +236,23 @@ export class X402Client {
   }
 
   private pruneSettlements(now = Date.now()): void {
+    const completed: string[] = [];
     for (const [key, entry] of this.paymentSettlements) {
-      if (entry.expiresAt !== null && entry.expiresAt <= now) {
-        this.paymentSettlements.delete(key);
+      if (entry.expiresAt === null) {
+        continue;
       }
+      if (entry.expiresAt <= now) {
+        this.paymentSettlements.delete(key);
+        continue;
+      }
+      completed.push(key);
     }
-    if (this.paymentSettlements.size <= X402_SETTLEMENT_CACHE_LIMIT) {
+    const overflow = completed.length - X402_SETTLEMENT_CACHE_LIMIT;
+    if (overflow <= 0) {
       return;
     }
-    for (const [key, entry] of this.paymentSettlements) {
-      if (this.paymentSettlements.size <= X402_SETTLEMENT_CACHE_LIMIT) {
-        break;
-      }
-      if (entry.expiresAt !== null) {
-        this.paymentSettlements.delete(key);
-      }
+    for (let i = 0; i < overflow; i++) {
+      this.paymentSettlements.delete(completed[i]);
     }
   }
 

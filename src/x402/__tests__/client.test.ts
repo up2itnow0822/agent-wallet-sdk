@@ -640,5 +640,77 @@ describe('X402Client retry idempotency', () => {
       expect(executeSpy).toHaveBeenCalledTimes(overflowCalls + 1);
     },
   );
+
+  it('does not evict a completed settlement because in-flight entries exceed the cache limit',
+    async () => {
+      const releases = new Map<string, (value: { txHash: `0x${string}` }) => void>();
+      const executeSpy = vi.spyOn(X402Client.prototype as any, 'executePayment')
+        .mockImplementation(async (selected: { extra?: { nonce?: string } }) => {
+          const nonce = String(selected.extra?.nonce ?? '');
+          return new Promise<{ txHash: `0x${string}` }>((resolve) => {
+            releases.set(nonce, resolve);
+          });
+        });
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+        const headers = new Headers(init?.headers);
+        if (headers.get('X-PAYMENT')) {
+          return new Response('paid', { status: 200 });
+        }
+        const requested = String(input);
+        const nonce = new URL(requested).searchParams.get('n') ?? 'missing';
+        return new Response(null, {
+          status: 402,
+          headers: {
+            'payment-required': btoa(JSON.stringify({
+              x402Version: 1,
+              resource: {
+                url: new URL(requested).pathname,
+                description: 'Data API',
+                mimeType: 'application/json',
+              },
+              accepts: [
+                {
+                  scheme: 'exact',
+                  network: 'base:8453',
+                  asset,
+                  amount: '1000000',
+                  payTo,
+                  maxTimeoutSeconds: 30,
+                  extra: { nonce },
+                },
+              ],
+            })),
+          },
+        });
+      });
+      const client = new X402Client(mockWallet);
+      const firstUrl = `${url}?n=intent-0`;
+      const inflight = X402_SETTLEMENT_CACHE_LIMIT + 1;
+      const pending = Array.from({ length: inflight }, (_, i) => (
+        client.fetch(`${url}?n=intent-${i}`, { method: 'POST' })
+      ));
+
+      await vi.waitFor(() => {
+        expect(releases.size).toBe(inflight);
+      });
+      const releaseFirst = releases.get('intent-0');
+      expect(releaseFirst).toBeTypeOf('function');
+      releaseFirst!({ txHash });
+      expect((await pending[0]).status).toBe(200);
+
+      const replay = await client.fetch(firstUrl, { method: 'POST' });
+      expect(replay.status).toBe(200);
+      expect(executeSpy).toHaveBeenCalledTimes(inflight);
+      expect(client.getTransactionLog().filter((log) => log.replayed)).toHaveLength(1);
+
+      for (const [nonce, release] of releases) {
+        if (nonce !== 'intent-0') {
+          release({ txHash });
+        }
+      }
+      const remaining = await Promise.all(pending.slice(1));
+      expect(remaining.every((response) => response.status === 200)).toBe(true);
+    },
+  );
 });
 
