@@ -645,8 +645,9 @@ describe('X402Client retry idempotency', () => {
     async () => {
       const releases = new Map<string, (value: { txHash: `0x${string}` }) => void>();
       const executeSpy = vi.spyOn(X402Client.prototype as any, 'executePayment')
-        .mockImplementation(async (selected: { extra?: { nonce?: string } }) => {
-          const nonce = String(selected.extra?.nonce ?? '');
+        .mockImplementation(async (...args: unknown[]) => {
+          const selected = args[0] as { extra?: { nonce?: string } } | undefined;
+          const nonce = String(selected?.extra?.nonce ?? '');
           return new Promise<{ txHash: `0x${string}` }>((resolve) => {
             releases.set(nonce, resolve);
           });
