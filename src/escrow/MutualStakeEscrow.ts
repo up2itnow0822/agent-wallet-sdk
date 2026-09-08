@@ -1,4 +1,5 @@
 import {
+  parseEventLogs,
   type Address,
   type Hex,
   type PublicClient,
@@ -155,27 +156,28 @@ export class MutualStakeEscrow {
       chain: this.walletClient.chain,
     });
 
-    await this.publicClient.waitForTransactionReceipt({ hash: txHash });
+    const receipt = await this.publicClient.waitForTransactionReceipt({ hash: txHash });
 
-    // Read vault address from return data via simulation
-    // (VaultCreated event parsing reserved for future use)
-    const vaultAddress = await this.publicClient.readContract({
-      address: this.factoryAddress,
+    // createEscrow is nonpayable. A second eth_call after the mined tx
+    // cannot recover its return value: a nonce/CREATE factory yields the
+    // *next* vault, and a CREATE2-same-salt factory reverts because the
+    // vault already exists. The address of the vault that was actually
+    // deployed is on VaultCreated in this receipt.
+    const createdLogs = parseEventLogs({
       abi: StakeVaultFactoryAbi,
-      functionName: 'createEscrow',
-      args: [
-        account.address,
-        params.seller,
-        token,
-        params.paymentAmount,
-        params.buyerStake,
-        params.sellerStake,
-        verifierAddress,
-        verifierData,
-        BigInt(params.deadline),
-        BigInt(params.challengeWindow),
-      ],
-    }) as Address;
+      eventName: 'VaultCreated',
+      logs: receipt.logs,
+    }).filter(
+      (log) => log.address.toLowerCase() === this.factoryAddress.toLowerCase()
+    );
+
+    const vaultAddress = createdLogs[0]?.args.vault;
+    if (!vaultAddress) {
+      throw new Error(
+        'Escrow transaction confirmed but VaultCreated was not found in the receipt. ' +
+          'Refusing to guess a vault address from a post-transaction createEscrow simulation.'
+      );
+    }
 
     return { address: vaultAddress, txHash };
   }
