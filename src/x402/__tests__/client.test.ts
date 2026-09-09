@@ -11,8 +11,13 @@ import {
 import { USDC_ADDRESSES } from '../types.js';
 import type { X402PaymentRequired, X402PaymentRequirements } from '../types.js';
 
-// Mock wallet (we test protocol logic, not on-chain execution)
-const mockWallet = {} as any;
+// Mock wallet (we test protocol logic, not on-chain execution).
+// Settlements stay in-flight until publicClient confirms the receipt.
+const mockWallet = {
+  publicClient: {
+    waitForTransactionReceipt: async () => ({ status: 'success' }),
+  },
+} as any;
 
 afterEach(() => {
   vi.useRealTimers();
@@ -713,5 +718,57 @@ describe('X402Client retry idempotency', () => {
       expect(remaining.every((response) => response.status === 200)).toBe(true);
     },
   );
+
+  it('reuses a submitted settlement until the receipt is final', async () => {
+    let releaseReceipt: (value: { status: string }) => void = () => {};
+    const receiptGate = new Promise<{ status: string }>((resolve) => {
+      releaseReceipt = resolve;
+    });
+    const waitReceipt = vi.fn(() => receiptGate);
+    const wallet = {
+      publicClient: { waitForTransactionReceipt: waitReceipt },
+    } as any;
+    const executeSpy = vi.spyOn(X402Client.prototype as any, 'executePayment')
+      .mockResolvedValue({ txHash });
+    mock402ThenPaid();
+    const client = new X402Client(wallet);
+
+    const firstPromise = client.fetch(url, { method: 'POST' });
+    await vi.waitFor(() => {
+      expect(waitReceipt).toHaveBeenCalledTimes(1);
+    });
+    const secondPromise = client.fetch(url, { method: 'POST' });
+    releaseReceipt({ status: 'success' });
+    const [first, second] = await Promise.all([firstPromise, secondPromise]);
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(executeSpy).toHaveBeenCalledTimes(1);
+    expect(waitReceipt).toHaveBeenCalledWith({ hash: txHash });
+    expect(client.getTransactionLog().filter((log) => log.replayed)).toHaveLength(1);
+    expect(client.getDailySpendSummary().global).toBe(1000000n);
+  });
+
+  it('drops a reverted settlement so a later retry can transfer again', async () => {
+    const waitReceipt = vi.fn()
+      .mockResolvedValueOnce({ status: 'reverted' })
+      .mockResolvedValue({ status: 'success' });
+    const wallet = {
+      publicClient: { waitForTransactionReceipt: waitReceipt },
+    } as any;
+    const executeSpy = vi.spyOn(X402Client.prototype as any, 'executePayment')
+      .mockResolvedValue({ txHash });
+    mock402ThenPaid();
+    const client = new X402Client(wallet);
+
+    await expect(client.fetch(url, { method: 'POST' })).rejects.toThrow(/reverted/);
+    expect(executeSpy).toHaveBeenCalledTimes(1);
+    expect(client.getTransactionLog()).toHaveLength(0);
+
+    expect((await client.fetch(url, { method: 'POST' })).status).toBe(200);
+    expect(executeSpy).toHaveBeenCalledTimes(2);
+    expect(client.getTransactionLog()).toHaveLength(1);
+    expect(client.getTransactionLog()[0].replayed).toBe(false);
+  });
 });
 

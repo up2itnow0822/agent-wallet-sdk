@@ -279,7 +279,13 @@ export class X402Client {
         return { txHash: settled.txHash, replayed: true };
       }
     }
-    const pending = execute().then((result) => {
+    const pending = execute().then(async (result) => {
+      try {
+        await this.waitForSettlementReceipt(result.txHash);
+      } catch (error) {
+        this.paymentSettlements.delete(key);
+        throw error;
+      }
       const entry = this.paymentSettlements.get(key);
       if (entry) {
         entry.expiresAt = Date.now() + X402_SETTLEMENT_RETRY_WINDOW_MS;
@@ -293,6 +299,25 @@ export class X402Client {
     this.paymentSettlements.set(key, { promise: pending, expiresAt: null });
     const settled = await pending;
     return { txHash: settled.txHash, replayed: false };
+  }
+
+  /**
+   * A submitted hash is not a completed settlement. Keep the cache entry
+   * in-flight (expiresAt = null) until the receipt is final so a later retry
+   * cannot broadcast a second fee+payee transfer.
+   */
+  private async waitForSettlementReceipt(txHash: Hash): Promise<void> {
+    const publicClient = this.wallet?.publicClient;
+    const wait = publicClient?.waitForTransactionReceipt;
+    if (typeof wait !== 'function') {
+      throw new Error(
+        'x402 settlement cannot be confirmed: wallet publicClient.waitForTransactionReceipt is missing',
+      );
+    }
+    const receipt = await wait.call(publicClient, { hash: txHash });
+    if (!receipt || receipt.status === 'reverted') {
+      throw new Error(`x402 settlement transaction reverted (${txHash})`);
+    }
   }
 
   /**
