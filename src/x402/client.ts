@@ -38,6 +38,9 @@ type CachedSettlement = {
   expiresAt: number | null;
 };
 
+/** Internal: onBeforePayment returned false. Waiters must observe skip, not a second transfer. */
+const X402_POLICY_SKIP = Symbol('x402-policy-skip');
+
 /**
  * [MAX-ADDED] x402 Payment Client for AgentWallet.
  *
@@ -264,41 +267,49 @@ export class X402Client {
     this.pruneSettlements();
     const existing = this.paymentSettlements.get(key);
     if (existing) {
-      const settled = await existing.promise;
-      return { txHash: settled.txHash, replayed: true };
+      return this.observeSettledPayment(existing.promise, true);
     }
-    if (beforeFreshTransfer) {
-      const proceed = await beforeFreshTransfer();
-      if (!proceed) {
-        return null;
-      }
-      this.pruneSettlements();
-      const existingAfterPolicy = this.paymentSettlements.get(key);
-      if (existingAfterPolicy) {
-        const settled = await existingAfterPolicy.promise;
-        return { txHash: settled.txHash, replayed: true };
-      }
-    }
-    const pending = execute().then(async (result) => {
+
+    // Reserve the in-flight slot before any await so concurrent retries share
+    // one onBeforePayment and cannot start a second fee+payee transfer.
+    const pending = (async () => {
       try {
+        if (beforeFreshTransfer) {
+          const proceed = await beforeFreshTransfer();
+          if (!proceed) {
+            throw X402_POLICY_SKIP;
+          }
+        }
+        const result = await execute();
         await this.waitForSettlementReceipt(result.txHash);
+        const entry = this.paymentSettlements.get(key);
+        if (entry) {
+          entry.expiresAt = Date.now() + X402_SETTLEMENT_RETRY_WINDOW_MS;
+        }
+        this.pruneSettlements();
+        return result;
       } catch (error) {
         this.paymentSettlements.delete(key);
         throw error;
       }
-      const entry = this.paymentSettlements.get(key);
-      if (entry) {
-        entry.expiresAt = Date.now() + X402_SETTLEMENT_RETRY_WINDOW_MS;
-      }
-      this.pruneSettlements();
-      return result;
-    }).catch((error) => {
-      this.paymentSettlements.delete(key);
-      throw error;
-    });
+    })();
     this.paymentSettlements.set(key, { promise: pending, expiresAt: null });
-    const settled = await pending;
-    return { txHash: settled.txHash, replayed: false };
+    return this.observeSettledPayment(pending, false);
+  }
+
+  private async observeSettledPayment(
+    pending: Promise<{ txHash: Hash }>,
+    replayed: boolean,
+  ): Promise<{ txHash: Hash; replayed: boolean } | null> {
+    try {
+      const settled = await pending;
+      return { txHash: settled.txHash, replayed };
+    } catch (error) {
+      if (error === X402_POLICY_SKIP) {
+        return null;
+      }
+      throw error;
+    }
   }
 
   /**

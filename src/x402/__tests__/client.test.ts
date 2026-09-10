@@ -489,6 +489,48 @@ describe('X402Client retry idempotency', () => {
     expect(client.getDailySpendSummary().global).toBe(1000000n);
   });
 
+  it('single-flights onBeforePayment and execute for concurrent same-intent retries', async () => {
+    let releasePolicy: (value: boolean) => void = () => {};
+    const policyGate = new Promise<boolean>((resolve) => {
+      releasePolicy = resolve;
+    });
+    let release: (value: { txHash: `0x${string}` }) => void = () => {};
+    const gate = new Promise<{ txHash: `0x${string}` }>((resolve) => {
+      release = resolve;
+    });
+    const executeSpy = vi.spyOn(X402Client.prototype as any, 'executePayment')
+      .mockReturnValue(gate);
+    const approvals: string[] = [];
+    mock402ThenPaid();
+    const client = new X402Client(mockWallet, {
+      onBeforePayment: async () => {
+        approvals.push('checked');
+        return policyGate;
+      },
+    });
+
+    const pending = Promise.all([
+      client.fetch(url, { method: 'POST' }),
+      client.fetch(url, { method: 'POST' }),
+    ]);
+    await vi.waitFor(() => {
+      expect(approvals).toEqual(['checked']);
+    });
+    expect(executeSpy).toHaveBeenCalledTimes(0);
+    releasePolicy(true);
+    await vi.waitFor(() => {
+      expect(executeSpy).toHaveBeenCalledTimes(1);
+    });
+    release({ txHash });
+    const responses = await pending;
+
+    expect(responses.map((response) => response.status)).toEqual([200, 200]);
+    expect(executeSpy).toHaveBeenCalledTimes(1);
+    expect(approvals).toEqual(['checked']);
+    expect(client.getTransactionLog().filter((log) => log.replayed)).toHaveLength(1);
+    expect(client.getDailySpendSummary().global).toBe(1000000n);
+  });
+
   it('does not reuse settlement across independent calls without an explicit intent', async () => {
     const executeSpy = vi.spyOn(X402Client.prototype as any, 'executePayment')
       .mockResolvedValue({ txHash });
