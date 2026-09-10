@@ -281,7 +281,17 @@ export class X402Client {
           }
         }
         const result = await execute();
-        await this.waitForSettlementReceipt(result.txHash);
+        try {
+          await this.waitForSettlementReceipt(result.txHash);
+        } catch (receiptError) {
+          // Broadcast already happened. Evict only a confirmed revert so a
+          // later retry can transfer again. RPC timeouts and missing receipts
+          // stay in-flight and reuse this hash instead of paying twice.
+          if (!(receiptError instanceof X402SettlementRevertedError)) {
+            return result;
+          }
+          throw receiptError;
+        }
         const entry = this.paymentSettlements.get(key);
         if (entry) {
           entry.expiresAt = Date.now() + X402_SETTLEMENT_RETRY_WINDOW_MS;
@@ -326,8 +336,11 @@ export class X402Client {
       );
     }
     const receipt = await wait.call(publicClient, { hash: txHash });
-    if (!receipt || receipt.status === 'reverted') {
-      throw new Error(`x402 settlement transaction reverted (${txHash})`);
+    if (receipt?.status === 'reverted') {
+      throw new X402SettlementRevertedError(txHash);
+    }
+    if (!receipt) {
+      throw new Error(`x402 settlement receipt missing (${txHash})`);
     }
   }
 
@@ -514,6 +527,13 @@ export class X402Client {
 }
 
 // ─── Error Types ───
+
+export class X402SettlementRevertedError extends Error {
+  constructor(public readonly txHash: Hash) {
+    super(`x402 settlement transaction reverted (${txHash})`);
+    this.name = 'X402SettlementRevertedError';
+  }
+}
 
 export class X402PaymentError extends Error {
   constructor(

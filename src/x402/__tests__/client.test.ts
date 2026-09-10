@@ -812,5 +812,29 @@ describe('X402Client retry idempotency', () => {
     expect(client.getTransactionLog()).toHaveLength(1);
     expect(client.getTransactionLog()[0].replayed).toBe(false);
   });
+
+  it('reuses a submitted settlement when receipt polling fails', async () => {
+    const waitReceipt = vi.fn()
+      .mockRejectedValueOnce(new Error('RPC timeout'))
+      .mockResolvedValue({ status: 'success' });
+    const wallet = {
+      publicClient: { waitForTransactionReceipt: waitReceipt },
+    } as any;
+    const executeSpy = vi.spyOn(X402Client.prototype as any, 'executePayment')
+      .mockResolvedValue({ txHash });
+    mock402ThenPaid();
+    const client = new X402Client(wallet);
+
+    expect((await client.fetch(url, { method: 'POST' })).status).toBe(200);
+    expect(executeSpy).toHaveBeenCalledTimes(1);
+    expect(waitReceipt).toHaveBeenCalledTimes(1);
+
+    expect((await client.fetch(url, { method: 'POST' })).status).toBe(200);
+    expect(executeSpy).toHaveBeenCalledTimes(1);
+    expect(waitReceipt).toHaveBeenCalledTimes(1);
+    expect(client.getTransactionLog()).toHaveLength(2);
+    expect(client.getTransactionLog()[1].replayed).toBe(true);
+    expect(client.getDailySpendSummary().global).toBe(1000000n);
+  });
 });
 
