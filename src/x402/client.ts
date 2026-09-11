@@ -34,6 +34,8 @@ export const X402_SETTLEMENT_RETRY_WINDOW_MS = 120_000;
 
 type CachedSettlement = {
   promise: Promise<{ txHash: Hash }>;
+  /** Canonical payment terms bound to this explicit intent. */
+  termsFingerprint: string;
   /** null while the settlement is in flight; otherwise epoch ms when the retry window ends. */
   expiresAt: number | null;
   /** Single-flight receipt reconfirmation after a polling error. */
@@ -89,6 +91,34 @@ export function canonicalizeX402Amount(amount: string): string {
 
 export function canonicalizeX402Asset(asset: string, network: string): string {
   return (resolveAssetAddress(asset, network) ?? asset).toLowerCase();
+}
+
+/** Length-prefix a field so `|` inside values cannot collide cache keys. */
+export function encodeX402KeyField(value: string): string {
+  return `${value.length}:${value}`;
+}
+
+export function buildX402PaymentIntentKey(
+  method: string,
+  url: string | URL,
+  intentId: string,
+): string {
+  const normalizedMethod = method.trim().toUpperCase() || 'GET';
+  return [
+    encodeX402KeyField(normalizedMethod),
+    encodeX402KeyField(canonicalizeX402RequestUrl(url)),
+    encodeX402KeyField(intentId),
+  ].join('|');
+}
+
+export function buildX402PaymentTermsFingerprint(req: X402PaymentRequirements): string {
+  return [
+    encodeX402KeyField(req.network),
+    encodeX402KeyField(canonicalizeX402Asset(req.asset, req.network)),
+    encodeX402KeyField(canonicalizeX402Amount(req.amount)),
+    encodeX402KeyField(req.payTo.toLowerCase()),
+    encodeX402KeyField(req.scheme),
+  ].join('|');
 }
 
 export function buildX402PaymentIdempotencyKey(
@@ -186,7 +216,8 @@ export class X402Client {
 
     const paymentResult = explicitIntent
       ? await this.settlePayment(
-          idempotencyKey,
+          buildX402PaymentIntentKey(method, urlStr, explicitIntent),
+          buildX402PaymentTermsFingerprint(selected),
           () => this.executePayment(selected),
           ensurePolicyAllowsPayment,
         )
@@ -263,12 +294,16 @@ export class X402Client {
 
   private async settlePayment(
     key: string,
+    termsFingerprint: string,
     execute: () => Promise<{ txHash: Hash }>,
     beforeFreshTransfer?: () => Promise<boolean>,
   ): Promise<{ txHash: Hash; replayed: boolean } | null> {
     this.pruneSettlements();
     const existing = this.paymentSettlements.get(key);
     if (existing) {
+      if (existing.termsFingerprint !== termsFingerprint) {
+        throw new X402IntentTermsConflictError(key, existing.termsFingerprint, termsFingerprint);
+      }
       const observed = await this.observeSettledPayment(existing.promise, true);
       if (!observed) {
         return null;
@@ -276,7 +311,7 @@ export class X402Client {
       if (existing.expiresAt === null) {
         const confirmation = await this.confirmSubmittedSettlement(key, observed.txHash);
         if (confirmation === 'reverted') {
-          return this.settlePayment(key, execute, beforeFreshTransfer);
+          return this.settlePayment(key, termsFingerprint, execute, beforeFreshTransfer);
         }
       }
       return observed;
@@ -315,7 +350,11 @@ export class X402Client {
         throw error;
       }
     })();
-    this.paymentSettlements.set(key, { promise: pending, expiresAt: null });
+    this.paymentSettlements.set(key, {
+      promise: pending,
+      termsFingerprint,
+      expiresAt: null,
+    });
     return this.observeSettledPayment(pending, false);
   }
 
@@ -589,6 +628,19 @@ export class X402SettlementRevertedError extends Error {
   constructor(public readonly txHash: Hash) {
     super(`x402 settlement transaction reverted (${txHash})`);
     this.name = 'X402SettlementRevertedError';
+  }
+}
+
+export class X402IntentTermsConflictError extends Error {
+  constructor(
+    public readonly intentKey: string,
+    public readonly cachedTermsFingerprint: string,
+    public readonly observedTermsFingerprint: string,
+  ) {
+    super(
+      'x402 explicit payment intent reused with different amount, recipient, asset, or scheme',
+    );
+    this.name = 'X402IntentTermsConflictError';
   }
 }
 
