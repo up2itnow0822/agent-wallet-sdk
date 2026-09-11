@@ -831,10 +831,34 @@ describe('X402Client retry idempotency', () => {
 
     expect((await client.fetch(url, { method: 'POST' })).status).toBe(200);
     expect(executeSpy).toHaveBeenCalledTimes(1);
-    expect(waitReceipt).toHaveBeenCalledTimes(1);
+    expect(waitReceipt).toHaveBeenCalledTimes(2);
     expect(client.getTransactionLog()).toHaveLength(2);
     expect(client.getTransactionLog()[1].replayed).toBe(true);
     expect(client.getDailySpendSummary().global).toBe(1000000n);
+  });
+
+  it('retries receipt confirmation after polling errors so a later revert can resettle', async () => {
+    const waitReceipt = vi.fn()
+      .mockRejectedValueOnce(new Error('RPC timeout'))
+      .mockResolvedValueOnce({ status: 'reverted' })
+      .mockResolvedValue({ status: 'success' });
+    const wallet = {
+      publicClient: { waitForTransactionReceipt: waitReceipt },
+    } as any;
+    const executeSpy = vi.spyOn(X402Client.prototype as any, 'executePayment')
+      .mockResolvedValue({ txHash });
+    mock402ThenPaid();
+    const client = new X402Client(wallet);
+
+    expect((await client.fetch(url, { method: 'POST' })).status).toBe(200);
+    expect(executeSpy).toHaveBeenCalledTimes(1);
+    expect(waitReceipt).toHaveBeenCalledTimes(1);
+
+    expect((await client.fetch(url, { method: 'POST' })).status).toBe(200);
+    expect(executeSpy).toHaveBeenCalledTimes(2);
+    expect(waitReceipt).toHaveBeenCalledTimes(3);
+    expect(client.getTransactionLog()).toHaveLength(2);
+    expect(client.getTransactionLog()[1].replayed).toBe(false);
   });
 });
 

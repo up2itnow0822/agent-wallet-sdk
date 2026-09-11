@@ -36,6 +36,8 @@ type CachedSettlement = {
   promise: Promise<{ txHash: Hash }>;
   /** null while the settlement is in flight; otherwise epoch ms when the retry window ends. */
   expiresAt: number | null;
+  /** Single-flight receipt reconfirmation after a polling error. */
+  confirming?: Promise<'confirmed' | 'unknown' | 'reverted'>;
 };
 
 /** Internal: onBeforePayment returned false. Waiters must observe skip, not a second transfer. */
@@ -267,7 +269,17 @@ export class X402Client {
     this.pruneSettlements();
     const existing = this.paymentSettlements.get(key);
     if (existing) {
-      return this.observeSettledPayment(existing.promise, true);
+      const observed = await this.observeSettledPayment(existing.promise, true);
+      if (!observed) {
+        return null;
+      }
+      if (existing.expiresAt === null) {
+        const confirmation = await this.confirmSubmittedSettlement(key, observed.txHash);
+        if (confirmation === 'reverted') {
+          return this.settlePayment(key, execute, beforeFreshTransfer);
+        }
+      }
+      return observed;
     }
 
     // Reserve the in-flight slot before any await so concurrent retries share
@@ -305,6 +317,51 @@ export class X402Client {
     })();
     this.paymentSettlements.set(key, { promise: pending, expiresAt: null });
     return this.observeSettledPayment(pending, false);
+  }
+
+  /**
+   * After a polling error the submitted hash stays cached with expiresAt null.
+   * Later observations must keep confirming so a delayed revert can be evicted
+   * instead of replaying a failed hash forever.
+   */
+  private async confirmSubmittedSettlement(
+    key: string,
+    txHash: Hash,
+  ): Promise<'confirmed' | 'unknown' | 'reverted'> {
+    const entry = this.paymentSettlements.get(key);
+    if (!entry) {
+      return 'reverted';
+    }
+    if (entry.expiresAt !== null) {
+      return 'confirmed';
+    }
+    if (entry.confirming) {
+      return entry.confirming;
+    }
+    const confirming = (async (): Promise<'confirmed' | 'unknown' | 'reverted'> => {
+      try {
+        await this.waitForSettlementReceipt(txHash);
+        const current = this.paymentSettlements.get(key);
+        if (current) {
+          current.expiresAt = Date.now() + X402_SETTLEMENT_RETRY_WINDOW_MS;
+        }
+        this.pruneSettlements();
+        return 'confirmed';
+      } catch (receiptError) {
+        if (receiptError instanceof X402SettlementRevertedError) {
+          this.paymentSettlements.delete(key);
+          return 'reverted';
+        }
+        return 'unknown';
+      } finally {
+        const current = this.paymentSettlements.get(key);
+        if (current) {
+          current.confirming = undefined;
+        }
+      }
+    })();
+    entry.confirming = confirming;
+    return confirming;
   }
 
   private async observeSettledPayment(
