@@ -126,4 +126,35 @@ describe('X402BudgetTracker', () => {
     expect(tracker.checkBudget('new-api.com', 500_000n).allowed).toBe(true);
     expect(tracker.checkBudget('new-api.com', 2_000_000n).allowed).toBe(false);
   });
+
+  it('counts reserved spend against daily limits before recordPayment', () => {
+    tracker.reserve('api.example.com', 48_000_000n);
+    const blocked = tracker.checkBudget('api.example.com', 4_000_000n);
+    expect(blocked.allowed).toBe(false);
+    expect(blocked.reason).toContain('daily limit');
+
+    tracker.recordPayment({
+      timestamp: Math.floor(Date.now() / 1000),
+      service: 'api.example.com',
+      url: 'https://api.example.com/data',
+      amount: 48_000_000n,
+      token: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' as `0x${string}`,
+      recipient: '0x1234567890abcdef1234567890abcdef12345678' as `0x${string}`,
+      txHash: '0xabc123' as `0x${string}`,
+      network: 'base:8453',
+      scheme: 'exact',
+      success: true,
+    });
+
+    expect(tracker.getDailySpendSummary().global).toBe(48_000_000n);
+    expect(tracker.getDailySpendSummary().byService['api.example.com']).toBe(48_000_000n);
+  });
+
+  it('releases a reservation when settlement reverts', () => {
+    tracker.reserve('api.example.com', 4_000_000n);
+    expect(tracker.getDailySpendSummary().global).toBe(4_000_000n);
+    tracker.release('api.example.com', 4_000_000n);
+    expect(tracker.getDailySpendSummary().global).toBe(0n);
+    expect(tracker.checkBudget('api.example.com', 4_000_000n).allowed).toBe(true);
+  });
 });

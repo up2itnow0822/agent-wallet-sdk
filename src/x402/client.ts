@@ -27,6 +27,24 @@ import { resolveAssetAddress } from './multi-asset.js';
 
 const MAX_PAYMENT_REQUIRED_HEADER_BYTES = 64 * 1024;
 
+/** Max completed settlements retained for retry replay. In-flight entries are never evicted. */
+export const X402_SETTLEMENT_CACHE_LIMIT = 256;
+/** Window during which a successful settlement may be replayed for the same intent. */
+export const X402_SETTLEMENT_RETRY_WINDOW_MS = 120_000;
+
+type CachedSettlement = {
+  promise: Promise<{ txHash: Hash }>;
+  /** Canonical payment terms bound to this explicit intent. */
+  termsFingerprint: string;
+  /** null while the settlement is in flight; otherwise epoch ms when the retry window ends. */
+  expiresAt: number | null;
+  /** Single-flight receipt reconfirmation after a polling error. */
+  confirming?: Promise<'confirmed' | 'unknown' | 'reverted'>;
+};
+
+/** Internal: onBeforePayment returned false. Waiters must observe skip, not a second transfer. */
+const X402_POLICY_SKIP = Symbol('x402-policy-skip');
+
 /**
  * [MAX-ADDED] x402 Payment Client for AgentWallet.
  *
@@ -37,11 +55,98 @@ const MAX_PAYMENT_REQUIRED_HEADER_BYTES = 64 * 1024;
  * 4. Executes USDC payment via AgentWallet contract
  * 5. Retries original request with payment proof
  */
+export function explicitX402PaymentIntentId(
+  req: X402PaymentRequirements,
+): string | null {
+  const extra = req.extra ?? {};
+  if (typeof extra.idempotencyKey === 'string' && extra.idempotencyKey.trim() !== '') {
+    return extra.idempotencyKey;
+  }
+  if (typeof extra.nonce === 'string' && extra.nonce.trim() !== '') {
+    return extra.nonce;
+  }
+  return null;
+}
+
+export function canonicalizeX402RequestUrl(url: string | URL): string {
+  try {
+    const parsed = new URL(url);
+    parsed.hash = '';
+    return parsed.href;
+  } catch {
+    return String(url);
+  }
+}
+
+export function canonicalizeX402Amount(amount: string): string {
+  if (!/^\d+$/.test(amount)) {
+    return amount;
+  }
+  try {
+    return BigInt(amount).toString();
+  } catch {
+    return amount;
+  }
+}
+
+export function canonicalizeX402Asset(asset: string, network: string): string {
+  return (resolveAssetAddress(asset, network) ?? asset).toLowerCase();
+}
+
+/** Length-prefix a field so `|` inside values cannot collide cache keys. */
+export function encodeX402KeyField(value: string): string {
+  return `${value.length}:${value}`;
+}
+
+export function buildX402PaymentIntentKey(
+  method: string,
+  url: string | URL,
+  intentId: string,
+): string {
+  const normalizedMethod = method.trim().toUpperCase() || 'GET';
+  return [
+    encodeX402KeyField(normalizedMethod),
+    encodeX402KeyField(canonicalizeX402RequestUrl(url)),
+    encodeX402KeyField(intentId),
+  ].join('|');
+}
+
+export function buildX402PaymentTermsFingerprint(req: X402PaymentRequirements): string {
+  return [
+    encodeX402KeyField(req.network),
+    encodeX402KeyField(canonicalizeX402Asset(req.asset, req.network)),
+    encodeX402KeyField(canonicalizeX402Amount(req.amount)),
+    encodeX402KeyField(req.payTo.toLowerCase()),
+    encodeX402KeyField(req.scheme),
+  ].join('|');
+}
+
+export function buildX402PaymentIdempotencyKey(
+  method: string,
+  url: string | URL,
+  req: X402PaymentRequirements,
+  uniqueFallback?: string,
+): string {
+  const extraKey = explicitX402PaymentIntentId(req) ?? uniqueFallback ?? '';
+  const normalizedMethod = method.trim().toUpperCase() || 'GET';
+  return [
+    normalizedMethod,
+    canonicalizeX402RequestUrl(url),
+    req.network,
+    canonicalizeX402Asset(req.asset, req.network),
+    canonicalizeX402Amount(req.amount),
+    req.payTo.toLowerCase(),
+    req.scheme,
+    extraKey,
+  ].join('|');
+}
+
 export class X402Client {
   private wallet: any; // ReturnType<typeof createWallet> — avoid circular import
   private config: X402ClientConfig;
   private budget: X402BudgetTracker;
   private supportedNetworks: Set<string>;
+  private paymentSettlements = new Map<string, CachedSettlement>();
 
   constructor(wallet: any, config: X402ClientConfig = {}) {
     this.wallet = wallet;
@@ -59,7 +164,7 @@ export class X402Client {
    * Make an x402-aware fetch request. Automatically handles 402 responses.
    */
   async fetch(url: string | URL, init?: RequestInit): Promise<Response> {
-    const urlStr = url.toString();
+    const urlStr = canonicalizeX402RequestUrl(url);
     const response = await globalThis.fetch(url, init);
 
     if (response.status !== 402) {
@@ -86,26 +191,45 @@ export class X402Client {
       return response; // No compatible payment option
     }
 
-    // Check budget
     const amount = BigInt(selected.amount);
     const service = new URL(urlStr).hostname;
-    const budgetCheck = this.budget.checkBudget(service, amount);
-    if (!budgetCheck.allowed) {
-      throw new X402BudgetExceededError(budgetCheck.reason!, urlStr, selected);
-    }
-
-    // Callback check
-    if (this.config.onBeforePayment) {
-      const proceed = await this.config.onBeforePayment(selected, urlStr);
-      if (!proceed) {
-        return response;
+    const method = typeof init?.method === 'string' && init.method.trim() !== ''
+      ? init.method
+      : 'GET';
+    const explicitIntent = explicitX402PaymentIntentId(selected);
+    const idempotencyKey = buildX402PaymentIdempotencyKey(
+      method,
+      urlStr,
+      selected,
+      explicitIntent ?? crypto.randomUUID(),
+    );
+    const ensurePolicyAllowsPayment = async (): Promise<boolean> => {
+      const budgetCheck = this.budget.checkBudget(service, amount);
+      if (!budgetCheck.allowed) {
+        throw new X402BudgetExceededError(budgetCheck.reason!, urlStr, selected);
       }
+      if (this.config.onBeforePayment) {
+        return this.config.onBeforePayment(selected, urlStr);
+      }
+      return true;
+    };
+
+    const paymentResult = explicitIntent
+      ? await this.settlePayment(
+          buildX402PaymentIntentKey(method, urlStr, explicitIntent),
+          buildX402PaymentTermsFingerprint(selected),
+          () => this.executePayment(selected),
+          ensurePolicyAllowsPayment,
+          { service, amount },
+        )
+      : (await ensurePolicyAllowsPayment()
+          ? { ...(await this.executePayment(selected)), replayed: false as const }
+          : null);
+    if (!paymentResult) {
+      return response;
     }
+    const replayed = paymentResult.replayed;
 
-    // Execute payment
-    const paymentResult = await this.executePayment(selected);
-
-    // Build payment payload
     const paymentPayload: X402PaymentPayload = {
       x402Version: paymentRequired.x402Version,
       resource: paymentRequired.resource,
@@ -113,10 +237,11 @@ export class X402Client {
       payload: {
         txHash: paymentResult.txHash,
         network: selected.network,
+        idempotencyKey,
+        replayed,
       },
     };
 
-    // Log the transaction
     const log: X402TransactionLog = {
       timestamp: Math.floor(Date.now() / 1000),
       service,
@@ -128,6 +253,8 @@ export class X402Client {
       network: selected.network,
       scheme: selected.scheme,
       success: true,
+      idempotencyKey,
+      replayed,
     };
     this.budget.recordPayment(log);
     this.config.onPaymentComplete?.(log);
@@ -143,6 +270,196 @@ export class X402Client {
     });
 
     return retryResponse;
+  }
+
+  private pruneSettlements(now = Date.now()): void {
+    const completed: string[] = [];
+    for (const [key, entry] of this.paymentSettlements) {
+      if (entry.expiresAt === null) {
+        continue;
+      }
+      if (entry.expiresAt <= now) {
+        this.paymentSettlements.delete(key);
+        continue;
+      }
+      completed.push(key);
+    }
+    const overflow = completed.length - X402_SETTLEMENT_CACHE_LIMIT;
+    if (overflow <= 0) {
+      return;
+    }
+    for (let i = 0; i < overflow; i++) {
+      this.paymentSettlements.delete(completed[i]);
+    }
+  }
+
+  private async settlePayment(
+    key: string,
+    termsFingerprint: string,
+    execute: () => Promise<{ txHash: Hash }>,
+    beforeFreshTransfer?: () => Promise<boolean>,
+    spend?: { service: string; amount: bigint },
+  ): Promise<{ txHash: Hash; replayed: boolean } | null> {
+    this.pruneSettlements();
+    const existing = this.paymentSettlements.get(key);
+    if (existing) {
+      if (existing.termsFingerprint !== termsFingerprint) {
+        throw new X402IntentTermsConflictError(key, existing.termsFingerprint, termsFingerprint);
+      }
+      const observed = await this.observeSettledPayment(existing.promise, true);
+      if (!observed) {
+        return null;
+      }
+      if (existing.expiresAt === null) {
+        const confirmation = await this.confirmSubmittedSettlement(key, observed.txHash);
+        if (confirmation === 'reverted') {
+          // A receipt timeout already reserved/recorded spend against this hash.
+          // Release before resettling so the retry is not blocked by stale daily
+          // limits and a reverted broadcast cannot count twice.
+          if (spend) {
+            this.budget.release(spend.service, spend.amount);
+          }
+          return this.settlePayment(
+            key,
+            termsFingerprint,
+            execute,
+            beforeFreshTransfer,
+            spend,
+          );
+        }
+      }
+      return observed;
+    }
+
+    // Reserve the in-flight slot before any await so concurrent retries share
+    // one onBeforePayment and cannot start a second fee+payee transfer.
+    const pending = (async () => {
+      try {
+        if (beforeFreshTransfer) {
+          const proceed = await beforeFreshTransfer();
+          if (!proceed) {
+            throw X402_POLICY_SKIP;
+          }
+        }
+        const result = await execute();
+        // Count the broadcast against daily limits before receipt confirmation
+        // so a second intent cannot overspend while this hash is still pending.
+        if (spend) {
+          this.budget.reserve(spend.service, spend.amount);
+        }
+        try {
+          await this.waitForSettlementReceipt(result.txHash);
+        } catch (receiptError) {
+          // Broadcast already happened. Evict only a confirmed revert so a
+          // later retry can transfer again. RPC timeouts and missing receipts
+          // stay in-flight and reuse this hash instead of paying twice.
+          if (!(receiptError instanceof X402SettlementRevertedError)) {
+            return result;
+          }
+          if (spend) {
+            this.budget.release(spend.service, spend.amount);
+          }
+          throw receiptError;
+        }
+        const entry = this.paymentSettlements.get(key);
+        if (entry) {
+          entry.expiresAt = Date.now() + X402_SETTLEMENT_RETRY_WINDOW_MS;
+        }
+        this.pruneSettlements();
+        return result;
+      } catch (error) {
+        this.paymentSettlements.delete(key);
+        throw error;
+      }
+    })();
+    this.paymentSettlements.set(key, {
+      promise: pending,
+      termsFingerprint,
+      expiresAt: null,
+    });
+    return this.observeSettledPayment(pending, false);
+  }
+
+  /**
+   * After a polling error the submitted hash stays cached with expiresAt null.
+   * Later observations must keep confirming so a delayed revert can be evicted
+   * instead of replaying a failed hash forever.
+   */
+  private async confirmSubmittedSettlement(
+    key: string,
+    txHash: Hash,
+  ): Promise<'confirmed' | 'unknown' | 'reverted'> {
+    const entry = this.paymentSettlements.get(key);
+    if (!entry) {
+      return 'reverted';
+    }
+    if (entry.expiresAt !== null) {
+      return 'confirmed';
+    }
+    if (entry.confirming) {
+      return entry.confirming;
+    }
+    const confirming = (async (): Promise<'confirmed' | 'unknown' | 'reverted'> => {
+      try {
+        await this.waitForSettlementReceipt(txHash);
+        const current = this.paymentSettlements.get(key);
+        if (current) {
+          current.expiresAt = Date.now() + X402_SETTLEMENT_RETRY_WINDOW_MS;
+        }
+        this.pruneSettlements();
+        return 'confirmed';
+      } catch (receiptError) {
+        if (receiptError instanceof X402SettlementRevertedError) {
+          this.paymentSettlements.delete(key);
+          return 'reverted';
+        }
+        return 'unknown';
+      } finally {
+        const current = this.paymentSettlements.get(key);
+        if (current) {
+          current.confirming = undefined;
+        }
+      }
+    })();
+    entry.confirming = confirming;
+    return confirming;
+  }
+
+  private async observeSettledPayment(
+    pending: Promise<{ txHash: Hash }>,
+    replayed: boolean,
+  ): Promise<{ txHash: Hash; replayed: boolean } | null> {
+    try {
+      const settled = await pending;
+      return { txHash: settled.txHash, replayed };
+    } catch (error) {
+      if (error === X402_POLICY_SKIP) {
+        return null;
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * A submitted hash is not a completed settlement. Keep the cache entry
+   * in-flight (expiresAt = null) until the receipt is final so a later retry
+   * cannot broadcast a second fee+payee transfer.
+   */
+  private async waitForSettlementReceipt(txHash: Hash): Promise<void> {
+    const publicClient = this.wallet?.publicClient;
+    const wait = publicClient?.waitForTransactionReceipt;
+    if (typeof wait !== 'function') {
+      throw new Error(
+        'x402 settlement cannot be confirmed: wallet publicClient.waitForTransactionReceipt is missing',
+      );
+    }
+    const receipt = await wait.call(publicClient, { hash: txHash });
+    if (receipt?.status === 'reverted') {
+      throw new X402SettlementRevertedError(txHash);
+    }
+    if (!receipt) {
+      throw new Error(`x402 settlement receipt missing (${txHash})`);
+    }
   }
 
   /**
@@ -328,6 +645,26 @@ export class X402Client {
 }
 
 // ─── Error Types ───
+
+export class X402SettlementRevertedError extends Error {
+  constructor(public readonly txHash: Hash) {
+    super(`x402 settlement transaction reverted (${txHash})`);
+    this.name = 'X402SettlementRevertedError';
+  }
+}
+
+export class X402IntentTermsConflictError extends Error {
+  constructor(
+    public readonly intentKey: string,
+    public readonly cachedTermsFingerprint: string,
+    public readonly observedTermsFingerprint: string,
+  ) {
+    super(
+      'x402 explicit payment intent reused with different amount, recipient, asset, or scheme',
+    );
+    this.name = 'X402IntentTermsConflictError';
+  }
+}
 
 export class X402PaymentError extends Error {
   constructor(
