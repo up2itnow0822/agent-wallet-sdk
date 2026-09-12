@@ -949,6 +949,31 @@ describe('X402Client retry idempotency', () => {
     expect(client.getTransactionLog()[1].replayed).toBe(false);
   });
 
+  it('releases reserved daily budget when a delayed revert is confirmed', async () => {
+    const waitReceipt = vi.fn()
+      .mockRejectedValueOnce(new Error('RPC timeout'))
+      .mockResolvedValueOnce({ status: 'reverted' })
+      .mockResolvedValue({ status: 'success' });
+    const wallet = {
+      publicClient: { waitForTransactionReceipt: waitReceipt },
+    } as any;
+    const executeSpy = vi.spyOn(X402Client.prototype as any, 'executePayment')
+      .mockResolvedValue({ txHash });
+    mock402ThenPaid();
+    const client = new X402Client(wallet, { globalDailyLimit: 1000000n });
+
+    expect((await client.fetch(url, { method: 'POST' })).status).toBe(200);
+    expect(executeSpy).toHaveBeenCalledTimes(1);
+    expect(client.getDailySpendSummary().global).toBe(1000000n);
+
+    expect((await client.fetch(url, { method: 'POST' })).status).toBe(200);
+    expect(executeSpy).toHaveBeenCalledTimes(2);
+    expect(waitReceipt).toHaveBeenCalledTimes(3);
+    expect(client.getTransactionLog()).toHaveLength(2);
+    expect(client.getTransactionLog()[1].replayed).toBe(false);
+    expect(client.getDailySpendSummary().global).toBe(1000000n);
+  });
+
   it('reserves daily budget before receipt confirmation so a second intent cannot overspend', async () => {
     let releaseReceipt: (value: { status: string }) => void = () => {};
     const receiptGate = new Promise<{ status: string }>((resolve) => {

@@ -313,6 +313,12 @@ export class X402Client {
       if (existing.expiresAt === null) {
         const confirmation = await this.confirmSubmittedSettlement(key, observed.txHash);
         if (confirmation === 'reverted') {
+          // A receipt timeout already reserved/recorded spend against this hash.
+          // Release before resettling so the retry is not blocked by stale daily
+          // limits and a reverted broadcast cannot count twice.
+          if (spend) {
+            this.budget.release(spend.service, spend.amount);
+          }
           return this.settlePayment(
             key,
             termsFingerprint,
