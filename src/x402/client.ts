@@ -220,6 +220,7 @@ export class X402Client {
           buildX402PaymentTermsFingerprint(selected),
           () => this.executePayment(selected),
           ensurePolicyAllowsPayment,
+          { service, amount },
         )
       : (await ensurePolicyAllowsPayment()
           ? { ...(await this.executePayment(selected)), replayed: false as const }
@@ -297,6 +298,7 @@ export class X402Client {
     termsFingerprint: string,
     execute: () => Promise<{ txHash: Hash }>,
     beforeFreshTransfer?: () => Promise<boolean>,
+    spend?: { service: string; amount: bigint },
   ): Promise<{ txHash: Hash; replayed: boolean } | null> {
     this.pruneSettlements();
     const existing = this.paymentSettlements.get(key);
@@ -311,7 +313,13 @@ export class X402Client {
       if (existing.expiresAt === null) {
         const confirmation = await this.confirmSubmittedSettlement(key, observed.txHash);
         if (confirmation === 'reverted') {
-          return this.settlePayment(key, termsFingerprint, execute, beforeFreshTransfer);
+          return this.settlePayment(
+            key,
+            termsFingerprint,
+            execute,
+            beforeFreshTransfer,
+            spend,
+          );
         }
       }
       return observed;
@@ -328,6 +336,11 @@ export class X402Client {
           }
         }
         const result = await execute();
+        // Count the broadcast against daily limits before receipt confirmation
+        // so a second intent cannot overspend while this hash is still pending.
+        if (spend) {
+          this.budget.reserve(spend.service, spend.amount);
+        }
         try {
           await this.waitForSettlementReceipt(result.txHash);
         } catch (receiptError) {
@@ -336,6 +349,9 @@ export class X402Client {
           // stay in-flight and reuse this hash instead of paying twice.
           if (!(receiptError instanceof X402SettlementRevertedError)) {
             return result;
+          }
+          if (spend) {
+            this.budget.release(spend.service, spend.amount);
           }
           throw receiptError;
         }

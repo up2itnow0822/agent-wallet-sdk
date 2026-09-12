@@ -11,7 +11,9 @@ import type { X402ServiceBudget, X402TransactionLog, X402ClientConfig } from './
 export class X402BudgetTracker {
   private serviceBudgets: Map<string, X402ServiceBudget> = new Map();
   private dailySpend: Map<string, bigint> = new Map(); // service -> today's total
+  private reservedSpend: Map<string, bigint> = new Map(); // service -> in-flight reserved
   private globalDailySpend: bigint = 0n;
+  private reservedGlobal: bigint = 0n;
   private dailyResetTimestamp: number;
   private transactionLog: X402TransactionLog[] = [];
 
@@ -63,6 +65,33 @@ export class X402BudgetTracker {
   }
 
   /**
+   * Count a broadcast payment against daily limits before the receipt is final.
+   * recordPayment later consumes the reservation so spend is not double-counted.
+   */
+  reserve(service: string, amount: bigint): void {
+    this.maybeResetDaily();
+    this.dailySpend.set(service, (this.dailySpend.get(service) ?? 0n) + amount);
+    this.globalDailySpend += amount;
+    this.reservedSpend.set(service, (this.reservedSpend.get(service) ?? 0n) + amount);
+    this.reservedGlobal += amount;
+  }
+
+  /** Reverse a reservation when the broadcast transaction definitively reverts. */
+  release(service: string, amount: bigint): void {
+    this.maybeResetDaily();
+    const serviceDaily = this.dailySpend.get(service) ?? 0n;
+    this.dailySpend.set(service, serviceDaily > amount ? serviceDaily - amount : 0n);
+    this.globalDailySpend = this.globalDailySpend > amount ? this.globalDailySpend - amount : 0n;
+    const reservedForService = this.reservedSpend.get(service) ?? 0n;
+    if (reservedForService > amount) {
+      this.reservedSpend.set(service, reservedForService - amount);
+    } else {
+      this.reservedSpend.delete(service);
+    }
+    this.reservedGlobal = this.reservedGlobal > amount ? this.reservedGlobal - amount : 0n;
+  }
+
+  /**
    * Record a completed payment.
    */
   recordPayment(log: X402TransactionLog): void {
@@ -71,6 +100,19 @@ export class X402BudgetTracker {
 
     if (log.success && !log.replayed) {
       const service = log.service;
+      const reservedForService = this.reservedSpend.get(service) ?? 0n;
+      if (reservedForService >= log.amount) {
+        const remaining = reservedForService - log.amount;
+        if (remaining === 0n) {
+          this.reservedSpend.delete(service);
+        } else {
+          this.reservedSpend.set(service, remaining);
+        }
+        this.reservedGlobal = this.reservedGlobal > log.amount
+          ? this.reservedGlobal - log.amount
+          : 0n;
+        return;
+      }
       this.dailySpend.set(service, (this.dailySpend.get(service) ?? 0n) + log.amount);
       this.globalDailySpend += log.amount;
     }
@@ -124,7 +166,9 @@ export class X402BudgetTracker {
     const now = this.startOfDay();
     if (now > this.dailyResetTimestamp) {
       this.dailySpend.clear();
+      this.reservedSpend.clear();
       this.globalDailySpend = 0n;
+      this.reservedGlobal = 0n;
       this.dailyResetTimestamp = now;
     }
   }

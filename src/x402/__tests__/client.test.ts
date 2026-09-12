@@ -948,5 +948,87 @@ describe('X402Client retry idempotency', () => {
     expect(client.getTransactionLog()).toHaveLength(2);
     expect(client.getTransactionLog()[1].replayed).toBe(false);
   });
+
+  it('reserves daily budget before receipt confirmation so a second intent cannot overspend', async () => {
+    let releaseReceipt: (value: { status: string }) => void = () => {};
+    const receiptGate = new Promise<{ status: string }>((resolve) => {
+      releaseReceipt = resolve;
+    });
+    const waitReceipt = vi.fn(() => receiptGate);
+    const wallet = {
+      publicClient: { waitForTransactionReceipt: waitReceipt },
+    } as any;
+    const executeSpy = vi.spyOn(X402Client.prototype as any, 'executePayment')
+      .mockResolvedValue({ txHash });
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const headers = new Headers(init?.headers);
+      if (headers.get('X-PAYMENT')) {
+        return new Response('paid', { status: 200 });
+      }
+      const requested = String(input);
+      const nonce = new URL(requested).searchParams.get('n') ?? 'missing';
+      return new Response(null, {
+        status: 402,
+        headers: {
+          'payment-required': btoa(JSON.stringify({
+            x402Version: 1,
+            resource: {
+              url: new URL(requested).pathname,
+              description: 'Data API',
+              mimeType: 'application/json',
+            },
+            accepts: [
+              {
+                scheme: 'exact',
+                network: 'base:8453',
+                asset,
+                amount: '1000000',
+                payTo,
+                maxTimeoutSeconds: 30,
+                extra: { nonce },
+              },
+            ],
+          })),
+        },
+      });
+    });
+    const client = new X402Client(wallet, { globalDailyLimit: 1000000n });
+
+    const firstPromise = client.fetch(`${url}?n=intent-a`, { method: 'POST' });
+    await vi.waitFor(() => {
+      expect(waitReceipt).toHaveBeenCalledTimes(1);
+    });
+    expect(client.getDailySpendSummary().global).toBe(1000000n);
+
+    await expect(client.fetch(`${url}?n=intent-b`, { method: 'POST' }))
+      .rejects.toThrow(/global daily limit/);
+    expect(executeSpy).toHaveBeenCalledTimes(1);
+
+    releaseReceipt({ status: 'success' });
+    expect((await firstPromise).status).toBe(200);
+    expect(client.getTransactionLog()).toHaveLength(1);
+    expect(client.getDailySpendSummary().global).toBe(1000000n);
+  });
+
+  it('releases a reserved budget when the first receipt is a revert', async () => {
+    const waitReceipt = vi.fn()
+      .mockResolvedValueOnce({ status: 'reverted' })
+      .mockResolvedValue({ status: 'success' });
+    const wallet = {
+      publicClient: { waitForTransactionReceipt: waitReceipt },
+    } as any;
+    const executeSpy = vi.spyOn(X402Client.prototype as any, 'executePayment')
+      .mockResolvedValue({ txHash });
+    mock402ThenPaid();
+    const client = new X402Client(wallet, { globalDailyLimit: 1000000n });
+
+    await expect(client.fetch(url, { method: 'POST' })).rejects.toThrow(/reverted/);
+    expect(executeSpy).toHaveBeenCalledTimes(1);
+    expect(client.getDailySpendSummary().global).toBe(0n);
+
+    expect((await client.fetch(url, { method: 'POST' })).status).toBe(200);
+    expect(executeSpy).toHaveBeenCalledTimes(2);
+    expect(client.getDailySpendSummary().global).toBe(1000000n);
+  });
 });
 
