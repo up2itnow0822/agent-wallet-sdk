@@ -13,6 +13,7 @@
  */
 // x402 Client — automatic 402 payment handling for AgentWallet (v6: multi-asset)
 import type { Address, Hash } from 'viem';
+import { toEventHash } from 'viem';
 import type {
   X402PaymentRequired,
   X402PaymentRequirements,
@@ -24,6 +25,23 @@ import { DEFAULT_SUPPORTED_NETWORKS } from './types.js';
 import { X402BudgetTracker } from './budget.js';
 import { agentTransferToken, checkBudget } from '../index.js';
 import { resolveAssetAddress } from './multi-asset.js';
+
+/**
+ * keccak256("TransactionQueued(uint256,address,uint256,address,uint256)").
+ * Same topic `agentExecute` uses to distinguish a spend that only queued for
+ * owner approval from one that actually moved tokens.
+ */
+export const X402_TRANSACTION_QUEUED_TOPIC = toEventHash({
+  type: 'event',
+  name: 'TransactionQueued',
+  inputs: [
+    { name: 'txId', type: 'uint256', indexed: true },
+    { name: 'to', type: 'address', indexed: true },
+    { name: 'value', type: 'uint256', indexed: false },
+    { name: 'token', type: 'address', indexed: false },
+    { name: 'amount', type: 'uint256', indexed: false },
+  ],
+});
 
 const MAX_PAYMENT_REQUIRED_HEADER_BYTES = 64 * 1024;
 
@@ -185,6 +203,40 @@ export function buildX402PaymentTermsFingerprint(req: X402PaymentRequirements): 
     encodeX402KeyField(req.payTo.toLowerCase()),
     encodeX402KeyField(req.scheme),
   ].join('|');
+}
+
+type SettlementReceiptLog = {
+  address?: string;
+  topics?: readonly string[];
+};
+
+type SettlementReceipt = {
+  status?: string;
+  logs?: readonly SettlementReceiptLog[];
+};
+
+/**
+ * True when the agent wallet emitted TransactionQueued. The outer tx can still
+ * be `success` — the spend was parked for owner approval and no tokens moved.
+ */
+export function x402SettlementReceiptIsQueued(
+  receipt: SettlementReceipt | null | undefined,
+  walletAddress?: string,
+): boolean {
+  const logs = receipt?.logs;
+  if (!Array.isArray(logs) || logs.length === 0) {
+    return false;
+  }
+  const walletAddr = typeof walletAddress === 'string' ? walletAddress.toLowerCase() : '';
+  return logs.some((log) => {
+    if (log?.topics?.[0] !== X402_TRANSACTION_QUEUED_TOPIC) {
+      return false;
+    }
+    if (!walletAddr) {
+      return true;
+    }
+    return typeof log.address === 'string' && log.address.toLowerCase() === walletAddr;
+  });
 }
 
 /**
@@ -500,6 +552,10 @@ export class X402Client {
     }
     try {
       const result = await execute();
+      // Unkeyed challenges have no replay cache, so a later fetch pays again.
+      // Still wait for the receipt: a queued or reverted hash must never be
+      // sent as X-PAYMENT, and the reservation must be released if nothing moved.
+      await this.waitForSettlementReceipt(result.txHash);
       this.budget.settle(reservationId);
       return { txHash: result.txHash, replayed: false };
     } catch (error) {
@@ -596,8 +652,12 @@ export class X402Client {
         try {
           await this.waitForSettlementReceipt(result.txHash);
         } catch (receiptError) {
-          if (receiptError instanceof X402SettlementRevertedError) {
-            // Confirmed revert: nothing moved, release once, evict (below).
+          if (
+            receiptError instanceof X402SettlementRevertedError
+            || receiptError instanceof X402SettlementQueuedError
+          ) {
+            // Confirmed revert or AgentAccount queue: nothing moved to the
+            // payee, release once, evict (below). Never send the hash as proof.
             this.budget.release(reservationId);
             throw receiptError;
           }
@@ -657,7 +717,10 @@ export class X402Client {
         }
         return 'confirmed';
       } catch (receiptError) {
-        if (receiptError instanceof X402SettlementRevertedError) {
+        if (
+          receiptError instanceof X402SettlementRevertedError
+          || receiptError instanceof X402SettlementQueuedError
+        ) {
           this.markSettlementReverted(entry);
           return 'reverted';
         }
@@ -704,12 +767,19 @@ export class X402Client {
         'x402 settlement cannot be confirmed: wallet publicClient.waitForTransactionReceipt is missing',
       );
     }
-    const receipt = await wait.call(publicClient, { hash: txHash });
+    const receipt = await wait.call(publicClient, { hash: txHash }) as SettlementReceipt | null;
     if (receipt?.status === 'reverted') {
       throw new X402SettlementRevertedError(txHash);
     }
-    if (!receipt) {
-      throw new Error(`x402 settlement receipt missing (${txHash})`);
+    if (!receipt || receipt.status !== 'success') {
+      throw new Error(
+        receipt
+          ? `x402 settlement receipt not successful (${txHash})`
+          : `x402 settlement receipt missing (${txHash})`,
+      );
+    }
+    if (x402SettlementReceiptIsQueued(receipt, this.wallet?.address)) {
+      throw new X402SettlementQueuedError(txHash);
     }
   }
 
@@ -961,6 +1031,13 @@ export class X402SettlementRevertedError extends Error {
   constructor(public readonly txHash: Hash) {
     super(`x402 settlement transaction reverted (${txHash})`);
     this.name = 'X402SettlementRevertedError';
+  }
+}
+
+export class X402SettlementQueuedError extends Error {
+  constructor(public readonly txHash: Hash) {
+    super(`x402 settlement was queued for owner approval (${txHash})`);
+    this.name = 'X402SettlementQueuedError';
   }
 }
 

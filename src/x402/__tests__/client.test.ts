@@ -5,13 +5,16 @@ import {
   X402BudgetExceededError,
   X402IntentTermsConflictError,
   X402SettlementRevertedError,
+  X402SettlementQueuedError,
   buildX402PaymentIdempotencyKey,
   buildX402PaymentIntentKey,
   canonicalizeX402Amount,
   canonicalizeX402RequestUrl,
+  x402SettlementReceiptIsQueued,
   X402_MAX_UNCONFIRMED_SETTLEMENTS,
   X402_RECONFIRM_BACKOFF_MS,
   X402_SETTLEMENT_RETRY_WINDOW_MS,
+  X402_TRANSACTION_QUEUED_TOPIC,
   X402SettlementBacklogError,
 } from '../client.js';
 import { USDC_ADDRESSES } from '../types.js';
@@ -755,6 +758,90 @@ describe('X402Client retry idempotency', () => {
     expect(waitReceipt).toHaveBeenCalledWith({ hash: txHash });
     expect(client.getTransactionLog().filter((log) => log.replayed)).toHaveLength(1);
     expect(client.getDailySpendSummary().global).toBe(1000000n);
+  });
+
+  it('treats a successful AgentAccount queue as unpaid', () => {
+    const wallet = '0x2222222222222222222222222222222222222222';
+    const queuedReceipt = {
+      status: 'success',
+      logs: [
+        {
+          address: wallet,
+          topics: [X402_TRANSACTION_QUEUED_TOPIC],
+        },
+      ],
+    };
+    expect(x402SettlementReceiptIsQueued(queuedReceipt, wallet)).toBe(true);
+    expect(x402SettlementReceiptIsQueued(queuedReceipt, '0x3333333333333333333333333333333333333333')).toBe(false);
+    expect(x402SettlementReceiptIsQueued({ status: 'success', logs: [] }, wallet)).toBe(false);
+  });
+
+  it('refuses to send X-PAYMENT when the payee transfer only queued', async () => {
+    const waitReceipt = vi.fn().mockResolvedValue({
+      status: 'success',
+      logs: [
+        {
+          address: '0x2222222222222222222222222222222222222222',
+          topics: [X402_TRANSACTION_QUEUED_TOPIC],
+        },
+      ],
+    });
+    const wallet = {
+      address: '0x2222222222222222222222222222222222222222',
+      publicClient: { waitForTransactionReceipt: waitReceipt },
+    } as any;
+    const executeSpy = vi.spyOn(X402Client.prototype as any, 'executePayment')
+      .mockResolvedValue({ txHash });
+    const fetchSpy = mock402ThenPaid();
+    const client = new X402Client(wallet, { globalDailyLimit: 1000000n });
+
+    await expect(client.fetch(url, { method: 'POST' })).rejects.toBeInstanceOf(
+      X402SettlementQueuedError,
+    );
+    expect(executeSpy).toHaveBeenCalledTimes(1);
+    expect(client.getTransactionLog()).toHaveLength(0);
+    expect(client.getDailySpendSummary().global).toBe(0n);
+    expect(client.budgetTracker.getReservedSummary().global).toBe(0n);
+    expect(
+      fetchSpy.mock.calls.some(([, init]) => new Headers(init?.headers).has('X-PAYMENT')),
+    ).toBe(false);
+  });
+
+  it('waits for receipt on unkeyed challenges and fails closed when queued', async () => {
+    const waitReceipt = vi.fn().mockResolvedValue({
+      status: 'success',
+      logs: [
+        {
+          address: '0x2222222222222222222222222222222222222222',
+          topics: [X402_TRANSACTION_QUEUED_TOPIC],
+        },
+      ],
+    });
+    const wallet = {
+      address: '0x2222222222222222222222222222222222222222',
+      publicClient: { waitForTransactionReceipt: waitReceipt },
+    } as any;
+    vi.spyOn(X402Client.prototype as any, 'executePayment')
+      .mockResolvedValue({ txHash });
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+      const headers = new Headers(init?.headers);
+      if (headers.get('X-PAYMENT')) {
+        return new Response('paid', { status: 200 });
+      }
+      const unkeyed = paymentRequired();
+      delete (unkeyed.accepts[0] as { extra?: unknown }).extra;
+      return new Response(null, {
+        status: 402,
+        headers: { 'payment-required': btoa(JSON.stringify(unkeyed)) },
+      });
+    });
+    const client = new X402Client(wallet);
+
+    await expect(client.fetch(url, { method: 'POST' })).rejects.toBeInstanceOf(
+      X402SettlementQueuedError,
+    );
+    expect(waitReceipt).toHaveBeenCalledWith({ hash: txHash });
+    expect(client.getTransactionLog()).toHaveLength(0);
   });
 
   it('drops a reverted settlement so a later retry can transfer again', async () => {
@@ -1522,9 +1609,11 @@ describe('X402Client retry idempotency', () => {
     const x402Barrel = await import('../index.js');
     const rootBarrel = await import('../../index.js');
     expect(x402Barrel.X402SettlementRevertedError).toBe(X402SettlementRevertedError);
+    expect(x402Barrel.X402SettlementQueuedError).toBe(X402SettlementQueuedError);
     expect(x402Barrel.X402IntentTermsConflictError).toBe(X402IntentTermsConflictError);
     expect(x402Barrel.X402SettlementBacklogError).toBe(X402SettlementBacklogError);
     expect(rootBarrel.X402SettlementRevertedError).toBe(X402SettlementRevertedError);
+    expect(rootBarrel.X402SettlementQueuedError).toBe(X402SettlementQueuedError);
     expect(rootBarrel.X402IntentTermsConflictError).toBe(X402IntentTermsConflictError);
     expect(rootBarrel.X402SettlementBacklogError).toBe(X402SettlementBacklogError);
   });

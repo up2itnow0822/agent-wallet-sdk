@@ -4,8 +4,11 @@ export {
   X402PaymentError,
   X402BudgetExceededError,
   X402SettlementRevertedError,
+  X402SettlementQueuedError,
   X402SettlementBacklogError,
   X402IntentTermsConflictError,
+  x402SettlementReceiptIsQueued,
+  X402_TRANSACTION_QUEUED_TOPIC,
 } from './client.js';
 export { X402BudgetTracker } from './budget.js';
 export { createX402Client, createX402Fetch, wrapWithX402 } from './middleware.js';

@@ -37,6 +37,7 @@ export {
   X402PaymentError,
   X402BudgetExceededError,
   X402SettlementRevertedError,
+  X402SettlementQueuedError,
   X402SettlementBacklogError,
   X402IntentTermsConflictError,
   createX402Client,
