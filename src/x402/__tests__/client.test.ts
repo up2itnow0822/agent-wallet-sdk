@@ -4,6 +4,7 @@ import {
   X402Client,
   X402BudgetExceededError,
   X402IntentTermsConflictError,
+  X402PaymentError,
   X402SettlementRevertedError,
   X402SettlementQueuedError,
   X402SettlementUnknownError,
@@ -259,6 +260,68 @@ describe('X402Client', () => {
 
       const selected = client.selectPaymentOption(accepts);
       expect(selected!.scheme).toBe('exact');
+    });
+
+    it('refuses upto-only offers instead of transferring the authorization cap', () => {
+      const client = new X402Client(mockWallet, { supportedNetworks: ['base:8453'] });
+      const accepts: X402PaymentRequirements[] = [
+        { scheme: 'upto', network: 'base:8453', asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', amount: '10000000', payTo: '0x1', maxTimeoutSeconds: 30, extra: {} },
+      ];
+
+      expect(client.selectPaymentOption(accepts)).toBeNull();
+    });
+  });
+
+  describe('upto scheme auto-pay', () => {
+    it('does not pay when the 402 only offers an upto authorization', async () => {
+      const client = new X402Client(mockWallet);
+      const paymentRequired: X402PaymentRequired = {
+        x402Version: 1,
+        resource: { url: '/premium/data', description: 'Usage API', mimeType: 'application/json' },
+        accepts: [
+          {
+            scheme: 'upto',
+            network: 'base:8453',
+            asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+            amount: '10000000',
+            payTo: '0x1111111111111111111111111111111111111111',
+            maxTimeoutSeconds: 30,
+            extra: {},
+          },
+        ],
+      };
+      const challenged = new Response(null, {
+        status: 402,
+        headers: { 'payment-required': btoa(JSON.stringify(paymentRequired)) },
+      });
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(challenged);
+      const executeSpy = vi.spyOn(
+        X402Client.prototype as unknown as X402ClientPaymentInternals,
+        'executePayment',
+      );
+
+      const result = await client.fetch('https://api.example.com/premium/data');
+
+      expect(result).toBe(challenged);
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(executeSpy).not.toHaveBeenCalled();
+    });
+
+    it('fails closed if executePayment is invoked with a non-exact scheme', async () => {
+      const client = new X402Client(mockWallet);
+      const req: X402PaymentRequirements = {
+        scheme: 'upto',
+        network: 'base:8453',
+        asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+        amount: '10000000',
+        payTo: '0x1111111111111111111111111111111111111111',
+        maxTimeoutSeconds: 30,
+        extra: {},
+      };
+
+      await expect(
+        (client as unknown as X402ClientPaymentInternals).executePayment(req),
+      ).rejects.toBeInstanceOf(X402PaymentError);
     });
   });
 });
@@ -1175,7 +1238,7 @@ describe('X402Client retry idempotency', () => {
             resource: { url: '/premium/data', description: 'Data API', mimeType: 'application/json' },
             accepts: [
               {
-                scheme: challenges === 1 ? 'a|b' : 'a',
+                scheme: 'exact',
                 network: 'base:8453',
                 asset,
                 amount: '1000000',
