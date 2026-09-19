@@ -345,7 +345,12 @@ export class X402Client {
   private budget: X402BudgetTracker;
   private supportedNetworks: Set<string>;
   private paymentSettlements = new Map<string, CachedSettlement>();
-  /** Protocol-fee hashes keyed by explicit intent; survives payee-revert eviction. */
+  /**
+   * Protocol-fee hashes keyed by explicit intent or unkeyed pending key.
+   * Survives payee-revert eviction so a retry does not charge 0.77% twice.
+   * Unkeyed confirmed fees are dropped after that purchase completes so the
+   * next purchase of the same resource is charged again.
+   */
   private feePhases = new Map<string, CachedFeePhase>();
   private unkeyedIntentSequence = 0;
   /** Object-identity fallback for bodies that cannot be fingerprinted synchronously. */
@@ -447,7 +452,10 @@ export class X402Client {
             termsFingerprint,
             this.fingerprintUnkeyedRequest(init),
           ),
-          () => this.executePayment(selected),
+          (intentKey) => this.executePayment(selected, {
+            key: intentKey,
+            termsFingerprint,
+          }),
           authorizeFreshTransfer,
         );
     if (!paymentResult) {
@@ -666,7 +674,7 @@ export class X402Client {
    */
   private async executeUnkeyedPayment(
     key: string,
-    execute: () => Promise<{ txHash: Hash }>,
+    execute: (intentKey: string) => Promise<{ txHash: Hash }>,
     authorize: AuthorizeFreshTransfer,
   ): Promise<{ txHash: Hash; replayed: boolean; entry?: undefined } | null> {
     this.pruneSettlements();
@@ -700,7 +708,7 @@ export class X402Client {
         entry.reservationId = reservationId;
         let result: { txHash: Hash };
         try {
-          result = await execute();
+          result = await execute(key);
         } catch (error) {
           this.budget.release(reservationId);
           throw error;
@@ -732,6 +740,7 @@ export class X402Client {
           throw receiptError;
         }
         this.markSettlementConfirmed(entry);
+        this.forgetCompletedUnkeyedFeePhase(key);
         this.paymentSettlements.delete(key);
         return result;
       } catch (error) {
@@ -762,6 +771,7 @@ export class X402Client {
       this.throwObservedQueued(existing.txHash);
     }
     if (existing.status === 'confirmed' && existing.txHash) {
+      this.forgetCompletedUnkeyedFeePhase(key);
       this.paymentSettlements.delete(key);
       return { txHash: existing.txHash, replayed: false };
     }
@@ -771,6 +781,7 @@ export class X402Client {
         existing.txHash,
       );
       if (confirmation === 'confirmed') {
+        this.forgetCompletedUnkeyedFeePhase(key);
         this.paymentSettlements.delete(key);
         return { txHash: existing.txHash, replayed: false };
       }
@@ -1276,8 +1287,19 @@ export class X402Client {
   }
 
   /**
-   * Transfer the protocol fee once per explicit intent. Record the hash before
-   * waiting for the receipt so a timeout cannot drop a live fee submission.
+   * Drop a completed unkeyed purchase's fee so the next purchase of the same
+   * resource is charged 0.77% again. Keep unknown/confirmed fees while the
+   * payee transfer is still outstanding so a retry reconfirms instead of
+   * transferring a second fee.
+   */
+  private forgetCompletedUnkeyedFeePhase(key: string): void {
+    this.feePhases.delete(key);
+  }
+
+  /**
+   * Transfer the protocol fee once per explicit intent or unkeyed pending key.
+   * Record the hash before waiting for the receipt so a timeout cannot drop a
+   * live fee submission.
    */
   private async settleProtocolFeePhase(
     intent: { key: string; termsFingerprint: string },
@@ -1353,16 +1375,13 @@ export class X402Client {
     const feeAmount = (amount * X402_PROTOCOL_FEE_BPS) / 10000n;
 
     if (feeAmount > 0n) {
-      if (intent) {
-        await this.settleProtocolFeePhase(intent, resolvedAddress, feeAmount);
-      } else {
-        const feeTxHash = await agentTransferToken(this.wallet, {
-          token: resolvedAddress,
-          to: X402_PROTOCOL_FEE_COLLECTOR,
-          amount: feeAmount,
-        });
-        await this.waitForSettlementReceipt(feeTxHash);
+      if (!intent) {
+        throw new X402PaymentError(
+          'x402 protocol fee cannot be settled without an intent key',
+          req,
+        );
       }
+      await this.settleProtocolFeePhase(intent, resolvedAddress, feeAmount);
     }
 
     // Execute the ERC20 transfer via AgentWallet (full amount to payee)
