@@ -389,6 +389,45 @@ describe('X402Client retry idempotency', () => {
     });
   }
 
+  it('retries a Request POST with the original body after paying', async () => {
+    const executeSpy = vi.spyOn(X402Client.prototype as any, 'executePayment')
+      .mockResolvedValue({ txHash });
+    const payload = JSON.stringify({ sku: 'alpha', qty: 2 });
+    const hops: Array<{ method?: string; body: string; paid: boolean }> = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+      const headers = new Headers(init?.headers);
+      const rawBody = init?.body;
+      const body = typeof rawBody === 'string'
+        ? rawBody
+        : rawBody instanceof ArrayBuffer
+          ? new TextDecoder().decode(rawBody)
+          : ArrayBuffer.isView(rawBody)
+            ? new TextDecoder().decode(rawBody)
+            : '';
+      hops.push({ method: init?.method, body, paid: headers.has('X-PAYMENT') });
+      if (headers.get('X-PAYMENT')) {
+        return new Response('paid', { status: 200 });
+      }
+      return new Response(null, {
+        status: 402,
+        headers: { 'payment-required': btoa(JSON.stringify(paymentRequired())) },
+      });
+    });
+    const client = new X402Client(mockWallet);
+
+    const result = await client.fetch(new Request(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: payload,
+    }));
+
+    expect(result.status).toBe(200);
+    expect(executeSpy).toHaveBeenCalledTimes(1);
+    expect(hops).toHaveLength(2);
+    expect(hops[0]).toMatchObject({ method: 'POST', body: payload, paid: false });
+    expect(hops[1]).toMatchObject({ method: 'POST', body: payload, paid: true });
+  });
+
   it('builds the same settlement key for equivalent URL and asset forms', () => {
     const reqAddress: X402PaymentRequirements = {
       scheme: 'exact',

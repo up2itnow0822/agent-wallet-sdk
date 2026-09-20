@@ -1,6 +1,7 @@
 // [MAX-ADDED] x402 Middleware — wraps fetch/axios to be x402-aware
 import type { X402ClientConfig } from './types.js';
 import { X402Client } from './client.js';
+import { toReplayableFetchArgs } from './fetch-args.js';
 
 /**
  * [MAX-ADDED] Create an x402-aware HTTP client.
@@ -35,8 +36,7 @@ export function createX402Fetch(
 ): typeof globalThis.fetch {
   const client = new X402Client(wallet, config);
   return (input: string | URL | Request, init?: RequestInit) => {
-    const url = input instanceof Request ? input.url : input.toString();
-    return client.fetch(url, init);
+    return client.fetch(input, init);
   };
 }
 
@@ -56,21 +56,13 @@ export function wrapWithX402(
   const wrappedClient = new X402Client(wallet, config);
 
   return async (input: string | URL | Request, init?: RequestInit) => {
-    const url = input instanceof Request ? input.url : input.toString();
-    const response = await fetchFn(input, init);
+    const { url, init: replayInit } = await toReplayableFetchArgs(input, init);
+    const response = await fetchFn(url, replayInit);
 
     if (response.status !== 402) {
       return response;
     }
 
-    // Parse and handle 402 via the client
-    const paymentRequired = await wrappedClient.parse402Response(response);
-    if (!paymentRequired) return response;
-
-    const selected = wrappedClient.selectPaymentOption(paymentRequired.accepts);
-    if (!selected) return response;
-
-    // Use the client's fetch for retry (which calls globalThis.fetch)
-    return wrappedClient.fetch(url, init);
+    return wrappedClient.settle402AndRetry(response, url, replayInit, fetchFn);
   };
 }

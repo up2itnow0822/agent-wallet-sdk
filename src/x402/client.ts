@@ -25,6 +25,7 @@ import { DEFAULT_SUPPORTED_NETWORKS } from './types.js';
 import { X402BudgetTracker } from './budget.js';
 import { agentTransferToken, checkBudget } from '../index.js';
 import { resolveAssetAddress } from './multi-asset.js';
+import { toReplayableFetchArgs } from './fetch-args.js';
 
 /**
  * keccak256("TransactionQueued(uint256,address,uint256,address,uint256)").
@@ -404,16 +405,16 @@ export class X402Client {
 
   /**
    * Make an x402-aware fetch request. Automatically handles 402 responses.
+   *
+   * Accepts the same `(input, init)` shape as native fetch, including `Request`.
+   * Method, headers, and body are materialized before the first hop so a 402
+   * retry cannot silently become a GET with an empty body.
    */
-  async fetch(url: string | URL, init?: RequestInit): Promise<Response> {
-    const requestUrl = typeof url === 'string' ? url : url.href;
-    const requestInit = this.snapshotRequestInit(init);
+  async fetch(input: string | URL | Request, init?: RequestInit): Promise<Response> {
+    const { url, init: replayInit } = await toReplayableFetchArgs(input, init);
+    const requestInit = this.snapshotRequestInit(replayInit);
+    const requestUrl = url;
     const urlStr = canonicalizeX402RequestUrl(requestUrl);
-    const method = typeof requestInit?.method === 'string' && requestInit.method.trim() !== ''
-      ? requestInit.method
-      : 'GET';
-    // Bind settlement identity and both requests to the same call-time values.
-    const unkeyedRequestFingerprint = this.fingerprintUnkeyedRequest(requestInit);
     const response = await globalThis.fetch(requestUrl, requestInit);
 
     if (response.status !== 402) {
@@ -423,6 +424,50 @@ export class X402Client {
     if (!this.config.autoPay) {
       return response;
     }
+
+    return this.complete402Payment(response, requestUrl, urlStr, requestInit, globalThis.fetch);
+  }
+
+  /**
+   * Pay an already-received 402 challenge and retry with `X-PAYMENT`.
+   *
+   * Used by wrapWithX402 so the unpaid challenge is not fetched a second time
+   * (a second hop that dropped Request method/body used to turn POST 402s into
+   * unpaid GETs) and so the paid retry goes through the wrapped fetch.
+   */
+  async settle402AndRetry(
+    response: Response,
+    url: string,
+    init?: RequestInit,
+    fetchImpl: typeof globalThis.fetch = globalThis.fetch,
+  ): Promise<Response> {
+    if (response.status !== 402) {
+      return response;
+    }
+    if (!this.config.autoPay) {
+      return response;
+    }
+    const requestInit = this.snapshotRequestInit(init);
+    const requestUrl = url;
+    const urlStr = canonicalizeX402RequestUrl(requestUrl);
+    return this.complete402Payment(response, requestUrl, urlStr, requestInit, fetchImpl);
+  }
+
+  /**
+   * Shared 402 settlement + paid retry. `requestInit` is already snapshotted.
+   */
+  private async complete402Payment(
+    response: Response,
+    requestUrl: string,
+    urlStr: string,
+    requestInit: RequestInit | undefined,
+    fetchImpl: typeof globalThis.fetch,
+  ): Promise<Response> {
+    const method = typeof requestInit?.method === 'string' && requestInit.method.trim() !== ''
+      ? requestInit.method
+      : 'GET';
+    // Bind settlement identity and both requests to the same call-time values.
+    const unkeyedRequestFingerprint = this.fingerprintUnkeyedRequest(requestInit);
 
     // Parse the 402 response
     const paymentRequired = await this.parse402Response(response);
@@ -544,7 +589,7 @@ export class X402Client {
     const payloadB64 = btoa(JSON.stringify(paymentPayload));
     retryHeaders.set('X-PAYMENT', payloadB64);
 
-    const retryResponse = await globalThis.fetch(requestUrl, {
+    const retryResponse = await fetchImpl(requestUrl, {
       ...requestInit,
       headers: retryHeaders,
     });
