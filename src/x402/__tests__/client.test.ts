@@ -503,7 +503,7 @@ describe('X402Client retry idempotency', () => {
     expect(logs[0].replayed).toBe(false);
     expect(logs[1].replayed).toBe(true);
     expect(logs[0].idempotencyKey).toBe(logs[1].idempotencyKey);
-    expect(client.getDailySpendSummary().global).toBe(1000000n);
+    expect(client.getDailySpendSummary().global).toBe(1_007_700n);
   });
 
   it('replays equivalent URL fragments and amount encodings instead of transferring twice', async () => {
@@ -550,7 +550,7 @@ describe('X402Client retry idempotency', () => {
     expect(logs[0].replayed).toBe(false);
     expect(logs[1].replayed).toBe(true);
     expect(logs[0].idempotencyKey).toBe(logs[1].idempotencyKey);
-    expect(client.getDailySpendSummary().global).toBe(1000000n);
+    expect(client.getDailySpendSummary().global).toBe(1_007_700n);
   });
 
   it('replays the same settlement instead of transferring twice', async () => {
@@ -576,7 +576,7 @@ describe('X402Client retry idempotency', () => {
     expect(logs[0].replayed).toBe(false);
     expect(logs[1].replayed).toBe(true);
     expect(logs[0].idempotencyKey).toBe(logs[1].idempotencyKey);
-    expect(client.getDailySpendSummary().global).toBe(1000000n);
+    expect(client.getDailySpendSummary().global).toBe(1_007_700n);
     expect(completions).toHaveLength(2);
     expect(completions[0].replayed).toBe(false);
     expect(completions[1].replayed).toBe(true);
@@ -606,7 +606,7 @@ describe('X402Client retry idempotency', () => {
     expect(logs).toHaveLength(2);
     expect(logs.filter((log) => log.replayed).length).toBe(1);
     expect(logs[0].idempotencyKey).toBe(logs[1].idempotencyKey);
-    expect(client.getDailySpendSummary().global).toBe(1000000n);
+    expect(client.getDailySpendSummary().global).toBe(1_007_700n);
   });
 
   it('single-flights onBeforePayment and execute for concurrent same-intent retries', async () => {
@@ -651,7 +651,7 @@ describe('X402Client retry idempotency', () => {
     expect(executeSpy).toHaveBeenCalledTimes(1);
     expect(approvals).toEqual(['checked']);
     expect(client.getTransactionLog().filter((log) => log.replayed)).toHaveLength(1);
-    expect(client.getDailySpendSummary().global).toBe(1000000n);
+    expect(client.getDailySpendSummary().global).toBe(1_007_700n);
   });
 
   it('does not reuse settlement across independent calls without an explicit intent', async () => {
@@ -706,7 +706,7 @@ describe('X402Client retry idempotency', () => {
     expect(logs[0].replayed).toBe(false);
     expect(logs[1].replayed).toBe(false);
     expect(logs[0].idempotencyKey).not.toBe(logs[1].idempotencyKey);
-    expect(client.getDailySpendSummary().global).toBe(2000000n);
+    expect(client.getDailySpendSummary().global).toBe(2_015_400n);
   });
 
   it('keeps concurrent unkeyed fetches on one in-flight settlement', async () => {
@@ -737,7 +737,7 @@ describe('X402Client retry idempotency', () => {
       });
     });
     const client = new X402Client(mockWallet, {
-      globalDailyLimit: 1000000n,
+      globalDailyLimit: 1_007_700n,
       onBeforePayment: async () => {
         approvals.push('checked');
         return policyGate;
@@ -766,7 +766,7 @@ describe('X402Client retry idempotency', () => {
     expect(logs).toHaveLength(2);
     expect(logs.filter((log) => log.replayed).length).toBe(1);
     expect(logs[0].idempotencyKey).toBe(logs[1].idempotencyKey);
-    expect(client.getDailySpendSummary().global).toBe(1000000n);
+    expect(client.getDailySpendSummary().global).toBe(1_007_700n);
   });
 
   it('does not transfer again when an unkeyed receipt is still pending', async () => {
@@ -792,7 +792,7 @@ describe('X402Client retry idempotency', () => {
         headers: { 'payment-required': btoa(JSON.stringify(unkeyed)) },
       });
     });
-    const client = new X402Client(wallet, { globalDailyLimit: 1000000n });
+    const client = new X402Client(wallet, { globalDailyLimit: 1_007_700n });
 
     const first = client.fetch(url, { method: 'POST' });
     await vi.waitFor(() => {
@@ -814,7 +814,7 @@ describe('X402Client retry idempotency', () => {
     const logs = client.getTransactionLog();
     expect(logs).toHaveLength(2);
     expect(logs.filter((log) => log.replayed).length).toBe(1);
-    expect(client.getDailySpendSummary().global).toBe(1000000n);
+    expect(client.getDailySpendSummary().global).toBe(1_007_700n);
   });
 
   it('does not coalesce concurrent unkeyed POSTs with different bodies', async () => {
@@ -832,7 +832,7 @@ describe('X402Client retry idempotency', () => {
         headers: { 'payment-required': btoa(JSON.stringify(unkeyed)) },
       });
     });
-    const client = new X402Client(mockWallet, { globalDailyLimit: 2000000n });
+    const client = new X402Client(mockWallet, { globalDailyLimit: 2_015_400n });
 
     const responses = await Promise.all([
       client.fetch(url, { method: 'POST', body: JSON.stringify({ sku: 'alpha' }) }),
@@ -845,7 +845,7 @@ describe('X402Client retry idempotency', () => {
     expect(logs).toHaveLength(2);
     expect(logs.every((log) => log.replayed === false)).toBe(true);
     expect(logs[0].idempotencyKey).not.toBe(logs[1].idempotencyKey);
-    expect(client.getDailySpendSummary().global).toBe(2000000n);
+    expect(client.getDailySpendSummary().global).toBe(2_015_400n);
   });
 
   it('single-flights concurrent unkeyed POSTs that share a body', async () => {
@@ -863,7 +863,7 @@ describe('X402Client retry idempotency', () => {
         headers: { 'payment-required': btoa(JSON.stringify(unkeyed)) },
       });
     });
-    const client = new X402Client(mockWallet, { globalDailyLimit: 1000000n });
+    const client = new X402Client(mockWallet, { globalDailyLimit: 1_007_700n });
     const body = JSON.stringify({ sku: 'alpha' });
 
     const responses = await Promise.all([
@@ -877,7 +877,7 @@ describe('X402Client retry idempotency', () => {
     expect(logs).toHaveLength(2);
     expect(logs.filter((log) => log.replayed).length).toBe(1);
     expect(logs[0].idempotencyKey).toBe(logs[1].idempotencyKey);
-    expect(client.getDailySpendSummary().global).toBe(1000000n);
+    expect(client.getDailySpendSummary().global).toBe(1_007_700n);
   });
 
   it('single-flights concurrent unkeyed POSTs sharing a FormData file', async () => {
@@ -896,7 +896,7 @@ describe('X402Client retry idempotency', () => {
         headers: { 'payment-required': btoa(JSON.stringify(unkeyed)) },
       });
     });
-    const client = new X402Client(mockWallet, { globalDailyLimit: 1000000n });
+    const client = new X402Client(mockWallet, { globalDailyLimit: 1_007_700n });
     const body = new FormData();
     body.append('file', new Blob(['x'], { type: 'text/plain' }), 'proof.txt');
 
@@ -911,7 +911,7 @@ describe('X402Client retry idempotency', () => {
     expect(logs).toHaveLength(2);
     expect(logs.filter((log) => log.replayed).length).toBe(1);
     expect(logs[0].idempotencyKey).toBe(logs[1].idempotencyKey);
-    expect(client.getDailySpendSummary().global).toBe(1000000n);
+    expect(client.getDailySpendSummary().global).toBe(1_007_700n);
   });
 
   it('does not coalesce same-body unkeyed requests from distinct callers', async () => {
@@ -931,7 +931,7 @@ describe('X402Client retry idempotency', () => {
         headers: { 'payment-required': btoa(JSON.stringify(unkeyed)) },
       });
     });
-    const client = new X402Client(mockWallet, { globalDailyLimit: 2000000n });
+    const client = new X402Client(mockWallet, { globalDailyLimit: 2_015_400n });
     const body = JSON.stringify({ sku: 'alpha' });
 
     const responses = await Promise.all([
@@ -945,7 +945,7 @@ describe('X402Client retry idempotency', () => {
 
     expect(responses.map((response) => response.status)).toEqual([200, 200]);
     expect(executeSpy).toHaveBeenCalledTimes(2);
-    expect(client.getDailySpendSummary().global).toBe(2000000n);
+    expect(client.getDailySpendSummary().global).toBe(2_015_400n);
   });
 
   it('separates credential contexts while normalizing the default mode', async () => {
@@ -964,7 +964,7 @@ describe('X402Client retry idempotency', () => {
         headers: { 'payment-required': btoa(JSON.stringify(unkeyed)) },
       });
     });
-    const client = new X402Client(mockWallet, { globalDailyLimit: 2000000n });
+    const client = new X402Client(mockWallet, { globalDailyLimit: 2_015_400n });
     const body = JSON.stringify({ sku: 'alpha' });
 
     const responses = await Promise.all([
@@ -978,7 +978,7 @@ describe('X402Client retry idempotency', () => {
     const logs = client.getTransactionLog();
     expect(logs).toHaveLength(3);
     expect(logs.filter((log) => log.replayed)).toHaveLength(1);
-    expect(client.getDailySpendSummary().global).toBe(2000000n);
+    expect(client.getDailySpendSummary().global).toBe(2_015_400n);
   });
 
   it('scopes unkeyed pending keys to readable request identity', () => {
@@ -1043,7 +1043,7 @@ describe('X402Client retry idempotency', () => {
         headers: { 'payment-required': btoa(JSON.stringify(unkeyed)) },
       });
     });
-    const client = new X402Client(mockWallet, { globalDailyLimit: 2000000n });
+    const client = new X402Client(mockWallet, { globalDailyLimit: 2_015_400n });
     const firstBody = new URLSearchParams({ sku: 'alpha' });
     const first = client.fetch(url, { method: 'POST', body: firstBody });
     await vi.waitFor(() => expect(challenges).toBe(1));
@@ -1085,7 +1085,7 @@ describe('X402Client retry idempotency', () => {
         headers: { 'payment-required': btoa(JSON.stringify(unkeyed)) },
       });
     });
-    const client = new X402Client(mockWallet, { globalDailyLimit: 2000000n });
+    const client = new X402Client(mockWallet, { globalDailyLimit: 2_015_400n });
     const headers = new Headers({ Authorization: 'Bearer caller-a' });
     const first = client.fetch(url, { method: 'POST', body: 'same', headers });
     await vi.waitFor(() => expect(challenges).toBe(1));
@@ -1121,7 +1121,7 @@ describe('X402Client retry idempotency', () => {
       delete (unkeyed.accepts[0] as { extra?: unknown }).extra;
       return new Response(null, { status: 402, headers: { 'payment-required': btoa(JSON.stringify(unkeyed)) } });
     });
-    const client = new X402Client(mockWallet, { globalDailyLimit: 2000000n });
+    const client = new X402Client(mockWallet, { globalDailyLimit: 2_015_400n });
     const firstBody = new FormData();
     firstBody.append('sku', 'alpha');
     const first = client.fetch(url, { method: 'POST', body: firstBody });
@@ -1156,7 +1156,7 @@ describe('X402Client retry idempotency', () => {
       delete (unkeyed.accepts[0] as { extra?: unknown }).extra;
       return new Response(null, { status: 402, headers: { 'payment-required': btoa(JSON.stringify(unkeyed)) } });
     });
-    const client = new X402Client(mockWallet, { globalDailyLimit: 2000000n });
+    const client = new X402Client(mockWallet, { globalDailyLimit: 2_015_400n });
     const firstInit: RequestInit = { method: 'POST', body: 'same' };
     const first = client.fetch(url, firstInit);
     await vi.waitFor(() => expect(challenges).toBe(1));
@@ -1256,7 +1256,7 @@ describe('X402Client retry idempotency', () => {
       .rejects.toBeInstanceOf(X402IntentTermsConflictError);
     expect(executeSpy).toHaveBeenCalledTimes(1);
     expect(client.getTransactionLog()).toHaveLength(1);
-    expect(client.getDailySpendSummary().global).toBe(1000000n);
+    expect(client.getDailySpendSummary().global).toBe(1_007_700n);
   });
 
   it('settles delimiter-colliding explicit intents separately', async () => {
@@ -1301,7 +1301,7 @@ describe('X402Client retry idempotency', () => {
     expect(logs).toHaveLength(2);
     expect(logs[0].replayed).toBe(false);
     expect(logs[1].replayed).toBe(false);
-    expect(client.getDailySpendSummary().global).toBe(2000000n);
+    expect(client.getDailySpendSummary().global).toBe(2_015_400n);
   });
 
   it('expires a successful settlement after the retry window',
@@ -1321,7 +1321,7 @@ describe('X402Client retry idempotency', () => {
       expect(logs).toHaveLength(2);
       expect(logs[0].replayed).toBe(false);
       expect(logs[1].replayed).toBe(false);
-      expect(client.getDailySpendSummary().global).toBe(2000000n);
+      expect(client.getDailySpendSummary().global).toBe(2_015_400n);
     },
   );
 
@@ -1332,7 +1332,7 @@ describe('X402Client retry idempotency', () => {
     const approvals: string[] = [];
     mock402ThenPaid();
     const client = new X402Client(mockWallet, {
-      globalDailyLimit: 1000000n,
+      globalDailyLimit: 1_007_700n,
       onBeforePayment: async () => {
         approvals.push('checked');
         return true;
@@ -1353,7 +1353,7 @@ describe('X402Client retry idempotency', () => {
     expect(executeSpy).toHaveBeenCalledTimes(1);
     expect(approvals).toEqual(['checked']);
     expect(client.getTransactionLog()).toHaveLength(1);
-    expect(client.getDailySpendSummary().global).toBe(1000000n);
+    expect(client.getDailySpendSummary().global).toBe(1_007_700n);
   });
 
   it('reuses a submitted settlement until the receipt is final', async () => {
@@ -1386,7 +1386,7 @@ describe('X402Client retry idempotency', () => {
       onReplaced: expect.any(Function),
     });
     expect(client.getTransactionLog().filter((log) => log.replayed)).toHaveLength(1);
-    expect(client.getDailySpendSummary().global).toBe(1000000n);
+    expect(client.getDailySpendSummary().global).toBe(1_007_700n);
   });
 
   it('treats a successful AgentAccount queue as unpaid', () => {
@@ -1422,15 +1422,15 @@ describe('X402Client retry idempotency', () => {
     const executeSpy = vi.spyOn(X402Client.prototype as any, 'executePayment')
       .mockResolvedValue({ txHash });
     const fetchSpy = mock402ThenPaid();
-    const client = new X402Client(wallet, { globalDailyLimit: 1000000n });
+    const client = new X402Client(wallet, { globalDailyLimit: 1_007_700n });
 
     await expect(client.fetch(url, { method: 'POST' })).rejects.toBeInstanceOf(
       X402SettlementQueuedError,
     );
     expect(executeSpy).toHaveBeenCalledTimes(1);
     expect(client.getTransactionLog()).toHaveLength(0);
-    expect(client.getDailySpendSummary().global).toBe(1000000n);
-    expect(client.budgetTracker.getReservedSummary().global).toBe(1000000n);
+    expect(client.getDailySpendSummary().global).toBe(1_007_700n);
+    expect(client.budgetTracker.getReservedSummary().global).toBe(1_007_700n);
     expect(
       fetchSpy.mock.calls.some(([, init]) => new Headers(init?.headers).has('X-PAYMENT')),
     ).toBe(false);
@@ -1439,7 +1439,7 @@ describe('X402Client retry idempotency', () => {
       X402SettlementQueuedError,
     );
     expect(executeSpy).toHaveBeenCalledTimes(1);
-    expect(client.budgetTracker.getReservedSummary().global).toBe(1000000n);
+    expect(client.budgetTracker.getReservedSummary().global).toBe(1_007_700n);
   });
 
   it('waits for receipt on unkeyed challenges and fails closed when queued', async () => {
@@ -1470,7 +1470,7 @@ describe('X402Client retry idempotency', () => {
         headers: { 'payment-required': btoa(JSON.stringify(unkeyed)) },
       });
     });
-    const client = new X402Client(wallet, { globalDailyLimit: 1000000n });
+    const client = new X402Client(wallet, { globalDailyLimit: 1_007_700n });
 
     await expect(client.fetch(url, { method: 'POST' })).rejects.toBeInstanceOf(
       X402SettlementQueuedError,
@@ -1481,13 +1481,13 @@ describe('X402Client retry idempotency', () => {
     });
     expect(executeSpy).toHaveBeenCalledTimes(1);
     expect(client.getTransactionLog()).toHaveLength(0);
-    expect(client.budgetTracker.getReservedSummary().global).toBe(1000000n);
+    expect(client.budgetTracker.getReservedSummary().global).toBe(1_007_700n);
 
     await expect(client.fetch(url, { method: 'POST' })).rejects.toBeInstanceOf(
       X402SettlementQueuedError,
     );
     expect(executeSpy).toHaveBeenCalledTimes(1);
-    expect(client.budgetTracker.getReservedSummary().global).toBe(1000000n);
+    expect(client.budgetTracker.getReservedSummary().global).toBe(1_007_700n);
   });
 
   it('does not reuse an unkeyed hash as proof for a different resource', async () => {
@@ -1535,11 +1535,11 @@ describe('X402Client retry idempotency', () => {
         headers: { 'payment-required': btoa(JSON.stringify(unkeyed)) },
       });
     });
-    const client = new X402Client(wallet, { globalDailyLimit: 2000000n });
+    const client = new X402Client(wallet, { globalDailyLimit: 2_015_400n });
 
     await expect(client.fetch(url, { method: 'POST' })).rejects.toThrow(/RPC timeout/);
     expect(executeSpy).toHaveBeenCalledTimes(1);
-    expect(client.budgetTracker.getReservedSummary().global).toBe(1000000n);
+    expect(client.budgetTracker.getReservedSummary().global).toBe(1_007_700n);
 
     expect((await client.fetch(otherUrl, { method: 'POST' })).status).toBe(200);
     expect(executeSpy).toHaveBeenCalledTimes(2);
@@ -1556,7 +1556,7 @@ describe('X402Client retry idempotency', () => {
     expect(client.getTransactionLog()[1].txHash).toBe(firstHash);
     const firstResourcePayload = JSON.parse(atob(paymentHeaders[1]));
     expect(firstResourcePayload.payload.txHash).toBe(firstHash);
-    expect(client.getDailySpendSummary().global).toBe(2000000n);
+    expect(client.getDailySpendSummary().global).toBe(2_015_400n);
     expect(client.budgetTracker.getReservedSummary().global).toBe(0n);
   });
 
@@ -1612,7 +1612,7 @@ describe('X402Client retry idempotency', () => {
         headers: { 'payment-required': btoa(JSON.stringify(unkeyed)) },
       });
     });
-    const client = new X402Client(wallet, { globalDailyLimit: 2000000n });
+    const client = new X402Client(wallet, { globalDailyLimit: 2_015_400n });
 
     await expect(client.fetch(url, { method: 'POST' })).rejects.toBeInstanceOf(
       X402SettlementQueuedError,
@@ -1623,7 +1623,7 @@ describe('X402Client retry idempotency', () => {
     expect(executeSpy).toHaveBeenCalledTimes(2);
     expect(client.getTransactionLog()).toHaveLength(1);
     expect(client.getTransactionLog()[0].txHash).toBe(secondHash);
-    expect(client.budgetTracker.getReservedSummary().global).toBe(1000000n);
+    expect(client.budgetTracker.getReservedSummary().global).toBe(1_007_700n);
 
     await expect(client.fetch(url, { method: 'POST' })).rejects.toBeInstanceOf(
       X402SettlementQueuedError,
@@ -1702,7 +1702,7 @@ describe('X402Client retry idempotency', () => {
     const executeSpy = vi.spyOn(X402Client.prototype as any, 'executePayment')
       .mockResolvedValue({ txHash });
     const fetchSpy = mock402ThenPaid();
-    const client = new X402Client(wallet, { globalDailyLimit: 1000000n });
+    const client = new X402Client(wallet, { globalDailyLimit: 1_007_700n });
 
     await expect(client.fetch(url, { method: 'POST' })).rejects.toBeInstanceOf(
       X402SettlementRevertedError,
@@ -1738,13 +1738,13 @@ describe('X402Client retry idempotency', () => {
     const executeSpy = vi.spyOn(X402Client.prototype as any, 'executePayment')
       .mockResolvedValue({ txHash });
     const fetchSpy = mock402ThenPaid();
-    const client = new X402Client(wallet, { globalDailyLimit: 1000000n });
+    const client = new X402Client(wallet, { globalDailyLimit: 1_007_700n });
 
     await expect(client.fetch(url, { method: 'POST' })).rejects.toBeInstanceOf(
       X402SettlementUnknownError,
     );
     expect(executeSpy).toHaveBeenCalledTimes(1);
-    expect(client.budgetTracker.getReservedSummary().global).toBe(1000000n);
+    expect(client.budgetTracker.getReservedSummary().global).toBe(1_007_700n);
     expect(
       fetchSpy.mock.calls.some(([, init]) => new Headers(init?.headers).has('X-PAYMENT')),
     ).toBe(false);
@@ -1754,7 +1754,7 @@ describe('X402Client retry idempotency', () => {
       X402SettlementUnknownError,
     );
     expect(executeSpy).toHaveBeenCalledTimes(1);
-    expect(client.budgetTracker.getReservedSummary().global).toBe(1000000n);
+    expect(client.budgetTracker.getReservedSummary().global).toBe(1_007_700n);
     expect(waitReceipt.mock.calls.every(([arg]) => arg.hash === txHash)).toBe(true);
     expect(waitReceipt.mock.calls.some(([arg]) => arg.hash === replacedHash)).toBe(false);
   });
@@ -1782,7 +1782,7 @@ describe('X402Client retry idempotency', () => {
     const executeSpy = vi.spyOn(X402Client.prototype as any, 'executePayment')
       .mockResolvedValue({ txHash });
     mock402ThenPaid();
-    const client = new X402Client(wallet, { globalDailyLimit: 1000000n });
+    const client = new X402Client(wallet, { globalDailyLimit: 1_007_700n });
 
     await expect(client.fetch(url, { method: 'POST' })).rejects.toMatchObject({
       name: 'X402SettlementRevertedError',
@@ -1826,7 +1826,7 @@ describe('X402Client retry idempotency', () => {
     const executeSpy = vi.spyOn(X402Client.prototype as any, 'executePayment')
       .mockResolvedValue({ txHash });
     mock402ThenPaid();
-    const client = new X402Client(wallet, { globalDailyLimit: 1000000n });
+    const client = new X402Client(wallet, { globalDailyLimit: 1_007_700n });
 
     await expect(client.fetch(url, { method: 'POST' })).rejects.toBeInstanceOf(
       X402SettlementQueuedError,
@@ -1835,7 +1835,7 @@ describe('X402Client retry idempotency', () => {
       txHash: replacedHash,
     });
     expect(executeSpy).toHaveBeenCalledTimes(1);
-    expect(client.budgetTracker.getReservedSummary().global).toBe(1000000n);
+    expect(client.budgetTracker.getReservedSummary().global).toBe(1_007_700n);
     await expect(client.fetch(url, { method: 'POST' })).rejects.toBeInstanceOf(
       X402SettlementQueuedError,
     );
@@ -1871,7 +1871,7 @@ describe('X402Client retry idempotency', () => {
     )
       .mockResolvedValue({ txHash });
     const fetchSpy = mock402ThenPaid();
-    const client = new X402Client(wallet, { globalDailyLimit: 1000000n });
+    const client = new X402Client(wallet, { globalDailyLimit: 1_007_700n });
 
     await expect(client.fetch(url, { method: 'POST' })).rejects.toThrow('temporary receipt outage');
     await expect(client.fetch(url, { method: 'POST' })).rejects.toBeInstanceOf(
@@ -1879,7 +1879,7 @@ describe('X402Client retry idempotency', () => {
     );
 
     expect(executeSpy).toHaveBeenCalledTimes(1);
-    expect(client.budgetTracker.getReservedSummary().global).toBe(1000000n);
+    expect(client.budgetTracker.getReservedSummary().global).toBe(1_007_700n);
     expect(
       fetchSpy.mock.calls.filter(([, init]) => new Headers(init?.headers).has('X-PAYMENT')),
     ).toHaveLength(0);
@@ -1902,18 +1902,18 @@ describe('X402Client retry idempotency', () => {
     const executeSpy = vi.spyOn(X402Client.prototype as any, 'executePayment')
       .mockResolvedValue({ txHash });
     mock402ThenPaid();
-    const client = new X402Client(wallet, { globalDailyLimit: 1000000n });
+    const client = new X402Client(wallet, { globalDailyLimit: 1_007_700n });
 
     await expect(client.fetch(url, { method: 'POST' })).rejects.toThrow(
       'receipt hash mismatch without replacement signal',
     );
     expect(executeSpy).toHaveBeenCalledTimes(1);
-    expect(client.budgetTracker.getReservedSummary().global).toBe(1000000n);
+    expect(client.budgetTracker.getReservedSummary().global).toBe(1_007_700n);
 
     expect((await client.fetch(url, { method: 'POST' })).status).toBe(200);
     expect(executeSpy).toHaveBeenCalledTimes(1);
     expect(waitReceipt).toHaveBeenCalledTimes(2);
-    expect(client.getDailySpendSummary().global).toBe(1000000n);
+    expect(client.getDailySpendSummary().global).toBe(1_007_700n);
     expect(client.budgetTracker.getReservedSummary().global).toBe(0n);
     expect(client.getTransactionLog().map((log) => log.txHash)).toEqual([txHash]);
     expect(client.getTransactionLog()[0].replayed).toBe(true);
@@ -1944,7 +1944,7 @@ describe('X402Client retry idempotency', () => {
     const executeSpy = vi.spyOn(X402Client.prototype as any, 'executePayment')
       .mockResolvedValue({ txHash });
     mock402ThenPaid();
-    const client = new X402Client(wallet, { globalDailyLimit: 1000000n });
+    const client = new X402Client(wallet, { globalDailyLimit: 1_007_700n });
 
     await expect(client.fetch(url, { method: 'POST' })).rejects.toThrow('RPC timeout');
     expect(executeSpy).toHaveBeenCalledTimes(1);
@@ -2008,18 +2008,18 @@ describe('X402Client retry idempotency', () => {
         headers: { 'payment-required': btoa(JSON.stringify(unkeyed)) },
       });
     });
-    const client = new X402Client(wallet, { globalDailyLimit: 1000000n });
+    const client = new X402Client(wallet, { globalDailyLimit: 1_007_700n });
 
     await expect(client.fetch(url, { method: 'POST' })).rejects.toThrow(/RPC timeout/);
     expect(executeSpy).toHaveBeenCalledTimes(1);
-    expect(client.budgetTracker.getReservedSummary().global).toBe(1000000n);
+    expect(client.budgetTracker.getReservedSummary().global).toBe(1_007_700n);
     expect(client.getTransactionLog()).toHaveLength(0);
 
     expect((await client.fetch(url, { method: 'POST' })).status).toBe(200);
     expect(executeSpy).toHaveBeenCalledTimes(1);
     expect(waitReceipt).toHaveBeenCalledTimes(2);
     expect(client.getTransactionLog()).toHaveLength(1);
-    expect(client.getDailySpendSummary().global).toBe(1000000n);
+    expect(client.getDailySpendSummary().global).toBe(1_007_700n);
     expect(client.budgetTracker.getReservedSummary().global).toBe(0n);
   });
 
@@ -2061,14 +2061,14 @@ describe('X402Client retry idempotency', () => {
     expect(executeSpy).toHaveBeenCalledTimes(1);
     expect(waitReceipt).toHaveBeenCalledTimes(1);
     expect(client.getTransactionLog()).toHaveLength(0);
-    expect(client.budgetTracker.getReservedSummary().global).toBe(1000000n);
+    expect(client.budgetTracker.getReservedSummary().global).toBe(1_007_700n);
 
     expect((await client.fetch(url, { method: 'POST' })).status).toBe(200);
     expect(executeSpy).toHaveBeenCalledTimes(1);
     expect(waitReceipt).toHaveBeenCalledTimes(2);
     expect(client.getTransactionLog()).toHaveLength(1);
     expect(client.getTransactionLog()[0].replayed).toBe(true);
-    expect(client.getDailySpendSummary().global).toBe(1000000n);
+    expect(client.getDailySpendSummary().global).toBe(1_007_700n);
   });
 
   it('keeps confirming after polling errors and fails closed on a delayed revert', async () => {
@@ -2117,12 +2117,12 @@ describe('X402Client retry idempotency', () => {
     const executeSpy = vi.spyOn(X402Client.prototype as any, 'executePayment')
       .mockResolvedValue({ txHash });
     mock402ThenPaid();
-    const client = new X402Client(wallet, { globalDailyLimit: 1000000n });
+    const client = new X402Client(wallet, { globalDailyLimit: 1_007_700n });
 
     await expect(client.fetch(url, { method: 'POST' })).rejects.toThrow('RPC timeout');
     expect(executeSpy).toHaveBeenCalledTimes(1);
-    expect(client.getDailySpendSummary().global).toBe(1000000n);
-    expect(client.budgetTracker.getReservedSummary().global).toBe(1000000n);
+    expect(client.getDailySpendSummary().global).toBe(1_007_700n);
+    expect(client.budgetTracker.getReservedSummary().global).toBe(1_007_700n);
 
     // Two concurrent observers of the same delayed revert share one
     // confirmation, so the reservation is released once, not twice.
@@ -2138,7 +2138,7 @@ describe('X402Client retry idempotency', () => {
     expect((await client.fetch(url, { method: 'POST' })).status).toBe(200);
     expect(executeSpy).toHaveBeenCalledTimes(2);
     expect(waitReceipt).toHaveBeenCalledTimes(3);
-    expect(client.getDailySpendSummary().global).toBe(1000000n);
+    expect(client.getDailySpendSummary().global).toBe(1_007_700n);
     expect(client.budgetTracker.getReservedSummary().global).toBe(0n);
   });
 
@@ -2174,7 +2174,7 @@ describe('X402Client retry idempotency', () => {
 
     await expect(client.fetch(`${url}?n=intent-a`, { method: 'POST' })).rejects.toThrow('RPC timeout');
     expect(waitReceipt).toHaveBeenCalledTimes(1);
-    expect(client.budgetTracker.getReservedSummary().global).toBe(1000000n);
+    expect(client.budgetTracker.getReservedSummary().global).toBe(1_007_700n);
 
     // A different intent triggers reconfirmation of the unknown one.
     expect((await client.fetch(`${url}?n=intent-b`, { method: 'POST' })).status).toBe(200);
@@ -2182,7 +2182,7 @@ describe('X402Client retry idempotency', () => {
       expect(client.budgetTracker.getReservedSummary().global).toBe(0n);
     });
     expect(waitReceipt).toHaveBeenCalledTimes(3);
-    expect(client.getDailySpendSummary().global).toBe(2000000n);
+    expect(client.getDailySpendSummary().global).toBe(2_015_400n);
   });
 
   it('reserves daily budget before receipt confirmation so a second intent cannot overspend', async () => {
@@ -2228,13 +2228,13 @@ describe('X402Client retry idempotency', () => {
         },
       });
     });
-    const client = new X402Client(wallet, { globalDailyLimit: 1000000n });
+    const client = new X402Client(wallet, { globalDailyLimit: 1_007_700n });
 
     const firstPromise = client.fetch(`${url}?n=intent-a`, { method: 'POST' });
     await vi.waitFor(() => {
       expect(waitReceipt).toHaveBeenCalledTimes(1);
     });
-    expect(client.getDailySpendSummary().global).toBe(1000000n);
+    expect(client.getDailySpendSummary().global).toBe(1_007_700n);
 
     await expect(client.fetch(`${url}?n=intent-b`, { method: 'POST' }))
       .rejects.toThrow(/global daily limit/);
@@ -2243,7 +2243,7 @@ describe('X402Client retry idempotency', () => {
     releaseReceipt({ status: 'success' });
     expect((await firstPromise).status).toBe(200);
     expect(client.getTransactionLog()).toHaveLength(1);
-    expect(client.getDailySpendSummary().global).toBe(1000000n);
+    expect(client.getDailySpendSummary().global).toBe(1_007_700n);
   });
 
   it('releases a reserved budget when the first receipt is a revert', async () => {
@@ -2256,7 +2256,7 @@ describe('X402Client retry idempotency', () => {
     const executeSpy = vi.spyOn(X402Client.prototype as any, 'executePayment')
       .mockResolvedValue({ txHash });
     mock402ThenPaid();
-    const client = new X402Client(wallet, { globalDailyLimit: 1000000n });
+    const client = new X402Client(wallet, { globalDailyLimit: 1_007_700n });
 
     await expect(client.fetch(url, { method: 'POST' })).rejects.toThrow(/reverted/);
     expect(executeSpy).toHaveBeenCalledTimes(1);
@@ -2264,7 +2264,7 @@ describe('X402Client retry idempotency', () => {
 
     expect((await client.fetch(url, { method: 'POST' })).status).toBe(200);
     expect(executeSpy).toHaveBeenCalledTimes(2);
-    expect(client.getDailySpendSummary().global).toBe(1000000n);
+    expect(client.getDailySpendSummary().global).toBe(1_007_700n);
   });
 
   function mock402PerIntent() {
@@ -2356,7 +2356,7 @@ describe('X402Client retry idempotency', () => {
       .mockResolvedValue({ txHash });
     mock402PerIntent();
     const client = new X402Client(mockWallet, {
-      globalDailyLimit: 1000000n,
+      globalDailyLimit: 1_007_700n,
       onBeforePayment: async () => policyGate,
     });
 
@@ -2371,7 +2371,7 @@ describe('X402Client retry idempotency', () => {
     expect(rejected).toHaveLength(1);
     expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(X402BudgetExceededError);
     expect(executeSpy).toHaveBeenCalledTimes(1);
-    expect(client.getDailySpendSummary().global).toBe(1000000n);
+    expect(client.getDailySpendSummary().global).toBe(1_007_700n);
   });
 
   it('releases the reservation when execution throws before a hash is returned', async () => {
@@ -2379,7 +2379,7 @@ describe('X402Client retry idempotency', () => {
       .mockRejectedValueOnce(new Error('rpc down'))
       .mockResolvedValue({ txHash });
     mock402ThenPaid();
-    const client = new X402Client(mockWallet, { globalDailyLimit: 1000000n });
+    const client = new X402Client(mockWallet, { globalDailyLimit: 1_007_700n });
 
     await expect(client.fetch(url, { method: 'POST' })).rejects.toThrow(/rpc down/);
     expect(client.getDailySpendSummary().global).toBe(0n);
@@ -2387,7 +2387,7 @@ describe('X402Client retry idempotency', () => {
 
     expect((await client.fetch(url, { method: 'POST' })).status).toBe(200);
     expect(executeSpy).toHaveBeenCalledTimes(2);
-    expect(client.getDailySpendSummary().global).toBe(1000000n);
+    expect(client.getDailySpendSummary().global).toBe(1_007_700n);
   });
 
   it('retains every completed settlement for the full retry window regardless of count', async () => {
@@ -2509,14 +2509,14 @@ describe('X402Client retry idempotency', () => {
 
     // intent-a is broadcast but its receipt cannot be observed.
     await expect(client.fetch(`${url}?n=intent-a`, { method: 'POST' })).rejects.toThrow('RPC timeout');
-    expect(client.budgetTracker.getReservedSummary().global).toBe(1000000n);
+    expect(client.budgetTracker.getReservedSummary().global).toBe(1_007_700n);
 
     // Unrelated activity reconfirms intent-a in the background and finds the revert.
     expect((await client.fetch(`${url}?n=intent-b`, { method: 'POST' })).status).toBe(200);
     await vi.waitFor(() => {
       expect(client.budgetTracker.getReservedSummary().global).toBe(0n);
     });
-    expect(client.getDailySpendSummary().global).toBe(1000000n);
+    expect(client.getDailySpendSummary().global).toBe(1_007_700n);
 
     // The next observation of intent-a fails closed instead of paying fresh.
     await expect(client.fetch(`${url}?n=intent-a`, { method: 'POST' })).rejects.toBeInstanceOf(
@@ -2527,7 +2527,7 @@ describe('X402Client retry idempotency', () => {
     // Having observed the revert, the caller's own retry settles fresh.
     expect((await client.fetch(`${url}?n=intent-a`, { method: 'POST' })).status).toBe(200);
     expect(executeSpy).toHaveBeenCalledTimes(3);
-    expect(client.getDailySpendSummary().global).toBe(2000000n);
+    expect(client.getDailySpendSummary().global).toBe(2_015_400n);
   });
 
   it('backs off opportunistic reconfirmation while receipts keep failing', async () => {
@@ -2578,7 +2578,7 @@ describe('X402Client retry idempotency', () => {
     vi.advanceTimersByTime(X402_RECONFIRM_BACKOFF_MS + 1);
     expect((await client.fetch(`${url}?n=intent-g`, { method: 'POST' })).status).toBe(200);
     expect(attemptsForA()).toBe(4);
-    expect(client.budgetTracker.getReservedSummary().global).toBe(1000000n);
+    expect(client.budgetTracker.getReservedSummary().global).toBe(1_007_700n);
 
     // A retry of the intent itself never waits for the backoff: it reconfirms
     // immediately, and replays the settled hash instead of paying again.
@@ -2680,7 +2680,7 @@ describe('X402Client retry idempotency', () => {
     );
     expect(executeSpy).toHaveBeenCalledTimes(X402_MAX_UNCONFIRMED_SETTLEMENTS);
     expect(client.budgetTracker.getReservedSummary().global)
-      .toBe(BigInt(X402_MAX_UNCONFIRMED_SETTLEMENTS) * 1000000n);
+      .toBe(BigInt(X402_MAX_UNCONFIRMED_SETTLEMENTS) * 1_007_700n);
 
     // A retry of an already-submitted intent is still reconfirmed, but no proof
     // can be emitted while the receipt endpoint remains unavailable.

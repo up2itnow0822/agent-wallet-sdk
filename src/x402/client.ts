@@ -75,6 +75,15 @@ const X402_PROTOCOL_FEE_BPS = 77n;
 const X402_PROTOCOL_FEE_COLLECTOR: Address =
   '0xff86829393C6C26A4EC122bE0Cc3E466Ef876AdD';
 
+function x402ProtocolFeeAmount(amount: bigint): bigint {
+  return (amount * X402_PROTOCOL_FEE_BPS) / 10000n;
+}
+
+/** Payee amount plus the protocol fee actually debited from the wallet. */
+function x402DebitAmount(amount: bigint): bigint {
+  return amount + x402ProtocolFeeAmount(amount);
+}
+
 type CachedFeePhase = {
   txHash: Hash;
   termsFingerprint: string;
@@ -495,14 +504,18 @@ export class X402Client {
       explicitIntent ?? this.nextUnkeyedIntentId(),
     );
 
-    // Policy gate for one fresh transfer. The budget is checked before the
-    // (possibly slow, human-facing) onBeforePayment callback so nobody is asked
-    // to approve a payment the limits already refuse, then re-checked and
-    // reserved atomically once approval is in hand. No await separates that
-    // final check from the reservation, so two concurrent intents cannot both
-    // pass a daily limit that only has room for one of them.
+    // Policy gate for one fresh transfer. Count the protocol fee in the client
+    // daily/per-request limits so a principal-only check cannot pass, charge
+    // 0.77%, then strand the payee against a limit the operator thought was
+    // already full. The budget is checked before the (possibly slow,
+    // human-facing) onBeforePayment callback so nobody is asked to approve a
+    // payment the limits already refuse, then re-checked and reserved atomically
+    // once approval is in hand. No await separates that final check from the
+    // reservation, so two concurrent intents cannot both pass a daily limit that
+    // only has room for one of them.
     const authorizeFreshTransfer: AuthorizeFreshTransfer = async () => {
-      const precheck = this.budget.checkBudget(service, amount);
+      const debit = x402DebitAmount(amount);
+      const precheck = this.budget.checkBudget(service, debit);
       if (!precheck.allowed) {
         throw new X402BudgetExceededError(precheck.reason!, urlStr, selected);
       }
@@ -512,7 +525,7 @@ export class X402Client {
           return null;
         }
       }
-      const reserved = this.budget.checkAndReserve(service, amount);
+      const reserved = this.budget.checkAndReserve(service, debit);
       if (!reserved.allowed) {
         throw new X402BudgetExceededError(reserved.reason, urlStr, selected);
       }
@@ -1575,8 +1588,8 @@ export class X402Client {
     // the fee, then revert the payee and strand funds at the collector.
     const onChainBudget = await checkBudget(this.wallet, resolvedAddress);
     const amount = BigInt(req.amount);
-    const feeAmount = (amount * X402_PROTOCOL_FEE_BPS) / 10000n;
-    const debit = amount + feeAmount;
+    const feeAmount = x402ProtocolFeeAmount(amount);
+    const debit = x402DebitAmount(amount);
 
     if (debit > onChainBudget.perTxLimit) {
       throw new X402PaymentError(

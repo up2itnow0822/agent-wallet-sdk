@@ -145,6 +145,36 @@ describe('X402Client protocol-fee phase (#50)', () => {
     expect(isFeeTransfer(transfer.mock.calls[1][1])).toBe(false);
   });
 
+  it('refuses a client daily limit that covers principal but not protocol fee', async () => {
+    const { wallet } = setupTransfers({
+      feeReceipts: ['success'],
+      payeeReceipts: ['success'],
+    });
+    const client = new X402Client(wallet, { globalDailyLimit: 1_000_000n });
+
+    await expect(client.fetch(URL, { method: 'POST' })).rejects.toThrow(/global daily limit/);
+    expect(transfer.mock.calls).toHaveLength(0);
+    expect(client.budgetTracker.getReservedSummary().global).toBe(0n);
+    expect(client.getDailySpendSummary().global).toBe(0n);
+  });
+
+  it('counts protocol fee against client daily limits and fail-closes the next intent', async () => {
+    const { wallet } = setupTransfers({
+      feeReceipts: ['success'],
+      payeeReceipts: ['success'],
+    });
+    mock402ThenPaid({ nonce: 'intent-daily-a' });
+    const client = new X402Client(wallet, { globalDailyLimit: 1_007_700n });
+
+    expect((await client.fetch(URL, { method: 'POST' })).status).toBe(200);
+    expect(client.getDailySpendSummary().global).toBe(1_007_700n);
+    expect(client.getTransactionLog()[0].amount).toBe(1_000_000n);
+
+    mock402ThenPaid({ nonce: 'intent-daily-b' });
+    await expect(client.fetch(URL, { method: 'POST' })).rejects.toThrow(/global daily limit/);
+    expect(transfer.mock.calls).toHaveLength(2);
+  });
+
   it('does not re-charge the protocol fee after a payee revert on the same explicit intent', async () => {
     const { wallet, feeHashes, payeeHashes } = setupTransfers({
       feeReceipts: ['success'],
@@ -210,7 +240,7 @@ describe('X402Client protocol-fee phase (#50)', () => {
     expect(logs).toHaveLength(2);
     expect(logs[0].replayed).toBe(false);
     expect(logs[1].replayed).toBe(true);
-    expect(client.getDailySpendSummary().global).toBe(1000000n);
+    expect(client.getDailySpendSummary().global).toBe(1_007_700n);
   });
 
   it('retains an unknown fee submission and reconfirms it instead of transferring again', async () => {
@@ -266,7 +296,7 @@ describe('X402Client protocol-fee phase (#50)', () => {
 
     await expect(client.fetch(URL, { method: 'POST' })).rejects.toThrow('rpc timeout');
     expect(transfer.mock.calls).toHaveLength(1);
-    expect(client.budgetTracker.getReservedSummary().global).toBe(1000000n);
+    expect(client.budgetTracker.getReservedSummary().global).toBe(1_007_700n);
 
     const retry = await client.fetch(URL, { method: 'POST' });
     expect(retry.status).toBe(200);
@@ -356,7 +386,7 @@ describe('X402Client protocol-fee phase (#50)', () => {
 
     expect(transfer.mock.calls).toHaveLength(1);
     expect(isFeeTransfer(transfer.mock.calls[0][1])).toBe(true);
-    expect(client.budgetTracker.getReservedSummary().global).toBe(1000000n);
+    expect(client.budgetTracker.getReservedSummary().global).toBe(1_007_700n);
     expect(client.getTransactionLog()).toHaveLength(0);
   });
 
@@ -383,7 +413,7 @@ describe('X402Client protocol-fee phase (#50)', () => {
 
     expect(transfer.mock.calls).toHaveLength(1);
     expect(isFeeTransfer(transfer.mock.calls[0][1])).toBe(true);
-    expect(client.budgetTracker.getReservedSummary().global).toBe(1000000n);
+    expect(client.budgetTracker.getReservedSummary().global).toBe(1_007_700n);
     expect(client.getTransactionLog()).toHaveLength(0);
   });
 
