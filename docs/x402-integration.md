@@ -37,6 +37,14 @@ pip install agent-wallet-sdk
 | Etherlink | ✅ Live | Tezos EVM, x402 native |
 | Any EVM | ✅ | CCTP cross-chain transfers |
 
+## Rail Cost & Extensibility
+
+Every EVM route this SDK settles carries a cost beyond the sticker amount: a USDC processing/protocol fee on top of EVM gas per transaction, and seconds-level (Base/Arbitrum) finality. Agents pay that on every call.
+
+x402's `exact` scheme is **network-extensible** — the per-network rules live in separate documents (`scheme_exact_svm.md` Solana, `scheme_exact_stellar.md` Stellar, `scheme_exact_sui.md` SUI, `scheme_exact_ton.md` TON, `scheme_exact_starknet.md` Starknet) under `x402-foundation/x402` `specs/schemes/exact/`. Any network that can satisfy the `exact` outcome — exactly `amount` of `asset` to `payTo` — can be wired behind the same `accepts[]` surface this SDK already parses.
+
+That includes feeless, sub-second, self-custodial networks (e.g. Nano, XNO). A wallet routing layer that already picks among `accepts[]` entries can therefore offer a zero-fee rail next to USDC without changing its API shape — the same way it picks among chains today.
+
 ## Quick Start — Pay an x402 Endpoint
 
 ```typescript
