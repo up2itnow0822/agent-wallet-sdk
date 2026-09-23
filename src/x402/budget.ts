@@ -136,9 +136,31 @@ export class X402BudgetTracker {
     }
     this.reservations.delete(reservationId);
     const { service, amount } = reservation;
-    const serviceDaily = this.dailySpend.get(service) ?? 0n;
-    this.dailySpend.set(service, serviceDaily > amount ? serviceDaily - amount : 0n);
-    this.globalDailySpend = this.globalDailySpend > amount ? this.globalDailySpend - amount : 0n;
+    this.subtractDailySpend(service, amount);
+    return true;
+  }
+
+  /**
+   * Drop a reservation handle, remove every unit except `amountToKeep` from
+   * today's totals, and leave that remainder counted as settled spend.
+   * Used when a protocol fee has already moved but the payee transfer did
+   * not: the fee stays inside the daily limit and cannot be released twice.
+   * Returns false without changing totals when the reservation is missing,
+   * belongs to another budget day, or `amountToKeep` is outside the
+   * reserved amount.
+   */
+  releaseExcept(reservationId: string, amountToKeep: bigint): boolean {
+    this.maybeResetDaily();
+    const reservation = this.reservations.get(reservationId);
+    if (!reservation || reservation.day !== this.dailyResetTimestamp) {
+      return false;
+    }
+    if (amountToKeep < 0n || amountToKeep > reservation.amount) {
+      return false;
+    }
+    const amountToRelease = reservation.amount - amountToKeep;
+    this.reservations.delete(reservationId);
+    this.subtractDailySpend(reservation.service, amountToRelease);
     return true;
   }
 
@@ -211,6 +233,15 @@ export class X402BudgetTracker {
   }
 
   // ─── Internals ───
+
+  private subtractDailySpend(service: string, amount: bigint): void {
+    if (amount <= 0n) {
+      return;
+    }
+    const serviceDaily = this.dailySpend.get(service) ?? 0n;
+    this.dailySpend.set(service, serviceDaily > amount ? serviceDaily - amount : 0n);
+    this.globalDailySpend = this.globalDailySpend > amount ? this.globalDailySpend - amount : 0n;
+  }
 
   private findServiceBudget(service: string): X402ServiceBudget | undefined {
     // Exact match first, then wildcard

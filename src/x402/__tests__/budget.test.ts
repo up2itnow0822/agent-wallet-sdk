@@ -156,6 +156,22 @@ describe('X402BudgetTracker', () => {
     expect(tracker.getReservedSummary().global).toBe(0n);
   });
 
+  it('keeps a retained fee when the rest of a reservation is released', () => {
+    const tight = new X402BudgetTracker({ globalDailyLimit: 1_007_700n });
+    const reservationId = tight.reserve('api.example.com', 1_007_700n);
+    expect(tight.releaseExcept(reservationId, 2_000_000n)).toBe(false);
+    expect(tight.getDailySpendSummary().global).toBe(1_007_700n);
+    expect(tight.getReservedSummary().global).toBe(1_007_700n);
+
+    expect(tight.releaseExcept(reservationId, 7_700n)).toBe(true);
+    expect(tight.releaseExcept(reservationId, 7_700n)).toBe(false);
+    expect(tight.getReservedSummary().global).toBe(0n);
+    expect(tight.getDailySpendSummary().global).toBe(7_700n);
+    expect(tight.getDailySpendSummary().byService['api.example.com']).toBe(7_700n);
+    expect(tight.checkBudget('api.example.com', 1_000_000n).allowed).toBe(true);
+    expect(tight.checkBudget('api.example.com', 1_000_001n).allowed).toBe(false);
+  });
+
   it('releases a reservation when settlement reverts', () => {
     const reservationId = tracker.reserve('api.example.com', 4_000_000n);
     expect(tracker.getDailySpendSummary().global).toBe(4_000_000n);

@@ -87,6 +87,8 @@ function x402DebitAmount(amount: bigint): bigint {
 type CachedFeePhase = {
   txHash: Hash;
   termsFingerprint: string;
+  /** Confirmed fee already debited from the wallet, in raw token units. */
+  amount: bigint;
   /** unknown: broadcast receipt unverified; queued: owner approval required. */
   status: 'unknown' | 'queued' | 'confirmed';
 };
@@ -118,6 +120,12 @@ type CachedSettlement = {
   txHash?: Hash;
   /** Client-side budget reservation for this settlement; settled or released exactly once. */
   reservationId?: string;
+  /**
+   * True when `reservationId` counted principal plus protocol fee. A retry
+   * after a confirmed fee reserves principal only, so a later payee failure
+   * must not keep the fee a second time.
+   */
+  reservationIncludesFee?: boolean;
   /**
    * The success observation the original caller recorded while the receipt
    * was still unknown; a delayed revert appends a corrective entry from it.
@@ -154,7 +162,7 @@ const X402_POLICY_SKIP = Symbol('x402-policy-skip');
  * once limits are checked and the spend is reserved, or null when
  * onBeforePayment declined. Throws X402BudgetExceededError when limits refuse.
  */
-type AuthorizeFreshTransfer = () => Promise<string | null>;
+type AuthorizeFreshTransfer = (feeAlreadySettled?: boolean) => Promise<string | null>;
 
 /**
  * [MAX-ADDED] x402 Payment Client for AgentWallet.
@@ -523,8 +531,11 @@ export class X402Client {
     // once approval is in hand. No await separates that final check from the
     // reservation, so two concurrent intents cannot both pass a daily limit that
     // only has room for one of them.
-    const authorizeFreshTransfer: AuthorizeFreshTransfer = async () => {
-      const debit = x402DebitAmount(amount);
+    const authorizeFreshTransfer: AuthorizeFreshTransfer = async (feeAlreadySettled = false) => {
+      // A confirmed fee is already in the daily total. Reserving it again would
+      // either block the payee retry or, if the first reservation was released,
+      // forget the fee and let a later intent spend past the limit.
+      const debit = feeAlreadySettled ? amount : x402DebitAmount(amount);
       const precheck = this.budget.checkBudget(service, debit);
       if (!precheck.allowed) {
         throw new X402BudgetExceededError(precheck.reason!, urlStr, selected);
@@ -798,20 +809,18 @@ export class X402Client {
   }
 
   /**
-   * Record a delayed revert. The reservation is released here, exactly once;
-   * the success observation the original caller recorded is corrected with a
+   * Record a delayed revert. The reservation is released here, exactly once,
+   * except a protocol fee that already settled stays in the daily total.
+   * The success observation the original caller recorded is corrected with a
    * `success: false` entry (log + onPaymentComplete); and the entry becomes a
    * tombstone, retained until the next observation of this intent throws
    * X402SettlementRevertedError instead of paying fresh.
    */
-  private markSettlementReverted(entry: CachedSettlement): void {
+  private markSettlementReverted(key: string, entry: CachedSettlement): void {
     entry.status = 'reverted';
     entry.expiresAt = null;
     entry.nextReconfirmAt = undefined;
-    if (entry.reservationId) {
-      this.budget.release(entry.reservationId);
-      entry.reservationId = undefined;
-    }
+    this.releaseReservationAfterFailedPayee(key, entry);
     if (entry.log) {
       const correction: X402TransactionLog = {
         ...entry.log,
@@ -837,6 +846,48 @@ export class X402Client {
   /** Queued spends stay cached and reserved; a retry must not submit a second transfer. */
   private throwObservedQueued(txHash: Hash): never {
     throw new X402SettlementQueuedError(txHash);
+  }
+
+  /**
+   * Reserve principal plus fee, or principal only when this intent's protocol
+   * fee is already confirmed. The flag tells a later payee failure whether
+   * the fee portion of this reservation must stay in the daily total.
+   */
+  private async reserveSettlementBudget(
+    key: string,
+    entry: CachedSettlement,
+    authorize: AuthorizeFreshTransfer,
+  ): Promise<void> {
+    const feeAlreadySettled = this.feePhases.get(key)?.status === 'confirmed';
+    const reservationId = await authorize(feeAlreadySettled);
+    if (reservationId === null) {
+      throw X402_POLICY_SKIP;
+    }
+    entry.reservationId = reservationId;
+    entry.reservationIncludesFee = !feeAlreadySettled;
+  }
+
+  /**
+   * A confirmed protocol fee has already left the wallet. Releasing the whole
+   * debit would let the next intent spend that fee again on top of the limit.
+   * Principal that never moved is released. A fee that was not confirmed, or
+   * a retry that reserved principal only, releases the entire reservation.
+   */
+  private releaseReservationAfterFailedPayee(key: string, entry: CachedSettlement): void {
+    const reservationId = entry.reservationId;
+    if (!reservationId) {
+      return;
+    }
+    entry.reservationId = undefined;
+    const fee = this.feePhases.get(key);
+    if (
+      fee?.status === 'confirmed'
+      && entry.reservationIncludesFee
+      && this.budget.releaseExcept(reservationId, fee.amount)
+    ) {
+      return;
+    }
+    this.budget.release(reservationId);
   }
 
   /** A fee receipt awaiting finality is payment state, never payee proof. */
@@ -869,9 +920,7 @@ export class X402Client {
         entry.unverifiedReplacement = error instanceof X402SettlementUnknownError;
         throw error;
       }
-      if (entry.reservationId) {
-        this.budget.release(entry.reservationId);
-      }
+      this.releaseReservationAfterFailedPayee(key, entry);
       throw error;
     }
 
@@ -882,9 +931,7 @@ export class X402Client {
       result = { txHash: settledHash };
     } catch (receiptError) {
       if (receiptError instanceof X402SettlementRevertedError) {
-        if (entry.reservationId) {
-          this.budget.release(entry.reservationId);
-        }
+        this.releaseReservationAfterFailedPayee(key, entry);
         throw receiptError;
       }
       if (receiptError instanceof X402SettlementQueuedError) {
@@ -994,11 +1041,7 @@ export class X402Client {
     } as CachedSettlement;
     const pending = (async () => {
       try {
-        const reservationId = await authorize();
-        if (reservationId === null) {
-          throw X402_POLICY_SKIP;
-        }
-        entry.reservationId = reservationId;
+        await this.reserveSettlementBudget(key, entry, authorize);
         const result = await this.executeReservedSettlement(key, entry, execute);
         this.paymentSettlements.delete(key);
         this.feePhases.delete(key);
@@ -1181,11 +1224,7 @@ export class X402Client {
     } as CachedSettlement;
     const pending = (async () => {
       try {
-        const reservationId = await authorize();
-        if (reservationId === null) {
-          throw X402_POLICY_SKIP;
-        }
-        entry.reservationId = reservationId;
+        await this.reserveSettlementBudget(key, entry, authorize);
         const result = await this.executeReservedSettlement(key, entry, execute);
         if (entry.status === 'confirmed') {
           this.pruneSettlements();
@@ -1253,7 +1292,7 @@ export class X402Client {
           if (entry.log) {
             entry.log.txHash = receiptError.txHash;
           }
-          this.markSettlementReverted(entry);
+          this.markSettlementReverted(key, entry);
           return 'reverted';
         }
         if (receiptError instanceof X402SettlementQueuedError) {
@@ -1573,6 +1612,7 @@ export class X402Client {
     const pending: CachedFeePhase = {
       txHash: feeTxHash,
       termsFingerprint: intent.termsFingerprint,
+      amount: feeAmount,
       status: 'unknown',
     };
     this.feePhases.set(intent.key, pending);

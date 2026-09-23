@@ -192,14 +192,88 @@ describe('X402Client protocol-fee phase (#50)', () => {
     expect(transfer.mock.calls[0][1].amount).toBe(7700n);
     expect(transfer.mock.calls[1][1].token).toBe(USDC);
     expect(transfer.mock.calls[1][1].amount).toBe(1000000n);
+    expect(client.budgetTracker.getReservedSummary().global).toBe(0n);
+    expect(client.getDailySpendSummary().global).toBe(7_700n);
 
     const retry = await client.fetch(URL, { method: 'POST' });
     expect(retry.status).toBe(200);
     expect(transfer.mock.calls).toHaveLength(3);
     expect(isFeeTransfer(transfer.mock.calls[2][1])).toBe(false);
     expect(transfer.mock.calls[2][1].amount).toBe(1000000n);
+    expect(client.getDailySpendSummary().global).toBe(1_007_700n);
+    expect(client.budgetTracker.getReservedSummary().global).toBe(0n);
     expect(feeHashes).toEqual([hash('0a')]);
     expect(payeeHashes).toEqual([hash('14'), hash('15')]);
+  });
+
+  it('keeps a stranded protocol fee inside the client daily limit', async () => {
+    const { wallet } = setupTransfers({
+      feeReceipts: ['success'],
+      payeeReceipts: ['reverted', 'success'],
+    });
+    mock402ThenPaid({ nonce: 'intent-strand-a' });
+    const client = new X402Client(wallet, { globalDailyLimit: 1_007_700n });
+
+    await expect(client.fetch(URL, { method: 'POST' })).rejects.toBeInstanceOf(
+      X402SettlementRevertedError,
+    );
+    expect(transfer.mock.calls).toHaveLength(2);
+    expect(isFeeTransfer(transfer.mock.calls[0][1])).toBe(true);
+    expect(client.budgetTracker.getReservedSummary().global).toBe(0n);
+    expect(client.getDailySpendSummary().global).toBe(7_700n);
+
+    mock402ThenPaid({ nonce: 'intent-strand-b' });
+    await expect(client.fetch(URL, { method: 'POST' })).rejects.toThrow(/global daily limit/);
+    expect(transfer.mock.calls).toHaveLength(2);
+
+    mock402ThenPaid({ nonce: 'intent-strand-a' });
+    expect((await client.fetch(URL, { method: 'POST' })).status).toBe(200);
+    expect(transfer.mock.calls).toHaveLength(3);
+    expect(isFeeTransfer(transfer.mock.calls[2][1])).toBe(false);
+    expect(transfer.mock.calls[2][1].amount).toBe(1000000n);
+    expect(client.getDailySpendSummary().global).toBe(1_007_700n);
+    expect(client.budgetTracker.getReservedSummary().global).toBe(0n);
+  });
+
+  it('keeps the protocol fee when a delayed payee receipt reverts', async () => {
+    const { wallet, payeeHashes } = setupTransfers({
+      feeReceipts: ['success'],
+      payeeReceipts: ['reverted', 'success'],
+    });
+    let payeeAttempts = 0;
+    const originalWait = wallet.publicClient.waitForTransactionReceipt;
+    wallet.publicClient.waitForTransactionReceipt = async (args: { hash: string }) => {
+      if (args.hash === payeeHashes[0]) {
+        payeeAttempts += 1;
+        if (payeeAttempts === 1) {
+          throw new Error('payee receipt timeout');
+        }
+      }
+      return originalWait(args);
+    };
+    mock402ThenPaid({ nonce: 'intent-delay-a' });
+    const client = new X402Client(wallet, { globalDailyLimit: 1_007_700n });
+
+    await expect(client.fetch(URL, { method: 'POST' })).rejects.toThrow('payee receipt timeout');
+    expect(client.getDailySpendSummary().global).toBe(1_007_700n);
+    expect(client.budgetTracker.getReservedSummary().global).toBe(1_007_700n);
+
+    await expect(client.fetch(URL, { method: 'POST' })).rejects.toBeInstanceOf(
+      X402SettlementRevertedError,
+    );
+    expect(client.getDailySpendSummary().global).toBe(7_700n);
+    expect(client.budgetTracker.getReservedSummary().global).toBe(0n);
+    expect(transfer.mock.calls.filter((call) => isFeeTransfer(call[1]))).toHaveLength(1);
+
+    mock402ThenPaid({ nonce: 'intent-delay-b' });
+    await expect(client.fetch(URL, { method: 'POST' })).rejects.toThrow(/global daily limit/);
+    expect(transfer.mock.calls.filter((call) => isFeeTransfer(call[1]))).toHaveLength(1);
+
+    mock402ThenPaid({ nonce: 'intent-delay-a' });
+    expect((await client.fetch(URL, { method: 'POST' })).status).toBe(200);
+    expect(transfer.mock.calls.filter((call) => isFeeTransfer(call[1]))).toHaveLength(1);
+    expect(transfer.mock.calls.filter((call) => !isFeeTransfer(call[1]))).toHaveLength(2);
+    expect(client.getDailySpendSummary().global).toBe(1_007_700n);
   });
 
   it('retries the protocol fee after a fee revert and then pays the payee once', async () => {
@@ -214,6 +288,8 @@ describe('X402Client protocol-fee phase (#50)', () => {
     );
     expect(transfer.mock.calls).toHaveLength(1);
     expect(isFeeTransfer(transfer.mock.calls[0][1])).toBe(true);
+    expect(client.getDailySpendSummary().global).toBe(0n);
+    expect(client.budgetTracker.getReservedSummary().global).toBe(0n);
 
     const retry = await client.fetch(URL, { method: 'POST' });
     expect(retry.status).toBe(200);
