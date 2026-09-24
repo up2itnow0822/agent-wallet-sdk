@@ -42,6 +42,7 @@ import { createWalletClient, http, parseUnits } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { base, mainnet, arbitrum, optimism, polygon, baseSepolia } from 'viem/chains';
 import type { Address, Hex } from 'viem';
+import type { AgentWalletConfig } from './types.js';
 
 // ─── Chain registry ────────────────────────────────────────────────────────
 
@@ -76,6 +77,21 @@ const DEFAULT_RPC: Record<string, string> = {
 };
 
 /**
+ * createWallet() keys, indexed by chain id.
+ *
+ * viem's `chain.name` is a display string ("Arbitrum One", "Base Sepolia") and
+ * is not a CHAINS key. Passing `chain.name.toLowerCase()` into createWallet
+ * throws `Unsupported chain: arbitrum one` for documented CHAIN_NAME values.
+ */
+const CREATE_WALLET_KEY_BY_ID: Record<number, AgentWalletConfig['chain']> = {
+  8453: 'base',
+  84532: 'base-sepolia',
+  1: 'ethereum',
+  42161: 'arbitrum',
+  137: 'polygon',
+};
+
+/**
  * Resolve a chain object from either a name string or a numeric chain id.
  * Tries CHAIN_MAP by name, then falls back to scanning by chainId.
  *
@@ -89,6 +105,50 @@ function resolveChain(nameOrId: string | number): any {
   }
   const key = nameOrId.toLowerCase().trim();
   return CHAIN_MAP[key] ?? base;
+}
+
+/**
+ * Resolve the viem chain, the createWallet() key, and a default RPC URL.
+ *
+ * Unknown numeric ids still fall back to Base (documented). The createWallet
+ * key is taken from chain id, never from viem's display name.
+ */
+export function resolveWalletChain(nameOrId: string | number): {
+  chain: any;
+  walletChain: string;
+  rpcUrl: string;
+} {
+  const chain = resolveChain(nameOrId);
+  const walletChain = CREATE_WALLET_KEY_BY_ID[chain.id] ?? chain.name.toLowerCase();
+  const rpcUrl =
+    DEFAULT_RPC[walletChain] ??
+    DEFAULT_RPC[chain.name.toLowerCase()] ??
+    DEFAULT_RPC['base'];
+  return { chain, walletChain, rpcUrl };
+}
+
+/**
+ * Map optional env spend limits onto on-chain policy fields.
+ *
+ * Either limit at 0n means "no autonomous spending". An omitted optional
+ * limit must therefore be copied from the configured one — coalescing it to
+ * 0n would disable every autonomous payment even when the operator set a cap.
+ */
+export function resolveEnvSpendLimits(
+  perTxLimit: bigint | undefined,
+  periodLimit: bigint | undefined
+): { perTxLimit: bigint; periodLimit: bigint; queueOnly: boolean } {
+  if (perTxLimit === undefined && periodLimit === undefined) {
+    return { perTxLimit: 0n, periodLimit: 0n, queueOnly: true };
+  }
+
+  const resolvedPerTx = perTxLimit ?? periodLimit!;
+  const resolvedPeriod = periodLimit ?? perTxLimit!;
+  return {
+    perTxLimit: resolvedPerTx,
+    periodLimit: resolvedPeriod,
+    queueOnly: resolvedPerTx === 0n || resolvedPeriod === 0n,
+  };
 }
 
 // ─── USDC scaling ──────────────────────────────────────────────────────────
@@ -164,33 +224,33 @@ export function walletFromEnv(options?: {
     process.env.CHAIN_NAME ??
     (process.env.CHAIN_ID ? process.env.CHAIN_ID : undefined);
 
-  const chain = chainSource
-    ? resolveChain(
+  const resolved = chainSource
+    ? resolveWalletChain(
         /^\d+$/.test(String(chainSource))
           ? parseInt(chainSource, 10)
           : String(chainSource)
       )
-    : base;
+    : {
+        chain: base,
+        walletChain: 'base',
+        rpcUrl: DEFAULT_RPC['base'],
+      };
 
   // ── RPC URL ─────────────────────────────────────────────────────────────
-  const rpcUrl =
-    options?.rpcUrl ??
-    process.env.RPC_URL ??
-    DEFAULT_RPC[chain.name.toLowerCase()] ??
-    DEFAULT_RPC['base'];
+  const rpcUrl = options?.rpcUrl ?? process.env.RPC_URL ?? resolved.rpcUrl;
 
   // ── Build viem walletClient ──────────────────────────────────────────────
   const account = privateKeyToAccount(privateKey);
   const walletClient = createWalletClient({
     account,
-    chain,
+    chain: resolved.chain,
     transport: http(rpcUrl),
   });
 
   // ── Delegate to core createWallet ────────────────────────────────────────
   return createWallet({
     accountAddress: walletAddress as Address,
-    chain: chain.name.toLowerCase() as any,
+    chain: resolved.walletChain as AgentWalletConfig['chain'],
     rpcUrl,
     walletClient,
   });
@@ -207,6 +267,10 @@ export function walletFromEnv(options?: {
  * If neither limit is set, logs a warning and falls back to queue-for-approval
  * mode (perTxLimit = 0, periodLimit = 0) so all agent transactions must be
  * manually approved. This is the safest default.
+ *
+ * If only one limit is set, the omitted dimension is copied from the one that
+ * was provided. On-chain, 0 means "no autonomous spending" on that dimension,
+ * so writing 0 for an omitted optional limit would disable every payment.
  *
  * @param wallet - Wallet returned by `walletFromEnv()` (or `createWallet()`).
  * @returns Promise that resolves to the on-chain tx hash of the policy update.
@@ -231,8 +295,10 @@ export async function setPolicyFromEnv(wallet: ReturnType<typeof createWallet>):
     ? (USDC_ADDRESSES[networkKey] as Address)
     : NATIVE_TOKEN;
 
+  const limits = resolveEnvSpendLimits(perTxLimit, periodLimit);
+
   // Warn and use safe defaults when no limits are configured
-  if (perTxLimit === undefined && periodLimit === undefined) {
+  if (limits.queueOnly && perTxLimit === undefined && periodLimit === undefined) {
     console.warn(
       '[setPolicyFromEnv] Neither SPEND_LIMIT_PER_TX nor SPEND_LIMIT_DAILY is set. ' +
       'Defaulting to queue-for-approval mode (all agent transactions require owner sign-off). ' +
@@ -248,19 +314,16 @@ export async function setPolicyFromEnv(wallet: ReturnType<typeof createWallet>):
     return hash;
   }
 
-  const resolvedPerTxLimit = perTxLimit ?? 0n;
-  const resolvedPeriodLimit = periodLimit ?? 0n;
-
   const hash = await setSpendPolicy(wallet, {
     token,
-    perTxLimit: resolvedPerTxLimit,
-    periodLimit: resolvedPeriodLimit,
+    perTxLimit: limits.perTxLimit,
+    periodLimit: limits.periodLimit,
     periodLength: 86400, // 24 h
   });
 
   console.info(
-    `[setPolicyFromEnv] Policy set — perTx: ${resolvedPerTxLimit} base units, ` +
-    `daily: ${resolvedPeriodLimit} base units on ${wallet.chain.name}. tx: ${hash}`
+    `[setPolicyFromEnv] Policy set — perTx: ${limits.perTxLimit} base units, ` +
+    `daily: ${limits.periodLimit} base units on ${wallet.chain.name}. tx: ${hash}`
   );
 
   return hash;
