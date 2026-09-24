@@ -7,6 +7,7 @@ out/
 artifacts/
 forge-cache/
 .npmrc
+*.tgz
 
 # wrangler files
 .wrangler
