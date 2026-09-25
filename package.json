@@ -35,7 +35,9 @@
     "reputation",
     "validation",
     "mutual-stake-escrow",
-    "cctp-bridge"
+    "cctp-bridge",
+    "nano",
+    "xno"
   ],
   "license": "MIT",
   "repository": {
