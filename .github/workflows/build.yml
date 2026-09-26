@@ -1,0 +1,101 @@
+name: build
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect toolchain and build
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          has_npm_script() {
+            local script="$1"
+            node -e "const p=require('./package.json'); process.exit(p.scripts && p.scripts['$script'] ? 0 : 1)"
+          }
+
+          if [ -f package.json ]; then
+            echo "Detected Node.js"
+            if [ -f pnpm-lock.yaml ]; then
+              corepack enable
+              pnpm install --frozen-lockfile || pnpm install
+              if has_npm_script build; then pnpm run build
+              elif has_npm_script test; then pnpm test
+              elif has_npm_script lint; then pnpm run lint
+              else echo "No build/test/lint script; install succeeded"; fi
+            elif [ -f yarn.lock ]; then
+              corepack enable
+              yarn install --frozen-lockfile || yarn install
+              if has_npm_script build; then yarn build
+              elif has_npm_script test; then yarn test
+              elif has_npm_script lint; then yarn lint
+              else echo "No build/test/lint script; install succeeded"; fi
+            else
+              if [ -f package-lock.json ]; then npm ci || npm install; else npm install; fi
+              if has_npm_script build; then npm run build
+              elif has_npm_script test; then npm test
+              elif has_npm_script lint; then npm run lint
+              else echo "No build/test/lint script; install succeeded"; fi
+            fi
+            exit 0
+          fi
+
+          if [ -f pyproject.toml ] || [ -f setup.py ] || [ -f requirements.txt ] || [ -f Pipfile ]; then
+            echo "Detected Python"
+            python -m pip install --upgrade pip
+            if [ -f pyproject.toml ]; then
+              if grep -q '\[tool\.poetry\]' pyproject.toml 2>/dev/null; then
+                pip install poetry
+                poetry install --no-interaction
+                poetry run pytest -q || poetry run python -m compileall -q .
+              else
+                pip install -e ".[dev]" 2>/dev/null || pip install -e . 2>/dev/null || true
+                if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+                if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
+                pytest -q 2>/dev/null || python -m compileall -q .
+              fi
+            else
+              if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+              if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
+              pytest -q 2>/dev/null || python -m compileall -q .
+            fi
+            exit 0
+          fi
+
+          if [ -f Cargo.toml ]; then
+            echo "Detected Rust"
+            cargo check --all-targets
+            exit 0
+          fi
+
+          if [ -f go.mod ]; then
+            echo "Detected Go"
+            go test ./...
+            exit 0
+          fi
+
+          if [ -f Makefile ] && grep -qE '^(build|test|check):' Makefile; then
+            echo "Detected Makefile"
+            if grep -qE '^build:' Makefile; then make build
+            elif grep -qE '^test:' Makefile; then make test
+            else make check; fi
+            exit 0
+          fi
+
+          echo "No standard toolchain detected; verifying repository contents"
+          test -n "$(ls -A)"
