@@ -196,6 +196,40 @@ describe('X402Client', () => {
       expect(executeSpy).not.toHaveBeenCalled();
     });
 
+    it('does not pay when a followed same-origin redirect changes the query', async () => {
+      const client = new X402Client(mockWallet);
+      const executeSpy = vi.spyOn(X402Client.prototype as any, 'executePayment');
+      const paymentRequired: X402PaymentRequired = {
+        x402Version: 1,
+        resource: { url: '/premium/data', description: 'Data API', mimeType: 'application/json' },
+        accepts: [
+          {
+            scheme: 'exact',
+            network: 'base:8453',
+            asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+            amount: '1000000',
+            payTo: '0x2222222222222222222222222222222222222222',
+            maxTimeoutSeconds: 30,
+            extra: {},
+          },
+        ],
+      };
+      const challenged = new Response(null, {
+        status: 402,
+        headers: { 'payment-required': btoa(JSON.stringify(paymentRequired)) },
+      });
+      Object.defineProperty(challenged, 'url', {
+        value: 'https://api.example.com/premium/data?item=other',
+      });
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(challenged);
+
+      const result = await client.fetch('https://api.example.com/premium/data?item=trusted', { redirect: 'follow' });
+
+      expect(result).toBe(challenged);
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(executeSpy).not.toHaveBeenCalled();
+    });
+
     it('does not follow redirects unless the caller opts in', async () => {
       const client = new X402Client(mockWallet);
       const redirected = new Response(null, { status: 302, headers: { location: 'https://evil.example.com/premium/data' } });

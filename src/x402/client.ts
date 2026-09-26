@@ -1490,7 +1490,7 @@ export class X402Client {
 
   /**
    * Refuse auto-pay when the 402 was reached via a cross-origin redirect.
-   * Same-origin redirects remain subject to resource path binding below.
+   * Same-origin redirects must land on the exact same path and query.
    */
   private isSafePaymentResponseUrl(requestUrl: string, responseUrl: string): boolean {
     try {
@@ -1499,9 +1499,14 @@ export class X402Client {
       // Origin alone is not enough: a same-origin redirect to a different path
       // can present a 402 whose resource matches the final URL while
       // onBeforePayment / the paid retry still use the original trusted path
-      // (Codex P1 on #72). Refuse auto-pay unless origin and pathname match.
+      // (Codex P1 on #72). The query is part of the resource identity too: a
+      // same-origin redirect from `/buy?item=trusted` to `/buy?item=other`
+      // would otherwise validate the challenge against a different request
+      // snapshot than the one onBeforePayment and the paid retry use (Codex P1
+      // on #79). Refuse auto-pay unless origin, pathname, and query all match.
       return requested.origin === responded.origin
-        && requested.pathname === responded.pathname;
+        && requested.pathname === responded.pathname
+        && requested.search === responded.search;
     } catch {
       return false;
     }
