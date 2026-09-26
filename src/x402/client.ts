@@ -1494,7 +1494,14 @@ export class X402Client {
    */
   private isSafePaymentResponseUrl(requestUrl: string, responseUrl: string): boolean {
     try {
-      return new URL(requestUrl).origin === new URL(responseUrl).origin;
+      const requested = new URL(requestUrl);
+      const responded = new URL(responseUrl);
+      // Origin alone is not enough: a same-origin redirect to a different path
+      // can present a 402 whose resource matches the final URL while
+      // onBeforePayment / the paid retry still use the original trusted path
+      // (Codex P1 on #72). Refuse auto-pay unless origin and pathname match.
+      return requested.origin === responded.origin
+        && requested.pathname === responded.pathname;
     } catch {
       return false;
     }
@@ -1645,24 +1652,37 @@ export class X402Client {
       );
     }
 
-    // First check on-chain budget against the full debit. The protocol fee is
-    // transferred before the payee, so a principal-only check can pass, charge
-    // the fee, then revert the payee and strand funds at the collector.
+    // First check on-chain budget. The protocol fee is transferred before the
+    // payee as a separate agentTransferToken, so:
+    //   - perTxLimit applies to each leg (principal is the larger) — Codex P2 #69
+    //   - period remaining must cover only what this attempt still needs to send
+    //     (skip the fee when it already confirmed) — Codex P1 #69
     const onChainBudget = await checkBudget(this.wallet, resolvedAddress);
     const amount = BigInt(req.amount);
     const feeAmount = x402ProtocolFeeAmount(amount);
-    const debit = x402DebitAmount(amount);
+    const feeAlreadySettled = intent
+      ? this.feePhases.get(intent.key)?.status === 'confirmed'
+      : false;
+    const periodDebit = feeAlreadySettled ? amount : x402DebitAmount(amount);
 
-    if (debit > onChainBudget.perTxLimit) {
+    if (amount > onChainBudget.perTxLimit) {
       throw new X402PaymentError(
-        `Amount ${amount} plus protocol fee ${feeAmount} exceeds on-chain per-tx limit ${onChainBudget.perTxLimit}`,
+        `Amount ${amount} exceeds on-chain per-tx limit ${onChainBudget.perTxLimit}`,
+        req
+      );
+    }
+    if (!feeAlreadySettled && feeAmount > onChainBudget.perTxLimit) {
+      throw new X402PaymentError(
+        `Protocol fee ${feeAmount} exceeds on-chain per-tx limit ${onChainBudget.perTxLimit}`,
         req
       );
     }
 
-    if (debit > onChainBudget.remainingInPeriod) {
+    if (periodDebit > onChainBudget.remainingInPeriod) {
       throw new X402PaymentError(
-        `Amount ${amount} plus protocol fee ${feeAmount} exceeds remaining period budget ${onChainBudget.remainingInPeriod}`,
+        feeAlreadySettled
+          ? `Amount ${amount} exceeds remaining period budget ${onChainBudget.remainingInPeriod} after confirmed protocol fee`
+          : `Amount ${amount} plus protocol fee ${feeAmount} exceeds remaining period budget ${onChainBudget.remainingInPeriod}`,
         req
       );
     }

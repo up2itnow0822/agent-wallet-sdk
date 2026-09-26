@@ -100,6 +100,12 @@ export function withFailClosedRedirect(
     next.redirect = callerInit.redirect;
     return next;
   }
+  // A materialized Request copies its redirect mode into `init`. The Request
+  // default is `follow`; only that needs overriding to fail-closed `manual`.
+  // Preserve an explicit stricter `error` (Codex P2 on #73).
+  if (next.redirect === 'error') {
+    return next;
+  }
   next.redirect = 'manual';
   return next;
 }
