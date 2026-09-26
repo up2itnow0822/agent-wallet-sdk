@@ -18,14 +18,20 @@
 #
 # Fail-closed: Codex usage-limit comments without a head review keep the
 # gate red. Do NOT enable repo allow_auto_merge until this check is required.
+#
+# Trigger hardening: every trigger here runs the workflow definition from the
+# default branch, never from the PR (pull_request_target instead of
+# pull_request; no pull_request_review, which would execute the PR's copy).
+# A PR that edits this file therefore cannot change how its own gate is
+# evaluated. The workflow never checks out or executes PR content. Codex
+# reviews are picked up by the 10-minute schedule, the next PR comment, or a
+# manual workflow_dispatch.
 
 name: review-gate
 
 on:
-  pull_request:
+  pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
-  pull_request_review:
-    types: [submitted, dismissed]
   issue_comment:
     types: [created]
   check_suite:
@@ -53,8 +59,7 @@ jobs:
   # Check Run named "review-gate" created below, pinned to the PR head SHA.
   publish:
     if: >
-      github.event_name == 'pull_request' ||
-      github.event_name == 'pull_request_review' ||
+      github.event_name == 'pull_request_target' ||
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'schedule' ||
       github.event_name == 'check_suite' ||
@@ -211,7 +216,10 @@ jobs:
               return;
             }
 
-            let hardFail = false;
+            // The job itself always succeeds: the gate verdict lives only in
+            // the `review-gate` check run on the PR head. (Under
+            // pull_request_target / schedule the job's own check attaches to
+            // the base branch, so failing it would only paint main red.)
             for (const n of numbers) {
               const result = await evaluate(n);
               await github.rest.checks.create({
@@ -227,19 +235,5 @@ jobs:
                 },
               });
               core.info(`PR #${result.prNumber} @ ${result.headSha.slice(0, 7)} -> ${result.conclusion}: ${result.title}`);
-              // Only fail the Actions job for event-driven single-PR runs so the
-              // PR checks UI shows a red X immediately; schedule stays green.
-              if (
-                result.conclusion === 'failure' &&
-                (context.eventName === 'pull_request' ||
-                  context.eventName === 'pull_request_review' ||
-                  context.eventName === 'issue_comment' ||
-                  context.eventName === 'workflow_dispatch')
-              ) {
-                hardFail = true;
-                core.setFailed(result.summary);
-              }
             }
-            if (!hardFail) {
-              core.info(`Published review-gate for ${numbers.length} PR(s).`);
-            }
+            core.info(`Published review-gate for ${numbers.length} PR(s).`);
