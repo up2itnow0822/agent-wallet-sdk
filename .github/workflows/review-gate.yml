@@ -10,13 +10,28 @@
 # Pass conditions (any one):
 #   1. A non-dismissed chatgpt-codex-connector[bot] (user.type == Bot) review
 #      exists with commit_id == head SHA, submitted after the PR's most recent
-#      base-branch change.
+#      base-branch change; or, for a clean pass (Codex submits no review when
+#      it has no findings), the Codex bot's own review-summary comment reports
+#      `Code Review | Completed | <head sha>` and was updated after the last
+#      base change. Findings arrive as review threads, which the ruleset's
+#      thread-resolution rule blocks separately.
 #   2. Waiver bound to the head: an allow-listed actor (WAIVER_ACTORS) applied
 #      `codex-waived` while this exact head SHA was current. The labeled event
 #      publishes a "Codex waived" review-gate check on that SHA; later
 #      evaluations honor the waiver only if that check exists on the current
-#      head (and post-dates the last base change). Any push produces a new head
+#      head AND the label's current LabeledEvent (server time, allow-listed
+#      actor) post-dates the last base change. Any push produces a new head
 #      with no waiver; re-apply the label to waive again.
+#
+# A check run belongs to a commit, not a PR, so the verdict for a SHA is
+# success only if EVERY open PR whose head is that SHA passes.
+#
+# All evaluations share one repo-wide concurrency group (queued, never run in
+# parallel), and each PR's head SHA and base-change time are re-read right
+# before publishing; if either moved during evaluation the stale verdict is
+# dropped and the triggering event's own run publishes the fresh one. GitHub
+# keeps only the newest pending run per group, so a superseded run can at most
+# drop a waiver (fail-closed; re-apply the label).
 #
 # Draft PRs get a failing gate (not neutral), so marking a draft ready can
 # never expose an already-satisfied required check.
@@ -65,8 +80,8 @@ permissions:
   pull-requests: read
 
 concurrency:
-  group: review-gate-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number || github.event.inputs.pr_number || github.run_id }}
-  cancel-in-progress: true
+  group: review-gate-${{ github.repository }}
+  cancel-in-progress: false
 
 jobs:
   # Job name is NOT the required check name. The required context is the
@@ -104,38 +119,46 @@ jobs:
               return !!user && user.type === 'Bot' && isCodexLogin(user.login);
             }
 
-            // Server-side time of the most recent base-branch retarget, or 0.
-            async function lastBaseChangeMs(prNumber) {
+            // One timeline read: server-side time of the most recent base
+            // retarget (or 0) and the latest labeled/unlabeled event for the
+            // waiver label.
+            async function timelineFacts(prNumber) {
               const events = await github.paginate(github.rest.issues.listEventsForTimeline, {
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: prNumber,
                 per_page: 100,
               });
-              let last = 0;
+              let baseChangedMs = 0;
+              let lastWaiverEvent = null;
               for (const e of events) {
                 if (e.event === 'base_ref_changed' && e.created_at) {
-                  last = Math.max(last, Date.parse(e.created_at));
+                  baseChangedMs = Math.max(baseChangedMs, Date.parse(e.created_at));
+                }
+                if ((e.event === 'labeled' || e.event === 'unlabeled') &&
+                    e.label && e.label.name === WAIVE_LABEL) {
+                  lastWaiverEvent = e;
                 }
               }
-              return last;
+              return { baseChangedMs, lastWaiverEvent };
             }
 
             // A "Codex waived" review-gate check already published by this
-            // workflow (github-actions) on this exact head SHA.
-            async function headHasWaiverCheck(headSha, sinceMs) {
+            // workflow (github-actions) on this exact head SHA. filter 'all'
+            // so a newer failure from an overlapping run cannot hide it.
+            async function headHasWaiverCheck(headSha) {
               const runs = await github.paginate(github.rest.checks.listForRef, {
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 ref: headSha,
                 check_name: CHECK_NAME,
+                filter: 'all',
                 per_page: 100,
               });
               return runs.some(r =>
                 r.app && r.app.slug === 'github-actions' &&
                 r.conclusion === 'success' &&
-                r.output && r.output.title === 'Codex waived' &&
-                Date.parse(r.completed_at || r.started_at || 0) > sinceMs
+                r.output && r.output.title === 'Codex waived'
               );
             }
 
@@ -170,7 +193,7 @@ jobs:
               const headSha = pr.head.sha;
               const labels = (pr.labels || []).map(l => l.name);
 
-              const baseChangedMs = await lastBaseChangeMs(prNumber);
+              const { baseChangedMs, lastWaiverEvent } = await timelineFacts(prNumber);
 
               if (labels.includes(WAIVE_LABEL)) {
                 const payload = context.payload;
@@ -192,7 +215,12 @@ jobs:
                 }
                 if (freshWaiver) {
                   core.warning(`Label ${WAIVE_LABEL} on #${prNumber} applied by ${sender || 'unknown'}; not an allow-listed waiver actor, ignoring.`);
-                } else if (await headHasWaiverCheck(headSha, baseChangedMs)) {
+                } else if (
+                  lastWaiverEvent && lastWaiverEvent.event === 'labeled' &&
+                  lastWaiverEvent.actor && WAIVER_ACTORS.has(lastWaiverEvent.actor.login) &&
+                  Date.parse(lastWaiverEvent.created_at || 0) > baseChangedMs &&
+                  await headHasWaiverCheck(headSha)
+                ) {
                   return {
                     prNumber, headSha,
                     conclusion: 'success',
@@ -237,12 +265,27 @@ jobs:
                 return isCodexUser(c.user) && /usage limits?/i.test(body);
               });
 
-              if (codexOnHead.length > 0) {
+              const SUMMARY_MARKER = '<!-- codex-pull-request-review-summary -->';
+              const cleanPassOnHead = comments.some(c => {
+                const body = c.body || '';
+                if (!isCodexUser(c.user) || !body.includes(SUMMARY_MARKER)) return false;
+                if (!(Date.parse(c.updated_at || c.created_at || 0) > baseChangedMs)) return false;
+                const row = /^\|[^|\n]*\bCode Review\b[^|\n]*\|[^|\n]*\bCompleted\b[^|\n]*\|\s*`([0-9a-f]{7,40})`\s*\|/gim;
+                let m;
+                while ((m = row.exec(body)) !== null) {
+                  if (headSha.toLowerCase().startsWith(m[1].toLowerCase())) return true;
+                }
+                return false;
+              });
+
+              if (codexOnHead.length > 0 || cleanPassOnHead) {
                 return {
                   prNumber, headSha,
                   conclusion: 'success',
                   title: 'Codex reviewed head',
-                  summary: `chatgpt-codex-connector reviewed \`${headSha.slice(0, 7)}\` (${codexOnHead.length} review(s)).`,
+                  summary: codexOnHead.length > 0
+                    ? `chatgpt-codex-connector reviewed \`${headSha.slice(0, 7)}\` (${codexOnHead.length} review(s)).`
+                    : `chatgpt-codex-connector completed a clean review of \`${headSha.slice(0, 7)}\` (no findings).`,
                 };
               }
 
@@ -271,24 +314,77 @@ jobs:
               return;
             }
 
-            // The job itself always succeeds: the gate verdict lives only in
-            // the `review-gate` check run on the PR head. (Under
-            // pull_request_target / schedule the job's own check attaches to
-            // the base branch, so failing it would only paint main red.)
+            const openPrs = await github.paginate(github.rest.pulls.list, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              per_page: 100,
+            });
+            const prsBySha = new Map();
+            for (const p of openPrs) {
+              const list = prsBySha.get(p.head.sha) || [];
+              list.push(p.number);
+              prsBySha.set(p.head.sha, list);
+            }
+
+            async function snapshotOf(prNumber) {
+              const { data: pr } = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber,
+              });
+              const { baseChangedMs } = await timelineFacts(prNumber);
+              return `${pr.head.sha}|${pr.base.ref}|${baseChangedMs}`;
+            }
+
+            const done = new Set();
             for (const n of numbers) {
-              const result = await evaluate(n);
+              const beforeFirst = await snapshotOf(n);
+              const first = await evaluate(n);
+              const headSha = first.headSha;
+              if (done.has(headSha)) continue;
+              done.add(headSha);
+
+              // Aggregate every open PR that shares this head SHA.
+              const sharers = new Set([n, ...(prsBySha.get(headSha) || [])]);
+              const results = [];
+              const before = new Map();
+              for (const m of sharers) {
+                before.set(m, m === n ? beforeFirst : await snapshotOf(m));
+                const r = m === n ? first : await evaluate(m);
+                if (r.headSha === headSha) results.push(r);
+              }
+              const failing = results.find(r => r.conclusion !== 'success');
+              const verdict = failing || results[0] || first;
+              if (verdict.headSha !== headSha) continue;
+
+              // Revalidate right before publishing: drop a stale verdict if
+              // any sharer's head, base, or retarget time moved meanwhile.
+              let stale = false;
+              for (const m of sharers) {
+                if ((await snapshotOf(m)) !== before.get(m)) { stale = true; break; }
+              }
+              if (stale) {
+                core.warning(`State moved while evaluating ${headSha.slice(0, 7)}; not publishing a stale verdict.`);
+                continue;
+              }
+
+              const others = results.length > 1
+                ? ` Evaluated ${results.length} open PRs sharing this head (#${results.map(r => r.prNumber).join(', #')}).`
+                : '';
               await github.rest.checks.create({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 name: CHECK_NAME,
-                head_sha: result.headSha,
+                head_sha: headSha,
                 status: 'completed',
-                conclusion: result.conclusion,
+                conclusion: verdict.conclusion,
                 output: {
-                  title: result.title,
-                  summary: result.summary,
+                  title: verdict.title,
+                  summary: (failing && failing.prNumber !== n
+                    ? `Blocked by PR #${failing.prNumber} (same head): ` : '') + verdict.summary + others,
                 },
               });
-              core.info(`PR #${result.prNumber} @ ${result.headSha.slice(0, 7)} -> ${result.conclusion}: ${result.title}`);
+              core.info(`${headSha.slice(0, 7)} -> ${verdict.conclusion}: ${verdict.title}`);
             }
-            core.info(`Published review-gate for ${numbers.length} PR(s).`);
+            core.info(`Published review-gate for ${done.size} head SHA(s).`);
