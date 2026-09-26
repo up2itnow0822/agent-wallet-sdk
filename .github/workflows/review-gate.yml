@@ -8,10 +8,18 @@
 # (app id 15368) so a PAT cannot fake it.
 #
 # Pass conditions (any one):
-#   1. A chatgpt-codex-connector[bot] (user.type == Bot) review exists with
-#      commit_id == head SHA
-#   2. Label `codex-waived` is present AND the most recent `labeled` event for
-#      it was performed by an allow-listed waiver actor (WAIVER_ACTORS)
+#   1. A non-dismissed chatgpt-codex-connector[bot] (user.type == Bot) review
+#      exists with commit_id == head SHA, submitted after the PR's most recent
+#      base-branch change.
+#   2. Waiver bound to the head: an allow-listed actor (WAIVER_ACTORS) applied
+#      `codex-waived` while this exact head SHA was current. The labeled event
+#      publishes a "Codex waived" review-gate check on that SHA; later
+#      evaluations honor the waiver only if that check exists on the current
+#      head (and post-dates the last base change). Any push produces a new head
+#      with no waiver; re-apply the label to waive again.
+#
+# Draft PRs get a failing gate (not neutral), so marking a draft ready can
+# never expose an already-satisfied required check.
 #
 # Commit statuses are deliberately NOT accepted as Codex evidence: anyone with
 # statuses:write can post a status with any context name.
@@ -24,14 +32,20 @@
 # pull_request; no pull_request_review, which would execute the PR's copy).
 # A PR that edits this file therefore cannot change how its own gate is
 # evaluated. The workflow never checks out or executes PR content. Codex
-# reviews are picked up by the 10-minute schedule, the next PR comment, or a
-# manual workflow_dispatch.
+# reviews (and review dismissals) are picked up by the 10-minute schedule, the
+# next PR comment, or a manual workflow_dispatch. Base retargets re-run via
+# the `edited` action.
+#
+# Residual risk (GitHub platform limit): any other workflow that runs from PR
+# code with `checks: write` can also create a check run named `review-gate`
+# as github-actions. Keep repository default workflow permissions read-only
+# and review changes under .github/workflows/ with that in mind.
 
 name: review-gate
 
 on:
   pull_request_target:
-    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled, edited]
   issue_comment:
     types: [created]
   check_suite:
@@ -90,22 +104,39 @@ jobs:
               return !!user && user.type === 'Bot' && isCodexLogin(user.login);
             }
 
-            async function waiverActor(prNumber) {
-              const events = await github.paginate(github.rest.issues.listEvents, {
+            // Server-side time of the most recent base-branch retarget, or 0.
+            async function lastBaseChangeMs(prNumber) {
+              const events = await github.paginate(github.rest.issues.listEventsForTimeline, {
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: prNumber,
                 per_page: 100,
               });
-              let last = null;
+              let last = 0;
               for (const e of events) {
-                if ((e.event === 'labeled' || e.event === 'unlabeled') &&
-                    e.label && e.label.name === WAIVE_LABEL) {
-                  last = e;
+                if (e.event === 'base_ref_changed' && e.created_at) {
+                  last = Math.max(last, Date.parse(e.created_at));
                 }
               }
-              if (!last || last.event !== 'labeled') return null;
-              return (last.actor && last.actor.login) || null;
+              return last;
+            }
+
+            // A "Codex waived" review-gate check already published by this
+            // workflow (github-actions) on this exact head SHA.
+            async function headHasWaiverCheck(headSha, sinceMs) {
+              const runs = await github.paginate(github.rest.checks.listForRef, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: headSha,
+                check_name: CHECK_NAME,
+                per_page: 100,
+              });
+              return runs.some(r =>
+                r.app && r.app.slug === 'github-actions' &&
+                r.conclusion === 'success' &&
+                r.output && r.output.title === 'Codex waived' &&
+                Date.parse(r.completed_at || r.started_at || 0) > sinceMs
+              );
             }
 
             async function resolvePrNumbers() {
@@ -139,24 +170,45 @@ jobs:
               const headSha = pr.head.sha;
               const labels = (pr.labels || []).map(l => l.name);
 
+              const baseChangedMs = await lastBaseChangeMs(prNumber);
+
               if (labels.includes(WAIVE_LABEL)) {
-                const actor = await waiverActor(prNumber);
-                if (actor && WAIVER_ACTORS.has(actor)) {
+                const payload = context.payload;
+                const sender = (payload.sender && payload.sender.login) || '';
+                const freshWaiver =
+                  context.eventName === 'pull_request_target' &&
+                  payload.action === 'labeled' &&
+                  payload.label && payload.label.name === WAIVE_LABEL &&
+                  payload.pull_request && payload.pull_request.number === prNumber &&
+                  payload.pull_request.head.sha === headSha;
+                if (freshWaiver && WAIVER_ACTORS.has(sender)) {
                   return {
                     prNumber, headSha,
                     conclusion: 'success',
                     title: 'Codex waived',
-                    summary: `Label \`${WAIVE_LABEL}\` applied by @${actor} (allow-listed waiver actor).`,
+                    summary: `Label \`${WAIVE_LABEL}\` applied by @${sender} on head \`${headSha.slice(0, 7)}\`. ` +
+                      'The waiver covers this SHA only; any new push needs a new review or waiver.',
                   };
                 }
-                core.warning(`Label ${WAIVE_LABEL} on #${prNumber} applied by ${actor || 'unknown'}; not an allow-listed waiver actor, ignoring.`);
+                if (freshWaiver) {
+                  core.warning(`Label ${WAIVE_LABEL} on #${prNumber} applied by ${sender || 'unknown'}; not an allow-listed waiver actor, ignoring.`);
+                } else if (await headHasWaiverCheck(headSha, baseChangedMs)) {
+                  return {
+                    prNumber, headSha,
+                    conclusion: 'success',
+                    title: 'Codex waived',
+                    summary: `Waiver previously recorded for head \`${headSha.slice(0, 7)}\`.`,
+                  };
+                } else {
+                  core.warning(`Label ${WAIVE_LABEL} on #${prNumber} was not applied by an allow-listed actor on head ${headSha.slice(0, 7)}; re-apply it to waive this head.`);
+                }
               }
               if (pr.draft) {
                 return {
                   prNumber, headSha,
-                  conclusion: 'neutral',
+                  conclusion: 'failure',
                   title: 'Draft PR',
-                  summary: 'Draft PRs are not gated; mark ready for review to require Codex.',
+                  summary: 'Draft PRs stay blocked; mark ready for review and wait for Codex on the head.',
                 };
               }
 
@@ -168,7 +220,10 @@ jobs:
               });
               const codexOnHead = reviews.filter(r => {
                 const commitId = r.commit_id || '';
-                return isCodexUser(r.user) && commitId === headSha;
+                return isCodexUser(r.user) &&
+                  commitId === headSha &&
+                  r.state !== 'DISMISSED' &&
+                  Date.parse(r.submitted_at || 0) > baseChangedMs;
               });
 
               const comments = await github.paginate(github.rest.issues.listComments, {
