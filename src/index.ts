@@ -46,6 +46,8 @@ export {
   wrapWithX402,
   USDC_ADDRESSES,
   DEFAULT_SUPPORTED_NETWORKS,
+  selectNanoRail,
+  isNanoExactRail,
 } from './x402/index.js';
 export type {
   X402PaymentRequired,
@@ -56,6 +58,7 @@ export type {
   X402ServiceBudget,
   X402TransactionLog,
   X402ClientConfig,
+  NanoRailSelection,
 } from './x402/index.js';
 
 const CHAINS: Record<string, Chain> = {

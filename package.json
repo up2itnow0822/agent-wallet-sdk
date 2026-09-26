@@ -35,7 +35,9 @@
     "reputation",
     "validation",
     "mutual-stake-escrow",
-    "cctp-bridge"
+    "cctp-bridge",
+    "nano",
+    "xno"
   ],
   "license": "MIT",
   "repository": {
@@ -62,6 +64,8 @@
     "@types/node": "^25.5.0",
     "@typescript-eslint/eslint-plugin": "^8.57.1",
     "@typescript-eslint/parser": "^8.57.1",
+    "@x402nano/exact": "^0.3.0",
+    "@x402nano/helper": "^0.2.0",
     "eslint": "^10.1.0",
     "globals": "^16.5.0",
     "typescript": "5.3.3",
