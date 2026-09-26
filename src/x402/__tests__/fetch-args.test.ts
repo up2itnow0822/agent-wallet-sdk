@@ -70,4 +70,8 @@ describe('withFailClosedRedirect', () => {
       .toBe('follow');
     expect(withFailClosedRedirect(undefined, { redirect: 'error' }).redirect).toBe('error');
   });
+
+  it("preserves redirect: 'error' from a materialized Request when callerInit is omitted", () => {
+    expect(withFailClosedRedirect({ redirect: 'error' }).redirect).toBe('error');
+  });
 });
