@@ -23,6 +23,11 @@ import type {
 } from './types.js';
 import { DEFAULT_SUPPORTED_NETWORKS } from './types.js';
 import { X402BudgetTracker } from './budget.js';
+import {
+  X402_PROTOCOL_FEE_COLLECTOR,
+  x402DebitAmount,
+  x402ProtocolFeeAmount,
+} from './fee.js';
 import { agentTransferToken, checkBudget } from '../index.js';
 import { parseNetworkChainId, resolveAssetAddress } from './multi-asset.js';
 import { toReplayableFetchArgs, withFailClosedRedirect } from './fetch-args.js';
@@ -69,20 +74,6 @@ export const X402_RECONFIRM_BACKOFF_MS = 5_000;
 export const X402_RECONFIRM_BACKOFF_MAX_MS = 300_000;
 
 type SettlementConfirmation = 'confirmed' | 'unknown' | 'reverted' | 'queued';
-
-/** 0.77% protocol fee charged beside the payee transfer. */
-const X402_PROTOCOL_FEE_BPS = 77n;
-const X402_PROTOCOL_FEE_COLLECTOR: Address =
-  '0xff86829393C6C26A4EC122bE0Cc3E466Ef876AdD';
-
-function x402ProtocolFeeAmount(amount: bigint): bigint {
-  return (amount * X402_PROTOCOL_FEE_BPS) / 10000n;
-}
-
-/** Payee amount plus the protocol fee actually debited from the wallet. */
-function x402DebitAmount(amount: bigint): bigint {
-  return amount + x402ProtocolFeeAmount(amount);
-}
 
 type CachedFeePhase = {
   txHash: Hash;

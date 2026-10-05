@@ -12,6 +12,12 @@ export {
   X402_TRANSACTION_QUEUED_TOPIC,
 } from './client.js';
 export { X402BudgetTracker } from './budget.js';
+export {
+  X402_PROTOCOL_FEE_BPS,
+  X402_PROTOCOL_FEE_COLLECTOR,
+  x402ProtocolFeeAmount,
+  x402DebitAmount,
+} from './fee.js';
 export { createX402Client, createX402Fetch, wrapWithX402 } from './middleware.js';
 export type {
   X402PaymentRequired,
