@@ -15,7 +15,8 @@ The current npm package is `agentwallet-sdk` v6.2.1.
 | --- | --- | --- |
 | Smart-wallet client | `createWallet`, policy writes, budget reads | [`src/index.ts`](src/index.ts) |
 | x402 | Client, middleware, budget tracking, multi-asset helpers | [`src/x402/`](src/x402/) |
-| Local policy | `SpendingPolicy`, `UptoBillingPolicy` | [`src/policy/`](src/policy/) |
+| Local policy | `SpendingPolicy` (reserve/commit/release), `UptoBillingPolicy` | [`src/policy/`](src/policy/) |
+| Spend outcomes | `classifySpendAttempt`, `classifySpendError`, `isEvmTxHash` | [`src/outcomes/`](src/outcomes/) |
 | Tokens | Registry, decimals, transfers, optional Solana helpers | [`src/tokens/`](src/tokens/) |
 | Receipts | Portable provider-receipt normalization | [`src/receipts/`](src/receipts/) |
 | Identity | ERC-8004, reputation, validation, and UAID clients | [`src/identity/`](src/identity/) |
@@ -23,6 +24,45 @@ The current npm package is `agentwallet-sdk` v6.2.1.
 
 These are exported code surfaces. Their presence does not claim an official
 deployment, production use, regulatory status, or support for every network.
+
+## Payment flow (reserve → execute → settle | release | hold-unknown)
+
+After `execute`, classify the attempt and apply it to a `SpendingPolicy` reservation:
+
+```typescript
+import {
+  SpendingPolicy,
+  classifySpendAttempt,
+} from "agentwallet-sdk";
+
+const policy = new SpendingPolicy({
+  rollingCap: { maxAmount: 1_007_700, windowMs: 86_400_000 },
+  includeProtocolFee: true, // hold principal + 0.77% x402 fee
+});
+
+const reserved = await policy.reserve({
+  merchant: "api.example.com",
+  amount: 1_000_000, // exact USDC base units
+  idempotencyKey: "tool:base:usdc:payee:1000000",
+});
+if (reserved.status !== "reserved" || !reserved.reservation) {
+  throw new Error(reserved.reason ?? "not reserved");
+}
+
+const outcome = classifySpendAttempt({
+  receipt: { status: "success", transactionHash: txHash },
+  txHash,
+  chainId: 8453,
+  amount: 1_000_000n,
+  fee: 7_700n,
+  idempotencyKey: reserved.reservation.idempotencyKey,
+});
+
+policy.applyOutcome(reserved.reservation, outcome);
+// settled → commit  |  released → retry-safe release  |  hold-unknown → lock, no auto-retry
+```
+
+`check()` still exists as a reserve-then-commit wrapper. Prefer reserve / execute / `applyOutcome()` so an unknown broadcast cannot free the hold. A timer never unlocks `hold-unknown`.
 
 ## Install
 
