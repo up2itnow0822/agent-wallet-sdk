@@ -97,6 +97,7 @@ describe('X402Client protocol-fee phase (#50)', () => {
       remainingInPeriod: 10n ** 18n,
     });
     const wallet = {
+      chain: { id: 8453 },
       publicClient: {
         waitForTransactionReceipt: async ({ hash: txHash }: { hash: string }) => {
           const status = receiptByHash.get(txHash);

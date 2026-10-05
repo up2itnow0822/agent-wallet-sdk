@@ -18,6 +18,7 @@
 - Keep public exports and generated declaration output consistent.
 - X402 settlements must bind proof to a call-time request snapshot and retain unresolved payee or protocol-fee phases with their reservation; unknown or queued phases never authorize another transfer or become `X-PAYMENT` proof. A confirmed protocol fee stays in the client daily total when the payee transfer fails; the retry reserves only the payee amount.
 - `createX402Fetch` / `wrapWithX402` / `X402Client.fetch` must materialize `Request` method, headers, and body before the first hop so a 402 retry cannot collapse to GET.
+- `selectPaymentOption` / `executePayment` must reject 402 networks whose chain id is missing or differs from `wallet.chain.id`. Transfers always submit on the wallet chain.
 
 ## Work Guidance
 
