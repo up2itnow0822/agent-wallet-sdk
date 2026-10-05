@@ -98,6 +98,11 @@ consume gas.
   and caller-controlled wallet client.
 - `createWallet()` currently maps Base, Base Sepolia, Ethereum, Arbitrum, and
   Polygon runtime clients in [`src/index.ts`](src/index.ts).
+- `walletFromEnv()` maps `CHAIN_NAME` / `CHAIN_ID` onto those keys. It does not
+  pass viem display names such as `"arbitrum one"` into `createWallet()`.
+- `setPolicyFromEnv()` copies a single configured spend limit onto the omitted
+  dimension. A missing env var is not written as `0` (the on-chain disable-all
+  sentinel).
 - Spending policy only governs transactions routed through the matching smart
   wallet contract. It cannot protect funds held outside that boundary.
 - Network support differs by module. Read the module source and tests before
