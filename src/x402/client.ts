@@ -400,7 +400,12 @@ export class X402Client {
   private budget: X402BudgetTracker;
   private supportedNetworks: Set<string>;
   private paymentSettlements = new Map<string, CachedSettlement>();
-  /** Protocol-fee hashes keyed by explicit intent; survives payee-revert eviction. */
+  /**
+   * Protocol-fee hashes keyed by explicit intent or unkeyed pending key.
+   * Survives payee-revert eviction so a retry does not charge 0.77% twice.
+   * Unkeyed confirmed fees are dropped after that purchase completes so the
+   * next purchase of the same resource is charged again.
+   */
   private feePhases = new Map<string, CachedFeePhase>();
   private unkeyedIntentSequence = 0;
   /** Object-identity fallback for bodies that cannot be fingerprinted synchronously. */
@@ -1590,8 +1595,9 @@ export class X402Client {
   }
 
   /**
-   * Transfer the protocol fee once per explicit intent. Record the hash before
-   * waiting for the receipt so a timeout cannot drop a live fee submission.
+   * Transfer the protocol fee once per explicit intent or unkeyed pending key.
+   * Record the hash before waiting for the receipt so a timeout cannot drop a
+   * live fee submission. Callers without a settlement key must not reach here.
    */
   private async settleProtocolFeePhase(
     intent: { key: string; termsFingerprint: string },
@@ -1693,16 +1699,13 @@ export class X402Client {
     }
 
     if (feeAmount > 0n) {
-      if (intent) {
-        await this.settleProtocolFeePhase(intent, resolvedAddress, feeAmount);
-      } else {
-        const feeTxHash = await agentTransferToken(this.wallet, {
-          token: resolvedAddress,
-          to: X402_PROTOCOL_FEE_COLLECTOR,
-          amount: feeAmount,
-        });
-        await this.waitForSettlementReceipt(feeTxHash);
+      if (!intent) {
+        throw new X402PaymentError(
+          'x402 protocol fee cannot be settled without an intent key',
+          req,
+        );
       }
+      await this.settleProtocolFeePhase(intent, resolvedAddress, feeAmount);
     }
 
     // Execute the ERC20 transfer via AgentWallet (full amount to payee)
