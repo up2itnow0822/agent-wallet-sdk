@@ -7,7 +7,7 @@ The `agentwallet-sdk` npm package is a TypeScript library for policy-aware
 agent payments. It is non-custodial: callers supply their own viem
 `WalletClient`, and the SDK does not store keys or operate a custodial service.
 
-The current npm package is `agentwallet-sdk` v6.2.1.
+The current npm package is `agentwallet-sdk` v6.2.2.
 
 ## What ships
 
