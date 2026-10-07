@@ -1,6 +1,6 @@
 {
   "name": "agentwallet-sdk",
-  "version": "6.2.1",
+  "version": "6.2.2",
   "description": "Non-custodial TypeScript SDK for policy-aware AI agent payments: SpendingPolicy, x402 client and middleware, and ERC-8004 identity. Bring your own viem WalletClient.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
