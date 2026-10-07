@@ -1,3 +1,13 @@
+## [6.2.2] — 2026-10-07
+
+Docs and metadata only. The shipped code (`dist/`) is byte-identical to 6.2.1.
+
+### Changed
+- README synced with GitHub: removed `getRemainingBudget` and the `agentwallet-sdk/swap` and `agentwallet-sdk/tokens/solana` import paths, which are not in the package, and toned down contract-enforcement claims.
+- package.json description updated to match.
+
+---
+
 ## [6.2.0] — 2026-04-13
 
 ### Added
