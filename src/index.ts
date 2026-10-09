@@ -48,6 +48,10 @@ export {
   DEFAULT_SUPPORTED_NETWORKS,
   selectNanoRail,
   isNanoExactRail,
+  X402_PROTOCOL_FEE_BPS,
+  X402_PROTOCOL_FEE_COLLECTOR,
+  x402ProtocolFeeAmount,
+  x402DebitAmount,
 } from './x402/index.js';
 export type {
   X402PaymentRequired,
@@ -583,15 +587,34 @@ export type { BridgeChain, BridgeOptions, BurnResult, BridgeResult } from './bri
 
 // x402 already exported above from original index.ts
 
+// ─── Spend outcomes — reserve → execute → settle | release | hold-unknown ───
+export {
+  classifySpendAttempt,
+  classifySpendError,
+  isEvmTxHash,
+} from './outcomes/index.js';
+export type {
+  SpendOutcome,
+  SpendOutcomeStatus,
+  SpendReceiptLike,
+  ClassifySpendAttemptInput,
+} from './outcomes/index.js';
+
 // ─── SpendingPolicy — Programmable spending guardrails ───────────────────────
 export {
   SpendingPolicy,
+  debitAmountForPolicy,
 } from './policy/SpendingPolicy.js';
 export type {
   SpendingPolicyConfig,
   PaymentIntent,
   PolicyResult,
   PolicyStatus,
+  ReserveResult,
+  ReserveStatus,
+  ReservationStatus,
+  SpendReservation,
+  AuditStatus,
   AuditEntry,
   DraftEntry,
 } from './policy/SpendingPolicy.js';

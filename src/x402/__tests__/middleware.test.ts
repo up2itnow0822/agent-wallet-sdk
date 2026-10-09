@@ -39,6 +39,7 @@ async function listen(
 }
 
 const wallet = {
+  chain: { id: 8453 },
   publicClient: {
     waitForTransactionReceipt: async () => ({ status: 'success' }),
   },

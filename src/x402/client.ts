@@ -23,8 +23,13 @@ import type {
 } from './types.js';
 import { DEFAULT_SUPPORTED_NETWORKS } from './types.js';
 import { X402BudgetTracker } from './budget.js';
+import {
+  X402_PROTOCOL_FEE_COLLECTOR,
+  x402DebitAmount,
+  x402ProtocolFeeAmount,
+} from './fee.js';
 import { agentTransferToken, checkBudget } from '../index.js';
-import { resolveAssetAddress } from './multi-asset.js';
+import { parseNetworkChainId, resolveAssetAddress } from './multi-asset.js';
 import { toReplayableFetchArgs, withFailClosedRedirect } from './fetch-args.js';
 
 /**
@@ -69,20 +74,6 @@ export const X402_RECONFIRM_BACKOFF_MS = 5_000;
 export const X402_RECONFIRM_BACKOFF_MAX_MS = 300_000;
 
 type SettlementConfirmation = 'confirmed' | 'unknown' | 'reverted' | 'queued';
-
-/** 0.77% protocol fee charged beside the payee transfer. */
-const X402_PROTOCOL_FEE_BPS = 77n;
-const X402_PROTOCOL_FEE_COLLECTOR: Address =
-  '0xff86829393C6C26A4EC122bE0Cc3E466Ef876AdD';
-
-function x402ProtocolFeeAmount(amount: bigint): bigint {
-  return (amount * X402_PROTOCOL_FEE_BPS) / 10000n;
-}
-
-/** Payee amount plus the protocol fee actually debited from the wallet. */
-function x402DebitAmount(amount: bigint): bigint {
-  return amount + x402ProtocolFeeAmount(amount);
-}
 
 type CachedFeePhase = {
   txHash: Hash;
@@ -400,7 +391,12 @@ export class X402Client {
   private budget: X402BudgetTracker;
   private supportedNetworks: Set<string>;
   private paymentSettlements = new Map<string, CachedSettlement>();
-  /** Protocol-fee hashes keyed by explicit intent; survives payee-revert eviction. */
+  /**
+   * Protocol-fee hashes keyed by explicit intent or unkeyed pending key.
+   * Survives payee-revert eviction so a retry does not charge 0.77% twice.
+   * Unkeyed confirmed fees are dropped after that purchase completes so the
+   * next purchase of the same resource is charged again.
+   */
   private feePhases = new Map<string, CachedFeePhase>();
   private unkeyedIntentSequence = 0;
   /** Object-identity fallback for bodies that cannot be fingerprinted synchronously. */
@@ -1490,11 +1486,23 @@ export class X402Client {
 
   /**
    * Refuse auto-pay when the 402 was reached via a cross-origin redirect.
-   * Same-origin redirects remain subject to resource path binding below.
+   * Same-origin redirects must land on the exact same path and query.
    */
   private isSafePaymentResponseUrl(requestUrl: string, responseUrl: string): boolean {
     try {
-      return new URL(requestUrl).origin === new URL(responseUrl).origin;
+      const requested = new URL(requestUrl);
+      const responded = new URL(responseUrl);
+      // Origin alone is not enough: a same-origin redirect to a different path
+      // can present a 402 whose resource matches the final URL while
+      // onBeforePayment / the paid retry still use the original trusted path
+      // (Codex P1 on #72). The query is part of the resource identity too: a
+      // same-origin redirect from `/buy?item=trusted` to `/buy?item=other`
+      // would otherwise validate the challenge against a different request
+      // snapshot than the one onBeforePayment and the paid retry use (Codex P1
+      // on #79). Refuse auto-pay unless origin, pathname, and query all match.
+      return requested.origin === responded.origin
+        && requested.pathname === responded.pathname
+        && requested.search === responded.search;
     } catch {
       return false;
     }
@@ -1517,16 +1525,41 @@ export class X402Client {
   }
 
   /**
+   * Numeric chain id the wallet will actually submit on.
+   * `agentTransferToken` always uses `wallet.chain`; a 402 `network` field is
+   * untrusted and must not pick a token address from a different chain.
+   */
+  private walletChainId(): number | null {
+    const id = this.wallet?.chain?.id;
+    return typeof id === 'number' && Number.isInteger(id) && id > 0 ? id : null;
+  }
+
+  /**
+   * True only when the 402 network's chain id equals the wallet's chain id.
+   * Missing wallet chain, unparseable network, or mismatch all fail closed.
+   */
+  private isNetworkOnWalletChain(network: string): boolean {
+    const walletChainId = this.walletChainId();
+    const networkChainId = parseNetworkChainId(network);
+    return walletChainId !== null && networkChainId !== null && networkChainId === walletChainId;
+  }
+
+  /**
    * Select the best compatible payment option from offered requirements.
    * Only `exact` is auto-paid: `upto` is a max-authorization, not a charge.
    *
    * v6 change: resolves assets via TokenRegistry in addition to USDC_ADDRESSES.
    * Now accepts any ERC-20 whose address is in the TokenRegistry for the network.
+   * Options whose network chain id differs from the wallet chain are rejected —
+   * transfers always execute on wallet.chain, so a foreign network would send
+   * the foreign chain's token address on the wallet chain (or a shared
+   * OP-stack address such as WETH 0x4200…0006).
    */
   selectPaymentOption(accepts: X402PaymentRequirements[]): X402PaymentRequirements | null {
-    // Filter to supported networks and resolvable assets
+    // Filter to supported networks, the wallet's chain, and resolvable assets
     const compatible = accepts.filter(req => {
       if (!this.supportedNetworks.has(req.network)) return false;
+      if (!this.isNetworkOnWalletChain(req.network)) return false;
 
       // Config override: explicit supportedAssets list
       if (this.config.supportedAssets?.[req.network]) {
@@ -1578,8 +1611,9 @@ export class X402Client {
   }
 
   /**
-   * Transfer the protocol fee once per explicit intent. Record the hash before
-   * waiting for the receipt so a timeout cannot drop a live fee submission.
+   * Transfer the protocol fee once per explicit intent or unkeyed pending key.
+   * Record the hash before waiting for the receipt so a timeout cannot drop a
+   * live fee submission. Callers without a settlement key must not reach here.
    */
   private async settleProtocolFeePhase(
     intent: { key: string; termsFingerprint: string },
@@ -1636,6 +1670,13 @@ export class X402Client {
       );
     }
 
+    if (!this.isNetworkOnWalletChain(req.network)) {
+      throw new X402PaymentError(
+        `Payment network "${req.network}" does not match wallet chain ${this.walletChainId() ?? 'unknown'}`,
+        req,
+      );
+    }
+
     // Resolve the actual contract address for the requested asset
     const resolvedAddress = resolveAssetAddress(req.asset, req.network);
     if (!resolvedAddress) {
@@ -1645,39 +1686,49 @@ export class X402Client {
       );
     }
 
-    // First check on-chain budget against the full debit. The protocol fee is
-    // transferred before the payee, so a principal-only check can pass, charge
-    // the fee, then revert the payee and strand funds at the collector.
+    // First check on-chain budget. The protocol fee is transferred before the
+    // payee as a separate agentTransferToken, so:
+    //   - perTxLimit applies to each leg (principal is the larger) — Codex P2 #69
+    //   - period remaining must cover only what this attempt still needs to send
+    //     (skip the fee when it already confirmed) — Codex P1 #69
     const onChainBudget = await checkBudget(this.wallet, resolvedAddress);
     const amount = BigInt(req.amount);
     const feeAmount = x402ProtocolFeeAmount(amount);
-    const debit = x402DebitAmount(amount);
+    const feeAlreadySettled = intent
+      ? this.feePhases.get(intent.key)?.status === 'confirmed'
+      : false;
+    const periodDebit = feeAlreadySettled ? amount : x402DebitAmount(amount);
 
-    if (debit > onChainBudget.perTxLimit) {
+    if (amount > onChainBudget.perTxLimit) {
       throw new X402PaymentError(
-        `Amount ${amount} plus protocol fee ${feeAmount} exceeds on-chain per-tx limit ${onChainBudget.perTxLimit}`,
+        `Amount ${amount} exceeds on-chain per-tx limit ${onChainBudget.perTxLimit}`,
+        req
+      );
+    }
+    if (!feeAlreadySettled && feeAmount > onChainBudget.perTxLimit) {
+      throw new X402PaymentError(
+        `Protocol fee ${feeAmount} exceeds on-chain per-tx limit ${onChainBudget.perTxLimit}`,
         req
       );
     }
 
-    if (debit > onChainBudget.remainingInPeriod) {
+    if (periodDebit > onChainBudget.remainingInPeriod) {
       throw new X402PaymentError(
-        `Amount ${amount} plus protocol fee ${feeAmount} exceeds remaining period budget ${onChainBudget.remainingInPeriod}`,
+        feeAlreadySettled
+          ? `Amount ${amount} exceeds remaining period budget ${onChainBudget.remainingInPeriod} after confirmed protocol fee`
+          : `Amount ${amount} plus protocol fee ${feeAmount} exceeds remaining period budget ${onChainBudget.remainingInPeriod}`,
         req
       );
     }
 
     if (feeAmount > 0n) {
-      if (intent) {
-        await this.settleProtocolFeePhase(intent, resolvedAddress, feeAmount);
-      } else {
-        const feeTxHash = await agentTransferToken(this.wallet, {
-          token: resolvedAddress,
-          to: X402_PROTOCOL_FEE_COLLECTOR,
-          amount: feeAmount,
-        });
-        await this.waitForSettlementReceipt(feeTxHash);
+      if (!intent) {
+        throw new X402PaymentError(
+          'x402 protocol fee cannot be settled without an intent key',
+          req,
+        );
       }
+      await this.settleProtocolFeePhase(intent, resolvedAddress, feeAmount);
     }
 
     // Execute the ERC20 transfer via AgentWallet (full amount to payee)

@@ -97,6 +97,7 @@ describe('X402Client protocol-fee phase (#50)', () => {
       remainingInPeriod: 10n ** 18n,
     });
     const wallet = {
+      chain: { id: 8453 },
       publicClient: {
         waitForTransactionReceipt: async ({ hash: txHash }: { hash: string }) => {
           const status = receiptByHash.get(txHash);
@@ -351,7 +352,7 @@ describe('X402Client protocol-fee phase (#50)', () => {
     expect(client.getTransactionLog()).toHaveLength(1);
   });
 
-  it('resumes an unkeyed fee confirmation without a second fee or reservation', async () => {
+  it('fee-receipt timeout plus retry transfers the unkeyed protocol fee exactly once', async () => {
     const { wallet, feeHashes } = setupTransfers({
       feeReceipts: ['success'],
       payeeReceipts: ['success'],
@@ -372,16 +373,57 @@ describe('X402Client protocol-fee phase (#50)', () => {
 
     await expect(client.fetch(URL, { method: 'POST' })).rejects.toThrow('rpc timeout');
     expect(transfer.mock.calls).toHaveLength(1);
+    expect(isFeeTransfer(transfer.mock.calls[0][1])).toBe(true);
     expect(client.budgetTracker.getReservedSummary().global).toBe(1_007_700n);
 
     const retry = await client.fetch(URL, { method: 'POST' });
     expect(retry.status).toBe(200);
     expect(transfer.mock.calls).toHaveLength(2);
     expect(transfer.mock.calls.filter((call) => isFeeTransfer(call[1]))).toHaveLength(1);
+    expect(transfer.mock.calls.filter((call) => !isFeeTransfer(call[1]))).toHaveLength(1);
     expect(feeReceiptAttempts).toBe(2);
     expect(client.budgetTracker.getReservedSummary().global).toBe(0n);
     expect(client.getTransactionLog()).toHaveLength(1);
     expect(client.getTransactionLog()[0].replayed).toBe(false);
+  });
+
+  it('does not re-charge the unkeyed protocol fee after a payee revert on the same request', async () => {
+    const { wallet, feeHashes, payeeHashes } = setupTransfers({
+      feeReceipts: ['success'],
+      payeeReceipts: ['reverted', 'success'],
+      unkeyed: true,
+    });
+    const client = new X402Client(wallet);
+
+    await expect(client.fetch(URL, { method: 'POST' })).rejects.toBeInstanceOf(
+      X402SettlementRevertedError,
+    );
+    expect(transfer.mock.calls).toHaveLength(2);
+    expect(isFeeTransfer(transfer.mock.calls[0][1])).toBe(true);
+    expect(isFeeTransfer(transfer.mock.calls[1][1])).toBe(false);
+
+    const retry = await client.fetch(URL, { method: 'POST' });
+    expect(retry.status).toBe(200);
+    expect(transfer.mock.calls).toHaveLength(3);
+    expect(isFeeTransfer(transfer.mock.calls[2][1])).toBe(false);
+    expect(transfer.mock.calls.filter((call) => isFeeTransfer(call[1]))).toHaveLength(1);
+    expect(feeHashes).toEqual([hash('0a')]);
+    expect(payeeHashes).toEqual([hash('14'), hash('15')]);
+  });
+
+  it('refuses a protocol fee without an intent key and transfers nothing', async () => {
+    const { wallet } = setupTransfers({
+      feeReceipts: ['success'],
+      payeeReceipts: ['success'],
+    });
+    const client = new X402Client(wallet);
+
+    await expect(
+      (client as any).executePayment(paymentRequired().accepts[0]),
+    ).rejects.toThrow(/intent key/);
+    expect(transfer.mock.calls).toHaveLength(0);
+    expect(client.budgetTracker.getReservedSummary().global).toBe(0n);
+    expect(client.getTransactionLog()).toHaveLength(0);
   });
 
   it('single-flights concurrent retries while an unkeyed fee receipt is pending', async () => {

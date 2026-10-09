@@ -1,3 +1,16 @@
+## Unreleased
+
+### Added
+- **Spend outcomes API** (`classifySpendAttempt`, `classifySpendError`, `isEvmTxHash`) for the payment flow `reserve → execute → settle | release | hold-unknown`. Settled requires a successful receipt and valid EVM tx hash(es) (`0x` + 64 hex). Definite pre-broadcast failures and confirmed reverts are `released` + `retrySafe`. Post-broadcast timeouts, queued settlements, and unclear receipts are `hold-unknown` and never auto-retry.
+- **`SpendingPolicy.reserve` / `commit` / `release` / `lock` / `applyOutcome`**. Reserve holds rolling-cap capacity all-or-nothing (optional 0.77% protocol fee in exact base units). Commit keeps capacity consumed after a settled outcome. Release restores capacity after a definite not-charged outcome. `hold-unknown` locks the reservation; a timer never unlocks it.
+- `reserveApprovedDraft()` so over-cap or threshold drafts can approve and execute the stored intent (no dead-end drafts).
+- Shared `x402ProtocolFeeAmount` / `x402DebitAmount` helpers exported from the package entry.
+
+### Changed
+- `SpendingPolicy.check()` is now a backward-compatible reserve-then-commit wrapper. New callers should reserve, execute, then `applyOutcome()`.
+
+---
+
 ## [6.2.0] — 2026-04-13
 
 ### Added
