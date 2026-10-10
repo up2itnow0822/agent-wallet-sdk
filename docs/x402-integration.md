@@ -132,6 +132,65 @@ const response = await wallet.fetchWithX402('https://base-api.example.com/endpoi
 });
 ```
 
+## Multi-Rail: Nano (XNO) beside USDC
+
+A merchant's 402 `accepts[]` may offer more than one settlement rail. Besides the
+EVM USDC options on Base, Ethereum, etc., some merchants offer a **feeless Nano
+(XNO)** exact-scheme option on `nano:mainnet`. Nano settles with one-block
+deterministic finality and **zero transaction fee** — no gas, no 0.77% protocol
+fee, and the cap is exactly what leaves the wallet.
+
+The SDK ships a small, dependency-free rail selector so a client can choose the
+Nano option when it is offered and keep the EVM path otherwise:
+
+```typescript
+import { selectNanoRail, type NanoRailSelection } from 'agent-wallet-sdk';
+
+// From the 402 response body:
+const nanoRail: NanoRailSelection | null = selectNanoRail(paymentRequired.accepts);
+if (nanoRail) {
+  // nanoRail.raw — raw XNO (10^30 per XNO)
+  // nanoRail.payTo — destination nano_ account
+  // nanoRail.maxTimeoutSeconds — seller's settlement window
+}
+```
+
+`selectNanoRail` is pure and deterministic (unit-tested in `src/x402/__tests__/nano.test.ts`);
+it validates that the option is the `exact` scheme on `nano:mainnet` for asset `XNO`
+and parses the raw amount. It performs no network or wallet action.
+
+Settling the Nano rail reuses the published Nano x402 packages (`@x402nano/exact`
+and `@x402nano/helper`) — no reimplementation of Nano signing. A complete
+multi-rail payment loop that prefers Nano and falls back to the SDK's EVM path is
+in [`examples/nano-settlement.ts`](../examples/nano-settlement.ts):
+
+```typescript
+import { Helper } from '@x402nano/helper';
+import { ExactNanoScheme } from '@x402nano/exact';
+import { selectNanoRail } from 'agent-wallet-sdk';
+
+const nanoRail = selectNanoRail(accepts);
+if (nanoRail) {
+  const helper = new Helper({ NANO_RPC_URL, NANO_ACCOUNT_PRIVATE_KEY: NANO_SEED });
+  const nanoClient = new ExactNanoScheme(helper);
+  const payload = await nanoClient.createPaymentPayload(1, {
+    scheme: 'exact',
+    network: 'nano:mainnet',
+    amount: nanoRail.raw.toString(),
+    asset: 'XNO',
+    payTo: nanoRail.payTo,
+    maxTimeoutSeconds: nanoRail.maxTimeoutSeconds,
+    extra: {},
+  });
+  // Retry the request with the X-PAYMENT header carrying payload.payload
+}
+```
+
+Nano is a single-process DAG: there is one network, so no chain choice, RPC
+failover, or CCTP bridge to configure for it. See
+[`examples/nano-settlement.ts`](../examples/nano-settlement.ts) for the full
+loop including the USDC fallback through the SDK's `X402Client`.
+
 ## Python Example
 
 ```python

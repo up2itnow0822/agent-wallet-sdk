@@ -40,6 +40,10 @@ export {
   parseNetworkChainId,
 } from './multi-asset.js';
 
+// Nano (XNO) exact-scheme rail selection (additive, dependency-free)
+export { selectNanoRail, isNanoExactRail } from './nano.js';
+export type { NanoRailSelection } from './nano.js';
+
 // ─── Chain-Specific Adapters ──────────────────────────────────────────────────
 export {
   AbstractDelegatedFacilitatorAdapter,
