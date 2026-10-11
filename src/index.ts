@@ -6,6 +6,8 @@ import {
   type Hash,
   type Hex,
   type WalletClient,
+  type PublicClient,
+  type GetContractReturnType,
   type Chain,
   zeroAddress,
 } from 'viem';
@@ -75,19 +77,34 @@ export const NATIVE_TOKEN: Address = zeroAddress;
 
 // ─── Core SDK Functions ───
 
+/** Typed contract handle for an AgentAccountV2 bound to public + wallet clients. */
+export type AgentAccountContract = GetContractReturnType<
+  typeof AgentAccountV2Abi,
+  { public: PublicClient; wallet: WalletClient }
+>;
+
+/** Wallet handle returned by {@link createWallet}. */
+export interface AgentWalletHandle {
+  address: Address;
+  contract: AgentAccountContract;
+  publicClient: PublicClient;
+  walletClient: WalletClient;
+  chain: Chain;
+}
+
 /**
  * Create a wallet client connected to an existing AgentAccountV2.
  */
-export function createWallet(config: AgentWalletConfig & { walletClient: WalletClient }) {
+export function createWallet(config: AgentWalletConfig & { walletClient: WalletClient }): AgentWalletHandle {
   const chain = CHAINS[config.chain];
   if (!chain) throw new Error(`Unsupported chain: ${config.chain}`);
 
-  const publicClient = createPublicClient({
+  const publicClient: PublicClient = createPublicClient({
     chain,
     transport: http(config.rpcUrl),
   });
 
-  const contract = getContract({
+  const contract: AgentAccountContract = getContract({
     address: config.accountAddress,
     abi: AgentAccountV2Abi,
     client: { public: publicClient, wallet: config.walletClient },

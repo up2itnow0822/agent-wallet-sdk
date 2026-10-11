@@ -1,10 +1,17 @@
-## Unreleased
+## [6.3.0] — 2026-10-11
 
 ### Added
 - **Spend outcomes API** (`classifySpendAttempt`, `classifySpendError`, `isEvmTxHash`) for the payment flow `reserve → execute → settle | release | hold-unknown`. Settled requires a successful receipt and valid EVM tx hash(es) (`0x` + 64 hex). Definite pre-broadcast failures and confirmed reverts are `released` + `retrySafe`. Post-broadcast timeouts, queued settlements, and unclear receipts are `hold-unknown` and never auto-retry.
 - **`SpendingPolicy.reserve` / `commit` / `release` / `lock` / `applyOutcome`**. Reserve holds rolling-cap capacity all-or-nothing (optional 0.77% protocol fee in exact base units). Commit keeps capacity consumed after a settled outcome. Release restores capacity after a definite not-charged outcome. `hold-unknown` locks the reservation; a timer never unlocks it.
 - `reserveApprovedDraft()` so over-cap or threshold drafts can approve and execute the stored intent (no dead-end drafts).
 - Shared `x402ProtocolFeeAmount` / `x402DebitAmount` helpers exported from the package entry.
+
+### Security
+- Bump `viem` 2.46.0 → 2.57.4 (exact), which drops the vulnerable `ws` 8.x range (GHSA-58qx-3vcg-4xpx, GHSA-96hv-2xvq-fx4p). `npm audit --omit=dev` reports 0 vulnerabilities.
+
+### Fixed
+- Solana balance formatting preserves precision (#29), now shipped in a release.
+- Explicit `PublicClient` / contract types in `createWallet` so declarations build against viem 2.57.
 
 ### Changed
 - `SpendingPolicy.check()` is now a backward-compatible reserve-then-commit wrapper. New callers should reserve, execute, then `applyOutcome()`.
