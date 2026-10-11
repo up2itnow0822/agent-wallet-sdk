@@ -77,10 +77,25 @@ export const NATIVE_TOKEN: Address = zeroAddress;
 
 // ─── Core SDK Functions ───
 
+/** Typed contract handle for an AgentAccountV2 bound to public + wallet clients. */
+export type AgentAccountContract = GetContractReturnType<
+  typeof AgentAccountV2Abi,
+  { public: PublicClient; wallet: WalletClient }
+>;
+
+/** Wallet handle returned by {@link createWallet}. */
+export interface AgentWalletHandle {
+  address: Address;
+  contract: AgentAccountContract;
+  publicClient: PublicClient;
+  walletClient: WalletClient;
+  chain: Chain;
+}
+
 /**
  * Create a wallet client connected to an existing AgentAccountV2.
  */
-export function createWallet(config: AgentWalletConfig & { walletClient: WalletClient }) {
+export function createWallet(config: AgentWalletConfig & { walletClient: WalletClient }): AgentWalletHandle {
   const chain = CHAINS[config.chain];
   if (!chain) throw new Error(`Unsupported chain: ${config.chain}`);
 
@@ -89,10 +104,7 @@ export function createWallet(config: AgentWalletConfig & { walletClient: WalletC
     transport: http(config.rpcUrl),
   });
 
-  const contract: GetContractReturnType<
-    typeof AgentAccountV2Abi,
-    { public: PublicClient; wallet: WalletClient }
-  > = getContract({
+  const contract: AgentAccountContract = getContract({
     address: config.accountAddress,
     abi: AgentAccountV2Abi,
     client: { public: publicClient, wallet: config.walletClient },
