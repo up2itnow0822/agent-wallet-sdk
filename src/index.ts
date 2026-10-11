@@ -6,6 +6,8 @@ import {
   type Hash,
   type Hex,
   type WalletClient,
+  type PublicClient,
+  type GetContractReturnType,
   type Chain,
   zeroAddress,
 } from 'viem';
@@ -82,12 +84,15 @@ export function createWallet(config: AgentWalletConfig & { walletClient: WalletC
   const chain = CHAINS[config.chain];
   if (!chain) throw new Error(`Unsupported chain: ${config.chain}`);
 
-  const publicClient = createPublicClient({
+  const publicClient: PublicClient = createPublicClient({
     chain,
     transport: http(config.rpcUrl),
   });
 
-  const contract = getContract({
+  const contract: GetContractReturnType<
+    typeof AgentAccountV2Abi,
+    { public: PublicClient; wallet: WalletClient }
+  > = getContract({
     address: config.accountAddress,
     abi: AgentAccountV2Abi,
     client: { public: publicClient, wallet: config.walletClient },
