@@ -57,17 +57,31 @@ function errorMessage(error: unknown): string {
   return String(error ?? '');
 }
 
-function errorTxHash(error: unknown): string | undefined {
-  if (error && typeof error === 'object') {
-    if ('txHash' in error && isEvmTxHash(error.txHash)) {
-      return error.txHash;
-    }
-  }
-  const match = errorMessage(error).match(/0x[0-9a-fA-F]{64}/);
-  return match?.[0];
+function errorFields(error: unknown): Record<string, unknown> {
+  return error && typeof error === 'object' ? error as Record<string, unknown> : {};
 }
 
-function uniqueValidHashes(values: Array<string | undefined | null>): string[] {
+function errorReceipt(error: unknown): SpendReceiptLike | undefined {
+  const receipt = errorFields(error).receipt;
+  return receipt && typeof receipt === 'object' ? receipt as SpendReceiptLike : undefined;
+}
+
+function errorHashCandidates(error: unknown): unknown[] {
+  const fields = errorFields(error);
+  const receipt = errorReceipt(error);
+  return [
+    fields.txHash,
+    fields.transactionHash,
+    receipt?.transactionHash,
+    receipt?.txHash,
+    fields.confirmedFeeTxHash,
+    fields.feeTxHash,
+    ...(Array.isArray(fields.txHashes) ? fields.txHashes : []),
+    ...(errorMessage(error).match(/0[xX][0-9a-fA-F]{64}/g) ?? []),
+  ];
+}
+
+function uniqueValidHashes(values: unknown[]): string[] {
   const seen = new Set<string>();
   const hashes: string[] = [];
   for (const value of values) {
@@ -78,24 +92,23 @@ function uniqueValidHashes(values: Array<string | undefined | null>): string[] {
   return hashes;
 }
 
-function collectInputHashes(input: ClassifySpendAttemptInput, error?: unknown): string[] {
-  const extras = input.txHashes ? Array.from(input.txHashes) : [];
-  return uniqueValidHashes([
-    input.txHash,
-    input.receipt?.transactionHash,
-    input.receipt?.txHash,
-    errorTxHash(error ?? input.error),
-    ...extras,
-  ]);
-}
-
-function toBigInt(value: bigint | number | string | undefined): bigint | undefined {
-  if (value === undefined) return undefined;
+function toBigInt(value: unknown): bigint | undefined {
+  if (typeof value !== 'bigint' && typeof value !== 'number' && typeof value !== 'string') return undefined;
   try {
     return BigInt(value);
   } catch {
     return undefined;
   }
+}
+
+function errorMetadata(error: unknown): Pick<SpendOutcome, 'chainId' | 'amount' | 'fee' | 'idempotencyKey'> {
+  const fields = errorFields(error);
+  return {
+    chainId: typeof fields.chainId === 'number' ? fields.chainId : undefined,
+    amount: toBigInt(fields.amount),
+    fee: toBigInt(fields.fee),
+    idempotencyKey: typeof fields.idempotencyKey === 'string' ? fields.idempotencyKey : undefined,
+  };
 }
 
 function receiptStatus(receipt?: SpendReceiptLike): 'success' | 'reverted' | 'unknown' {
@@ -134,28 +147,39 @@ const PRE_BROADCAST_DEFINITE = new Set([
   'X402SettlementBacklogError',
 ]);
 
-const POST_BROADCAST_UNKNOWN = new Set([
-  'X402SettlementUnknownError',
-  'X402SettlementQueuedError',
-]);
-
-const UNKNOWN_MESSAGE = /timed out|timeout|receipt polling|outcome unknown|not yet observed|replaced by a different transaction|ECONNRESET|ETIMEDOUT|network error/i;
-
 /**
  * Classify a thrown spend error.
  *
  * Pre-broadcast failures and confirmed reverts are definite not-charged
  * (`released`, retrySafe unless the same idempotency key must not be reused).
- * Post-broadcast timeouts, queued owner-approval, and unclear receipts are
- * `hold-unknown` and never retry-safe.
+ * A known pre-broadcast error releases only without broadcast evidence.
+ * Generic throws, timeouts, queued approval, and unclear receipts stay
+ * `hold-unknown` and never retry-safe. A paid HTTP error can settle only with
+ * explicit confirmation; a confirmed protocol fee prevents full release
+ * when only the payee failed.
  */
 export function classifySpendError(error: unknown): SpendOutcome {
   const name = errorName(error);
-  const txHash = errorTxHash(error);
-  const txHashes = txHash ? [txHash] : [];
+  const candidates = errorHashCandidates(error);
+  const txHashes = uniqueValidHashes(candidates);
+  const txHash = txHashes[0];
+  const metadata = errorMetadata(error);
+  const required = candidates.filter((value) => value !== undefined && value !== null && value !== '');
+  const requiredValid = required.length > 0 && required.every(isEvmTxHash);
 
-  if (name === 'X402SettlementRevertedError') {
+  if (name === 'X402PaidRequestError') {
+    const classified = classifySpendAttempt({
+      ...metadata,
+      receipt: errorReceipt(error),
+      txHashes: candidates as Array<string | undefined | null>,
+    });
+    return { ...classified, reason: errorMessage(error) || classified.reason };
+  }
+
+  if (name === 'X402SettlementRevertedError' &&
+      !isEvmTxHash(errorFields(error).confirmedFeeTxHash) && requiredValid && txHashes.length === 1) {
     return outcome('released', {
+      ...metadata,
       retrySafe: true,
       txHashes,
       txHash,
@@ -163,8 +187,18 @@ export function classifySpendError(error: unknown): SpendOutcome {
     });
   }
 
+  if (required.length > 0) {
+    return outcome('hold-unknown', {
+      ...metadata,
+      retrySafe: false,
+      txHashes,
+      reason: errorMessage(error) || 'broadcast evidence without complete settlement confirmation',
+    });
+  }
+
   if (name === 'X402IntentTermsConflictError') {
     return outcome('released', {
+      ...metadata,
       retrySafe: false,
       txHashes,
       reason: errorMessage(error) || 'idempotency key reused with different terms',
@@ -173,26 +207,19 @@ export function classifySpendError(error: unknown): SpendOutcome {
 
   if (PRE_BROADCAST_DEFINITE.has(name)) {
     return outcome('released', {
+      ...metadata,
       retrySafe: true,
       txHashes,
       reason: errorMessage(error) || 'spend rejected before broadcast',
     });
   }
 
-  if (POST_BROADCAST_UNKNOWN.has(name) || UNKNOWN_MESSAGE.test(errorMessage(error))) {
-    return outcome('hold-unknown', {
-      retrySafe: false,
-      txHashes,
-      txHash,
-      reason: errorMessage(error) || 'settlement outcome unknown',
-    });
-  }
-
-  return outcome('released', {
-    retrySafe: true,
+  return outcome('hold-unknown', {
+    ...metadata,
+    retrySafe: false,
     txHashes,
     txHash,
-    reason: errorMessage(error) || 'definite pre-broadcast failure',
+    reason: errorMessage(error) || 'settlement outcome unknown',
   });
 }
 
@@ -201,32 +228,56 @@ export function classifySpendError(error: unknown): SpendOutcome {
  *
  * A result is `settled` only with a successful receipt and every required
  * EVM tx hash (`0x` + 64 hex). Invalid hashes never settle. Missing
- * confirmation after a hash is returned stays `hold-unknown`.
+ * confirmation after a hash is returned stays `hold-unknown`. A revert must
+ * identify one valid reverted transaction; other charged or unresolved legs
+ * keep the full hold until explicitly reconciled.
+ * A queued error takes precedence over its outer receipt: a successful
+ * authorization transaction does not prove that the transfer executed.
+ * Classify a later verified execution receipt separately from that error.
  */
 export function classifySpendAttempt(input: ClassifySpendAttemptInput): SpendOutcome {
-  const hashes = collectInputHashes(input);
-  const amount = toBigInt(input.amount);
-  const fee = toBigInt(input.fee);
+  const receipt = input.receipt ??
+    (errorName(input.error) === 'X402PaidRequestError' ? errorReceipt(input.error) : undefined);
+  const candidates = [
+    input.txHash,
+    receipt?.transactionHash,
+    receipt?.txHash,
+    ...(input.txHashes ? Array.from(input.txHashes) : []),
+    ...errorHashCandidates(input.error),
+  ];
+  const hashes = uniqueValidHashes(candidates);
+  const metadata = errorMetadata(input.error);
+  const amount = toBigInt(input.amount ?? metadata.amount);
+  const fee = toBigInt(input.fee ?? metadata.fee);
   const base = {
-    chainId: input.chainId,
+    chainId: input.chainId ?? metadata.chainId,
     amount,
     fee,
-    idempotencyKey: input.idempotencyKey,
+    idempotencyKey: input.idempotencyKey ?? metadata.idempotencyKey,
   };
 
-  if (input.error !== undefined && input.error !== null) {
-    const classified = classifySpendError(input.error);
-    return {
-      ...classified,
+  if (errorName(input.error) === 'X402SettlementQueuedError') {
+    return outcome('hold-unknown', {
       ...base,
-      txHashes: uniqueValidHashes([...classified.txHashes, ...hashes]),
-      txHash: classified.txHash ?? hashes[0],
-      idempotencyKey: input.idempotencyKey ?? classified.idempotencyKey,
-    };
+      retrySafe: false,
+      txHashes: hashes,
+      reason: errorMessage(input.error) || 'queued authorization has not executed the transfer',
+    });
   }
 
-  const status = receiptStatus(input.receipt);
+  const status = receiptStatus(receipt);
+  const hasConfirmedFee = isEvmTxHash(errorFields(input.error).confirmedFeeTxHash);
+  const required = candidates.filter((value) => value !== undefined && value !== null && value !== '');
+  const requiredValid = required.length > 0 && required.every(isEvmTxHash);
   if (status === 'reverted') {
+    if (hasConfirmedFee || !requiredValid || hashes.length !== 1) {
+      return outcome('hold-unknown', {
+        ...base,
+        retrySafe: false,
+        txHashes: hashes,
+        reason: 'revert receipt does not confirm every required transaction is uncharged',
+      });
+    }
     return outcome('released', {
       ...base,
       retrySafe: true,
@@ -234,14 +285,6 @@ export function classifySpendAttempt(input: ClassifySpendAttemptInput): SpendOut
       reason: 'transaction reverted on-chain',
     });
   }
-
-  const required = [
-    input.txHash,
-    input.receipt?.transactionHash,
-    input.receipt?.txHash,
-    ...(input.txHashes ? Array.from(input.txHashes) : []),
-  ].filter((value): value is string => typeof value === 'string' && value.length > 0);
-  const requiredValid = required.length > 0 && required.every((value) => isEvmTxHash(value));
 
   if (status === 'success') {
     if (requiredValid && hashes.length > 0) {
@@ -258,6 +301,23 @@ export function classifySpendAttempt(input: ClassifySpendAttemptInput): SpendOut
       txHashes: hashes,
       reason: 'receipt claimed success without a valid EVM transaction hash',
     });
+  }
+
+  if (input.error !== undefined && input.error !== null) {
+    const classified = classifySpendError(input.error);
+    const definiteRevert = errorName(input.error) === 'X402SettlementRevertedError' &&
+      !hasConfirmedFee && requiredValid && hashes.length === 1;
+    const mustHold = classified.status === 'released' && required.length > 0 && !definiteRevert;
+    return {
+      ...classified,
+      ...base,
+      status: mustHold ? 'hold-unknown' : classified.status,
+      retrySafe: mustHold ? false : classified.retrySafe,
+      reason: mustHold ? 'broadcast evidence without complete settlement confirmation' : classified.reason,
+      txHashes: hashes,
+      txHash: hashes[0],
+      idempotencyKey: input.idempotencyKey ?? classified.idempotencyKey,
+    };
   }
 
   if (hashes.length > 0) {
@@ -278,10 +338,10 @@ export function classifySpendAttempt(input: ClassifySpendAttemptInput): SpendOut
     });
   }
 
-  return outcome('released', {
+  return outcome('hold-unknown', {
     ...base,
-    retrySafe: true,
+    retrySafe: false,
     txHashes: [],
-    reason: 'no broadcast evidence',
+    reason: 'settlement is unconfirmed; no definite pre-broadcast failure',
   });
 }

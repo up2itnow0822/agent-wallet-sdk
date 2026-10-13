@@ -11,6 +11,8 @@
  *   - Raydium: https://docs.raydium.io/raydium/token-pairs-and-liquidity
  */
 
+import { parseAmount } from './decimals.js';
+
 // ─── Well-known Solana token mint addresses ───────────────────────────────────
 //
 // All addresses are base-58 encoded Solana public keys.
@@ -295,27 +297,21 @@ export class SolanaWallet {
    * @param amount - Lamports (bigint) OR SOL amount as string (e.g. "1.5")
    */
   async sendSol(to: string, amount: string | bigint): Promise<SolanaTxResult> {
+    const lamports = parseAmount(amount, 9);
+    if (lamports <= 0n) {
+      throw new Error('SolanaWallet: transfer amount must be greater than zero.');
+    }
+
     const { PublicKey, SystemProgram, Transaction, sendAndConfirmTransaction } =
       await loadSolanaWeb3();
     const connection = await this.getConnection();
     const keypair = await this.getKeypair();
 
-    let lamports: bigint;
-    if (typeof amount === 'string') {
-      // Parse SOL string (9 decimals)
-      const parts = amount.split('.');
-      const intPart = BigInt(parts[0] || '0');
-      const fracStr = (parts[1] ?? '').padEnd(9, '0').slice(0, 9);
-      lamports = intPart * 1_000_000_000n + BigInt(fracStr);
-    } else {
-      lamports = amount;
-    }
-
     const transaction = new Transaction().add(
       SystemProgram.transfer({
         fromPubkey: keypair.publicKey,
         toPubkey: new PublicKey(to),
-        lamports: Number(lamports),
+        lamports,
       })
     );
 
@@ -348,15 +344,9 @@ export class SolanaWallet {
     const mintInfo = await splToken.getMint(connection, mintPubkey);
     const { decimals } = mintInfo;
 
-    // Parse amount
-    let rawAmount: bigint;
-    if (typeof amount === 'string') {
-      const parts = amount.split('.');
-      const intPart = BigInt(parts[0] || '0');
-      const fracStr = (parts[1] ?? '').padEnd(decimals, '0').slice(0, decimals);
-      rawAmount = intPart * (10n ** BigInt(decimals)) + BigInt(fracStr);
-    } else {
-      rawAmount = amount;
+    const rawAmount = parseAmount(amount, decimals);
+    if (rawAmount <= 0n) {
+      throw new Error('SolanaWallet: transfer amount must be greater than zero.');
     }
 
     // Get sender's associated token account

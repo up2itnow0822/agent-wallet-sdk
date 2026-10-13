@@ -34,15 +34,16 @@ import {
   createWallet,
   setSpendPolicy,
   createX402Client,
-  NATIVE_TOKEN,
   USDC_ADDRESSES,
   DEFAULT_SUPPORTED_NETWORKS,
 } from './index.js';
-import { createWalletClient, http, parseUnits } from 'viem';
+import { createWalletClient, http, isAddress } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
+import { toRaw } from './tokens/decimals.js';
 import { base, mainnet, arbitrum, optimism, polygon, baseSepolia } from 'viem/chains';
 import type { Address, Hex } from 'viem';
 import type { AgentWalletConfig } from './types.js';
+import type { X402PaymentRequirements } from './x402/types.js';
 
 // ─── Chain registry ────────────────────────────────────────────────────────
 
@@ -151,18 +152,44 @@ const USDC_DECIMALS = 6;
 
 /**
  * Parse a human-readable USDC amount (e.g. "1.50") into base units (bigint).
- * Returns `undefined` if the string is falsy or not a valid number.
+ * Only omitted or blank settings return `undefined`. A configured value must
+ * be a non-negative plain decimal with at most six fractional digits.
  *
  * @param value - Decimal string such as "0.50" or "100".
  */
-function parseUsdc(value: string | undefined): bigint | undefined {
-  if (!value || value.trim() === '') return undefined;
-  try {
-    return parseUnits(value.trim(), USDC_DECIMALS);
-  } catch {
-    console.warn(`[walletFromEnv] Could not parse USDC amount: "${value}"`);
-    return undefined;
+function parseUsdc(value: string | undefined, variableName: string): bigint | undefined {
+  const normalized = value?.trim();
+  if (!normalized) return undefined;
+  if (!/^\d+(?:\.\d{1,6})?$/.test(normalized)) {
+    throw new Error(
+      `[environment] ${variableName} must be a non-negative decimal USDC amount ` +
+      'with at most 6 fractional digits.',
+    );
   }
+  return toRaw(normalized, USDC_DECIMALS);
+}
+
+/** USDC-denominated settings cannot safely fall back to a token with other units. */
+function walletUsdc(wallet: ReturnType<typeof createWallet>): { network: string; token: Address } {
+  const chainId = wallet.chain?.id;
+  const entry = Object.entries(USDC_ADDRESSES).find(([network]) => (
+    Number(network.split(':')[1]) === chainId
+  ));
+  if (!entry) {
+    throw new Error('[environment] No configured USDC deployment for the wallet chain.');
+  }
+  return { network: entry[0], token: entry[1] };
+}
+
+/** Empty env settings are omitted; every entry in a configured list must be an address. */
+function recipientAllowlist(): Set<string> | undefined {
+  const value = process.env.SPEND_ALLOWLIST;
+  if (!value || value.trim() === '') return undefined;
+  const recipients = value.split(',').map((address) => address.trim());
+  if (recipients.some((address) => !isAddress(address, { strict: false }))) {
+    throw new Error('[environment] SPEND_ALLOWLIST must contain comma-separated recipient addresses.');
+  }
+  return new Set(recipients.map((address) => address.toLowerCase()));
 }
 
 // ─── Public API ────────────────────────────────────────────────────────────
@@ -256,7 +283,8 @@ export function walletFromEnv(options?: {
  * Reads:
  * - **SPEND_LIMIT_PER_TX** — maximum USDC per single transaction (e.g. "1.00")
  * - **SPEND_LIMIT_DAILY**  — maximum USDC per 24-hour period (e.g. "10.00")
- * - **SPEND_ALLOWLIST**    — comma-separated ERC-20 token addresses to restrict
+ * - **SPEND_ALLOWLIST**    — validated recipient addresses; enforced by
+ *   `x402FromEnv()` only. The on-chain spending policy has no recipient field.
  *
  * If neither limit is set, logs a warning and falls back to queue-for-approval
  * mode (perTxLimit = 0, periodLimit = 0) so all agent transactions must be
@@ -265,6 +293,8 @@ export function walletFromEnv(options?: {
  * If only one limit is set, the omitted dimension is copied from the one that
  * was provided. On-chain, 0 means "no autonomous spending" on that dimension,
  * so writing 0 for an omitted optional limit would disable every payment.
+ * Blank settings are omitted. Invalid nonempty limits throw before any policy
+ * write; amounts must be plain non-negative decimals with up to six fractional digits.
  *
  * @param wallet - Wallet returned by `walletFromEnv()` (or `createWallet()`).
  * @returns Promise that resolves to the on-chain tx hash of the policy update.
@@ -275,19 +305,10 @@ export function walletFromEnv(options?: {
  * ```
  */
 export async function setPolicyFromEnv(wallet: ReturnType<typeof createWallet>): Promise<string> {
-  const perTxLimit = parseUsdc(process.env.SPEND_LIMIT_PER_TX);
-  const periodLimit = parseUsdc(process.env.SPEND_LIMIT_DAILY);
-
-  // Determine which USDC token address to use for this chain
-  const chainId = wallet.chain.id;
-  const networkKey = Object.keys(USDC_ADDRESSES).find((k) => {
-    const parts = k.split(':');
-    return parts.length === 2 && parseInt(parts[1], 10) === chainId;
-  });
-  // Use USDC if found for this chain, otherwise fall back to native ETH (zero address)
-  const token: Address = networkKey
-    ? (USDC_ADDRESSES[networkKey] as Address)
-    : NATIVE_TOKEN;
+  recipientAllowlist();
+  const perTxLimit = parseUsdc(process.env.SPEND_LIMIT_PER_TX, 'SPEND_LIMIT_PER_TX');
+  const periodLimit = parseUsdc(process.env.SPEND_LIMIT_DAILY, 'SPEND_LIMIT_DAILY');
+  const { token } = walletUsdc(wallet);
 
   const limits = resolveEnvSpendLimits(perTxLimit, periodLimit);
 
@@ -332,8 +353,17 @@ export async function setPolicyFromEnv(wallet: ReturnType<typeof createWallet>):
  * - **X402_GLOBAL_DAILY_LIMIT**   — total daily USDC budget across all x402
  *   services (decimal, e.g. "5.00")
  * - **X402_PER_REQUEST_MAX**      — per-request USDC ceiling (decimal)
+ * - **SPEND_ALLOWLIST**           — optional comma-separated merchant recipient
+ *   addresses. A disallowed merchant is rejected before any transfer. The fixed
+ *   SDK protocol-fee collector is permitted separately when the merchant is allowed.
  *
- * Sensible defaults: supports all 10 mainnet x402 chains, unlimited daily spend
+ * Only the registry USDC address on the wallet's chain is auto-paid, and that
+ * network must be enabled. Unknown USDC deployments are rejected. Token symbols
+ * and other tokens are not accepted under these USDC-denominated budgets.
+ * Blank limits are omitted; invalid nonempty limits throw before client creation.
+ * Limits use exact non-negative decimal USDC amounts with up to six fractional digits.
+ *
+ * Sensible defaults: enables the wallet's supported mainnet, unlimited daily spend
  * (rely on the agent's on-chain spend policy as the hard limit), 1 auto-retry.
  *
  * @param wallet - Wallet returned by `walletFromEnv()` (or `createWallet()`).
@@ -346,21 +376,28 @@ export async function setPolicyFromEnv(wallet: ReturnType<typeof createWallet>):
  * ```
  */
 export function x402FromEnv(wallet: ReturnType<typeof createWallet>): ReturnType<typeof createX402Client> {
+  const { network, token } = walletUsdc(wallet);
+  const recipients = recipientAllowlist();
   // Supported networks — override with comma-separated list or use all defaults
   const networksEnv = process.env.X402_SUPPORTED_NETWORKS;
-  const supportedNetworks: string[] = networksEnv
+  const enabledNetworks: string[] = networksEnv
     ? networksEnv.split(',').map((s: string) => s.trim()).filter(Boolean)
     : [...DEFAULT_SUPPORTED_NETWORKS];
+  const supportedNetworks = enabledNetworks.filter((enabled) => enabled === network);
 
   // Global daily limit
-  const globalDailyLimitUsdc = parseUsdc(process.env.X402_GLOBAL_DAILY_LIMIT);
-  const globalPerRequestMaxUsdc = parseUsdc(process.env.X402_PER_REQUEST_MAX);
+  const globalDailyLimitUsdc = parseUsdc(process.env.X402_GLOBAL_DAILY_LIMIT, 'X402_GLOBAL_DAILY_LIMIT');
+  const globalPerRequestMaxUsdc = parseUsdc(process.env.X402_PER_REQUEST_MAX, 'X402_PER_REQUEST_MAX');
 
   return createX402Client(wallet, {
     supportedNetworks,
+    supportedAssets: { [network]: [token] },
     ...(globalDailyLimitUsdc !== undefined && { globalDailyLimit: globalDailyLimitUsdc }),
     ...(globalPerRequestMaxUsdc !== undefined && { globalPerRequestMax: globalPerRequestMaxUsdc }),
     autoPay: true,
     maxRetries: 1,
+    ...(recipients && {
+      onBeforePayment: (requirement: X402PaymentRequirements) => recipients.has(requirement.payTo.toLowerCase()),
+    }),
   });
 }

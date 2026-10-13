@@ -64,6 +64,11 @@ policy.applyOutcome(reserved.reservation, outcome);
 
 `check()` still exists as a reserve-then-commit wrapper. Prefer reserve / execute / `applyOutcome()` so an unknown broadcast cannot free the hold. A timer never unlocks `hold-unknown`.
 
+Only `reserved` authorizes a new execution. `existing` returns the earlier
+attempt for observation or reconciliation. The security repairs change retry,
+metadata, bridge and swap behavior; read the [migration notes](docs/security-remediation.md)
+before adopting this branch.
+
 ## Install
 
 ```bash
@@ -155,6 +160,7 @@ npm ci
 npm run build
 npm test
 npm run lint
+npm audit --audit-level=high
 ```
 
 The test suite covers the core SDK plus x402, policy, receipt, token, identity,
@@ -172,6 +178,8 @@ external payment endpoint is available.
 
 - Report vulnerabilities through the process in
   [`SECURITY.md`](SECURITY.md).
+- Security changes, caller migrations and the outstanding live GitHub ruleset
+  action are tracked in [`docs/security-remediation.md`](docs/security-remediation.md).
 - Contribution setup and review rules live in
   [`CONTRIBUTING.md`](CONTRIBUTING.md).
 - Public issues are tracked in the

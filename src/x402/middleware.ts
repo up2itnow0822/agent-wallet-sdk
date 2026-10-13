@@ -3,6 +3,11 @@ import type { X402ClientConfig } from './types.js';
 import { X402Client } from './client.js';
 import { toReplayableFetchArgs, withFailClosedRedirect } from './fetch-args.js';
 
+/** Native-fetch-compatible execution and recovery on one retained payment client. */
+export type X402Fetch = typeof globalThis.fetch & {
+  readonly reconcileSubmission: X402Client['reconcileSubmission'];
+};
+
 /**
  * [MAX-ADDED] Create an x402-aware HTTP client.
  *
@@ -33,11 +38,12 @@ export function createX402Client(wallet: any, config?: X402ClientConfig): X402Cl
 export function createX402Fetch(
   wallet: any,
   config?: X402ClientConfig
-): typeof globalThis.fetch {
+): X402Fetch {
   const client = new X402Client(wallet, config);
-  return (input: string | URL | Request, init?: RequestInit) => {
+  const fetch: typeof globalThis.fetch = (input: string | URL | Request, init?: RequestInit) => {
     return client.fetch(input, init);
   };
+  return Object.assign(fetch, { reconcileSubmission: client.reconcileSubmission.bind(client) });
 }
 
 /**
@@ -52,10 +58,10 @@ export function wrapWithX402(
   fetchFn: typeof globalThis.fetch,
   wallet: any,
   config?: X402ClientConfig
-): typeof globalThis.fetch {
+): X402Fetch {
   const wrappedClient = new X402Client(wallet, config);
 
-  return async (input: string | URL | Request, init?: RequestInit) => {
+  const fetch: typeof globalThis.fetch = async (input: string | URL | Request, init?: RequestInit) => {
     const { url, init: replayInit } = await toReplayableFetchArgs(input, init);
     const requestInit = withFailClosedRedirect(replayInit, init);
     const response = await fetchFn(url, requestInit);
@@ -66,4 +72,5 @@ export function wrapWithX402(
 
     return wrappedClient.settle402AndRetry(response, url, requestInit, fetchFn);
   };
+  return Object.assign(fetch, { reconcileSubmission: wrappedClient.reconcileSubmission.bind(wrappedClient) });
 }

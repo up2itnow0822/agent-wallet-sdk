@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { zeroAddress, type Address } from 'viem';
+import { encodeAbiParameters, encodeEventTopics, zeroAddress, type Address } from 'viem';
 
 // ─── Mock state ───
 const mockReadFns: Record<string, any> = {};
@@ -43,6 +43,7 @@ const {
   batchAgentTransfer,
   getActivityHistory,
   NATIVE_TOKEN,
+  AgentAccountV2Abi,
 } = await import('../src/index.js');
 
 // ─── Constants ───
@@ -139,7 +140,7 @@ describe('setOperator', () => {
 describe('agentExecute', () => {
   beforeEach(() => {
     mockReadFns.pendingNonce = vi.fn().mockResolvedValue(0n);
-    mockWaitForReceipt.mockResolvedValue({ logs: [] });
+    mockWaitForReceipt.mockResolvedValue({ status: 'success', logs: [] });
   });
 
   it('executes a transaction', async () => {
@@ -159,6 +160,28 @@ describe('agentExecute', () => {
     mockWriteFns.agentExecute = vi.fn().mockResolvedValue(TX_HASH);
     await agentExecute(makeWallet(), { to: TOKEN, value: 0n, data: '0xdeadbeef' });
     expect(mockWriteFns.agentExecute).toHaveBeenCalledWith([TOKEN, 0n, '0xdeadbeef'], expect.objectContaining({ value: 0n, chain: expect.objectContaining({ id: 8453 }) }));
+  });
+
+  it('does not report a reverted transaction as executed', async () => {
+    mockWriteFns.agentExecute = vi.fn().mockResolvedValue(TX_HASH);
+    mockWaitForReceipt.mockResolvedValue({ status: 'reverted', logs: [] });
+    await expect(agentExecute(makeWallet(), { to: OPERATOR })).rejects.toMatchObject({ txHash: TX_HASH });
+  });
+
+  it('does not report an unconfirmed receipt as executed', async () => {
+    mockWriteFns.agentExecute = vi.fn().mockResolvedValue(TX_HASH);
+    mockWaitForReceipt.mockResolvedValue({ status: undefined, logs: [] });
+    await expect(agentExecute(makeWallet(), { to: OPERATOR })).rejects.toMatchObject({ txHash: TX_HASH });
+  });
+
+  it('recognizes an actual wallet queue event and returns its pending ID', async () => {
+    mockWriteFns.agentExecute = vi.fn().mockResolvedValue(TX_HASH);
+    mockWaitForReceipt.mockResolvedValue({ status: 'success', logs: [{
+      address: ACCOUNT,
+      topics: encodeEventTopics({ abi: AgentAccountV2Abi, eventName: 'TransactionQueued', args: { txId: 7n, to: OPERATOR.toLowerCase() as Address } }),
+      data: encodeAbiParameters([{ type: 'uint256' }, { type: 'address' }, { type: 'uint256' }], [0n, TOKEN.toLowerCase() as Address, 10n]),
+    }] });
+    expect(await agentExecute(makeWallet(), { to: OPERATOR })).toMatchObject({ executed: false, pendingTxId: 7n, txHash: TX_HASH });
   });
 });
 

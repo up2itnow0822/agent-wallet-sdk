@@ -6,6 +6,7 @@ export {
 export type {
   AgentServiceEndpoint, SupportedTrustMechanism, AgentRegistrationRef,
   AgentRegistrationFile, AgentModelMetadata, AgentIdentity,
+  AgentURIResolver, AgentURIResolverContext, AgentURIResolutionOptions,
   MetadataEntry, ERC8004ClientConfig, RegistrationResult, SupportedChain,
 } from './erc8004.js';
 

@@ -119,11 +119,11 @@ describe('bytes32ToSolanaPubkey', () => {
     const BYTES32 = '0x0000000000000000000000000000000000000000000000000000000000000001' as `0x${string}`;
 
     const result = bytes32ToSolanaPubkey(BYTES32);
-    expect(result).toBeTruthy();
-    expect(result.length).toBeGreaterThanOrEqual(1);
-    expect(result.length).toBeLessThanOrEqual(44);
-    // Only valid base58 chars
-    expect(result).toMatch(/^[123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz]+$/);
+    expect(result).toBe('11111111111111111111111111111112');
+  });
+
+  it('retains all 32 leading zero bytes', () => {
+    expect(bytes32ToSolanaPubkey(`0x${'00'.repeat(32)}`)).toBe('11111111111111111111111111111111');
   });
 
   it('throws on non-32-byte input', () => {

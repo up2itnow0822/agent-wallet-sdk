@@ -1,80 +1,55 @@
-# Atomic Settlement Test — Base Sepolia
+# Base Sepolia Receipt Inspector
 
-Proof of atomic settlement with on-chain attestation verification using the AgentWallet SDK's x402 payment flow.
+This local testnet example inspects transaction receipts. It has no signing
+account, requires no private key, and performs no outgoing token transfers.
+`POST /settle` always returns `503` and issues no payment instructions.
 
-## Live Endpoint
+Settlement is disabled because the example does not implement a durable
+challenge store or atomically consume a transfer identity. A public receipt
+cannot establish which request was paid, and a memory map cannot prevent replay
+after a restart. The former fee forwarding flow was a separate transaction and
+did not implement atomic settlement.
 
-```
-https://dexter-settlement-test-production.up.railway.app
-```
-
-## Verified On-Chain Transactions
-
-| Step | Transaction | Status |
-|---|---|---|
-| USDC Payment | [`0xbba6c34a...`](https://sepolia.basescan.org/tx/0xbba6c34ad6b11cc4e511317ca38553df903dcbe989ee47e45b5c48f3af7e4334) | ✅ Confirmed |
-| Fee Routing (0.77%) | [`0x9a5e450c...`](https://sepolia.basescan.org/tx/0x9a5e450c1080a2478ea22792b6ab034974d8f99072808f83354c98451441733a) | ✅ Confirmed |
-
-## How It Works
-
-1. **Request settlement** → Server returns `402 Payment Required` with USDC payment instructions
-2. **Send USDC** on Base Sepolia to the settlement address
-3. **Complete settlement** → Server verifies the on-chain transfer, checks attestation, routes fees, confirms atomically
-
-## Settlement Flow
-
-```
-Agent A                    Settlement Server              Base Sepolia
-  │                              │                            │
-  ├──POST /settle {amount}──────►│                            │
-  │◄─────── 402 + payment req────│                            │
-  │                              │                            │
-  ├──USDC transfer──────────────────────────────────────────►│
-  │                              │                            │
-  ├──POST /settle {paymentTx}───►│                            │
-  │                              ├──verify tx on-chain───────►│
-  │                              │◄──receipt + logs────────────│
-  │                              ├──route fee to collector───►│
-  │◄─────── 200 settled──────────│                            │
-```
+Before any settlement implementation can be enabled, it must bind each payment
+to an issued challenge and its sender, recipient, chain, token, and exact positive
+bounded amount. It must consume `(chainId, transactionHash, logIndex)` atomically
+and durably across concurrent requests and restarts. Fees and trade/payment
+outcomes need a reviewed atomic route or explicit independent outcome handling.
+These features are not implemented in this example.
 
 ## API
 
-### `GET /docs`
-Returns full API documentation.
+| Endpoint | Behavior |
+|---|---|
+| `GET /docs` | Describes the read-only API and disabled settlement path |
+| `GET /health` | Checks that the configured RPC reports Base Sepolia, chain 84532 |
+| `POST /settle` | Always returns 503 with `settlementEnabled: false` |
+| `GET /attestation/:txHash` | Shows receipt status and USDC Transfer logs; `paymentAuthorized` and `verified` remain false |
+| `GET /settlements` | Returns an empty list while settlement is disabled |
 
-### `GET /health`
-Server health + USDC balance.
-
-### `POST /settle`
-```json
-// Step 1: Request (returns 402)
-{ "amount": "1.00", "from": "0xYourAddress" }
-
-// Step 2: Complete (returns 200)
-{ "amount": "1.00", "from": "0xYourAddress", "paymentTxHash": "0x..." }
-```
-
-### `GET /attestation/:txHash`
-Verify on-chain attestation for any transaction.
+The historical `/attestation` route name is retained for compatibility. Its
+response is diagnostic receipt data, not a payment or settlement proof. Receipt
+inspection can be repeated because it never authorizes a service or moves funds.
 
 ## Run Locally
 
-```bash
-cp .env.example .env  # Add your Base Sepolia private key
-npm install
-npx tsx server.ts
-```
-
-## Self-Test
+From the repository root, install the example's optional dependencies separately
+if needed (`express`, `dotenv`, and `tsx` are not SDK dependencies), then run:
 
 ```bash
-npx tsx self-test.ts
+cp examples/settlement-test/.env.example .env
+npx tsx examples/settlement-test/server.ts
 ```
 
-## Chain Details
+The server binds to `127.0.0.1` and supports only Base Sepolia. The token is the
+Base Sepolia USDC contract `0x036CbD53842c5426634e7929541eC2318f3dCF7e`.
+No hosted deployment is verified by this example.
 
-- **Network:** Base Sepolia (Chain ID: 84532)
-- **USDC:** `0x036CbD53842c5426634e7929541eC2318f3dCF7e`
-- **Settlement Fee:** 0.77%
-- **USDC Faucet:** https://faucet.circle.com/
+## Read-Only Probe
+
+```bash
+npx tsx examples/settlement-test/self-test.ts
+```
+
+The probe checks the local server and verifies that settlement submission is
+disabled. It submits no on-chain transactions.
