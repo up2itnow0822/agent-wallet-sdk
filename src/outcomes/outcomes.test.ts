@@ -247,6 +247,28 @@ describe('classifySpendAttempt', () => {
     expectReleased(outcome);
   });
 
+  it('releases a confirmed agent-execution revert instead of holding the reservation', () => {
+    const error = Object.assign(new Error(`Agent execution reverted: ${VALID_HASH}`), {
+      name: 'AgentExecutionError',
+      txHash: VALID_HASH,
+      executionStatus: 'reverted',
+    });
+    const classified = classifySpendError(error);
+    expectReleased(classified);
+    expect(classified.txHash).toBe(VALID_HASH);
+    expectReleased(classifySpendAttempt({ error }));
+  });
+
+  it('holds an unconfirmed agent-execution error carrying the submitted hash', () => {
+    const error = Object.assign(new Error(`Agent execution unknown: ${VALID_HASH}`), {
+      name: 'AgentExecutionError',
+      txHash: VALID_HASH,
+      executionStatus: 'unknown',
+    });
+    expectHoldUnknown(classifySpendError(error));
+    expectHoldUnknown(classifySpendAttempt({ error }));
+  });
+
   it('holds a named pre-broadcast error when the attempt includes a transaction hash', () => {
     const outcome = classifySpendAttempt({
       error: new X402PaymentError('submission failed', REQUIREMENTS),

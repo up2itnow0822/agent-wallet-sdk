@@ -781,6 +781,67 @@ describe('X402Client retry idempotency', () => {
     expect(client.getDailySpendSummary().global).toBe(1_007_700n);
   });
 
+  it.each(['status', 'throw'] as const)(
+    'does not let a late proof-delivery %s overwrite a recorded success',
+    async (failureMode) => {
+      let release: (value: { txHash: `0x${string}` }) => void = () => {};
+      const gate = new Promise<{ txHash: `0x${string}` }>((resolve) => {
+        release = resolve;
+      });
+      vi.spyOn(X402Client.prototype as any, 'executePayment').mockReturnValue(gate);
+
+      const proofs: Array<(result: 'ok' | 'fail') => void> = [];
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+        const headers = new Headers(init?.headers);
+        if (headers.get('X-PAYMENT')) {
+          const outcome = new Promise<'ok' | 'fail'>((resolve) => {
+            proofs.push(resolve);
+          });
+          if ((await outcome) === 'ok') {
+            return new Response('paid', { status: 200 });
+          }
+          if (failureMode === 'throw') {
+            throw new TypeError('proof delivery reset');
+          }
+          return new Response('unavailable', { status: 503 });
+        }
+        return new Response(null, {
+          status: 402,
+          headers: { 'payment-required': btoa(JSON.stringify(paymentRequired())) },
+        });
+      });
+      const client = new X402Client(mockWallet);
+
+      const pending = Promise.allSettled([
+        client.fetch(url, { method: 'POST' }),
+        client.fetch(url, { method: 'POST' }),
+      ]);
+      release({ txHash });
+      await vi.waitFor(() => {
+        expect(proofs).toHaveLength(2);
+      });
+      proofs[0]('ok');
+      await vi.waitFor(() => {
+        const entry = [...(client as any).paymentSettlements.values()][0];
+        expect(entry?.deliveryFailed).toBe(false);
+        expect(entry?.pendingDeliveries).toBe(1);
+      });
+      proofs[1]('fail');
+      await pending;
+
+      const entries = [...(client as any).paymentSettlements.values()];
+      expect(entries).toHaveLength(1);
+      expect(entries[0].status).toBe('confirmed');
+      expect(entries[0].deliveryFailed).toBe(false);
+      expect(entries[0].pendingDeliveries).toBe(0);
+      expect(entries[0].expiresAt).toBeGreaterThan(Date.now());
+
+      vi.spyOn(Date, 'now').mockReturnValue(Date.now() + X402_SETTLEMENT_RETRY_WINDOW_MS + 1);
+      (client as any).pruneSettlements();
+      expect((client as any).paymentSettlements.size).toBe(0);
+    },
+  );
+
   it('single-flights onBeforePayment and execute for concurrent same-intent retries', async () => {
     let releasePolicy: (value: boolean) => void = () => {};
     const policyGate = new Promise<boolean>((resolve) => {

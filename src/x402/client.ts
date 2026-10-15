@@ -164,6 +164,10 @@ type CachedSettlement = {
   submissionUnknown?: { phase: PaymentPhase; transfer?: PreparedTransfer };
   /** Confirmed transfers remain pinned while delivery failed or is still in flight. */
   pendingDeliveries?: number;
+  /**
+   * Sticky success flag: `false` once any concurrent proof delivery succeeded.
+   * A later failed or thrown delivery must not overwrite that success.
+   */
   deliveryFailed?: boolean;
   reconciling?: { txHash: Hash; promise: Promise<SettlementConfirmation> };
 };
@@ -672,10 +676,10 @@ export class X402Client {
         // downgrade. Unpaid `follow` opt-in does not authorize proof forwarding.
         redirect: requestInit?.redirect === 'manual' ? 'manual' : 'error',
       });
-      if (entry) entry.deliveryFailed = !retryResponse.ok;
+      this.recordProofDelivery(entry, retryResponse.ok);
       return retryResponse;
     } catch (cause) {
-      if (entry) entry.deliveryFailed = true;
+      this.recordProofDelivery(entry, false);
       const fee = this.feePhases.get(paymentKey);
       throw new X402PaidRequestError(
         paymentResult.txHash,
@@ -690,6 +694,21 @@ export class X402Client {
           entry.expiresAt = Date.now() + entry.retryWindowMs;
         }
       }
+    }
+  }
+
+  /**
+   * Proof-delivery outcomes are monotonic: a recorded success is never
+   * overwritten by a later non-2xx or thrown delivery of the same settlement.
+   */
+  private recordProofDelivery(entry: CachedSettlement | undefined, delivered: boolean): void {
+    if (!entry) return;
+    if (delivered) {
+      entry.deliveryFailed = false;
+      return;
+    }
+    if (entry.deliveryFailed !== false) {
+      entry.deliveryFailed = true;
     }
   }
 

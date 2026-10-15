@@ -79,10 +79,16 @@ integer budget. Unknown USDC deployments fail closed. Configure testnet
 networks explicitly. `SPEND_ALLOWLIST` is a comma-separated list of merchant
 recipient addresses. The fixed SDK protocol fee is a separate permitted debit
 only after the merchant passes the allowlist and is included in the budget.
-Configured caps must be non-negative decimal USDC strings with at most six
-fractional digits. Invalid nonempty values throw before client creation or
-policy writes; they cannot silently remove a limit. Blank optional settings
-retain their documented defaults, and explicit zero remains zero.
+Environment x402 and spend-limit caps (`X402_GLOBAL_DAILY_LIMIT`,
+`X402_PER_REQUEST_MAX`, `SPEND_LIMIT_PER_TX`, `SPEND_LIMIT_DAILY`) must be
+non-negative decimal USDC strings with at most six fractional digits.
+Eliza `X402_DAILY_LIMIT` is a non-negative integer in USDC base units parsed
+with `BigInt` (for example `50000000` is 50 USDC). A decimal such as `1.50`
+throws; `50` is 50 base units, not 50 USDC. Invalid nonempty values throw
+before client creation or policy writes; they cannot silently remove a limit.
+Blank optional settings retain their documented defaults (omitted or empty
+Eliza `X402_DAILY_LIMIT` keeps 50 USDC = `50000000`), and explicit zero
+remains zero.
 
 Reuse one config object for public Eliza helpers or one runtime object for the
 provider. The retained client preserves spend and unknown holds on refresh.

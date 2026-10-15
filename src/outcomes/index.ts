@@ -123,6 +123,23 @@ function receiptStatus(receipt?: SpendReceiptLike): 'success' | 'reverted' | 'un
   return 'unknown';
 }
 
+/**
+ * A confirmed on-chain revert with a single valid hash and no charged fee
+ * is definite not-charged. `AgentExecutionError` with `executionStatus:
+ * "reverted"` is the same evidence as `X402SettlementRevertedError`.
+ */
+function isConfirmedUnchargedRevert(
+  error: unknown,
+  requiredValid: boolean,
+  hashCount: number,
+  hasConfirmedFee = isEvmTxHash(errorFields(error).confirmedFeeTxHash),
+): boolean {
+  if (hasConfirmedFee || !requiredValid || hashCount !== 1) return false;
+  const name = errorName(error);
+  if (name === 'X402SettlementRevertedError') return true;
+  return name === 'AgentExecutionError' && errorFields(error).executionStatus === 'reverted';
+}
+
 function outcome(
   status: SpendOutcomeStatus,
   extras: Partial<SpendOutcome> & { retrySafe: boolean },
@@ -176,8 +193,7 @@ export function classifySpendError(error: unknown): SpendOutcome {
     return { ...classified, reason: errorMessage(error) || classified.reason };
   }
 
-  if (name === 'X402SettlementRevertedError' &&
-      !isEvmTxHash(errorFields(error).confirmedFeeTxHash) && requiredValid && txHashes.length === 1) {
+  if (isConfirmedUnchargedRevert(error, requiredValid, txHashes.length)) {
     return outcome('released', {
       ...metadata,
       retrySafe: true,
@@ -305,8 +321,9 @@ export function classifySpendAttempt(input: ClassifySpendAttemptInput): SpendOut
 
   if (input.error !== undefined && input.error !== null) {
     const classified = classifySpendError(input.error);
-    const definiteRevert = errorName(input.error) === 'X402SettlementRevertedError' &&
-      !hasConfirmedFee && requiredValid && hashes.length === 1;
+    const definiteRevert = isConfirmedUnchargedRevert(
+      input.error, requiredValid, hashes.length, hasConfirmedFee,
+    );
     const mustHold = classified.status === 'released' && required.length > 0 && !definiteRevert;
     return {
       ...classified,

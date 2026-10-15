@@ -208,6 +208,28 @@ describe('SpendingPolicy reserve/commit/release', () => {
     expect(policy.release(reserved.reservation!)).toBe(false);
   });
 
+  it('releases a confirmed agent-execution revert so the spend hold is not retained', async () => {
+    const policy = makePolicy({
+      rollingCap: { maxAmount: 100, windowMs: 86_400_000 },
+    });
+    const reserved = await policy.reserve(makePayment({ amount: 80 }));
+    const outcome = classifySpendAttempt({
+      error: Object.assign(new Error(`Agent execution reverted: ${VALID_HASH}`), {
+        name: 'AgentExecutionError',
+        txHash: VALID_HASH,
+        executionStatus: 'reverted',
+      }),
+    });
+    expect(outcome.status).toBe('released');
+    expect(outcome.retrySafe).toBe(true);
+
+    expect(policy.applyOutcome(reserved.reservation!, outcome)).toBe(true);
+    expect(reserved.reservation?.status).toBe('released');
+
+    const retried = await policy.reserve(makePayment({ amount: 80 }));
+    expect(retried.status).toBe('reserved');
+  });
+
   it('does not release a hold-unknown reservation, even twice', async () => {
     const policy = makePolicy({
       rollingCap: { maxAmount: 100, windowMs: 86_400_000 },
