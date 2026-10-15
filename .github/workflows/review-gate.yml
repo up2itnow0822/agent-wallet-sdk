@@ -13,9 +13,15 @@
 #      submitted after the PR's most recent base-branch change; or, for a
 #      clean pass (Codex submits no review when it has no findings), the
 #      Codex bot's own review-summary comment reports
-#      `Code Review | Completed | <full 40-char head sha>` and was updated
-#      after the last base change. Short SHAs are never accepted. A
-#      dismissed Codex review on this head blocks the clean-summary fallback.
+#      `Code Review | Completed | <head sha or unique prefix ≥7>` and was
+#      updated after the last base change. A Codex "Didn't find any major
+#      issues" issue comment also counts when it names a head-SHA prefix
+#      or was posted after the head commit's push time. Comments that
+#      mention a SHA that is not a prefix of the current head do not
+#      count. A dismissed Codex review on this head blocks the
+#      clean-summary fallback. Matchers are specified in
+#      scripts/review-gate-evidence.js (the workflow cannot check out PR
+#      content, so the helpers are inlined below).
 #      Findings arrive as review threads, which the ruleset's
 #      thread-resolution rule blocks separately.
 #   2. Waiver bound to this PR's label event and current base: an
@@ -122,8 +128,25 @@ jobs:
                 : '';
             }
 
+            async function withRetry(fn, label) {
+              const delays = [1000, 2000, 4000];
+              let last;
+              for (let i = 0; i <= delays.length; i++) {
+                try {
+                  return await fn();
+                } catch (err) {
+                  last = err;
+                  const status = err && err.status;
+                  if (!(status >= 500 && status <= 599) || i === delays.length) throw err;
+                  core.warning(`${label}: GitHub API ${status}, retrying in ${delays[i]}ms`);
+                  await new Promise(r => setTimeout(r, delays[i]));
+                }
+              }
+              throw last;
+            }
+
             async function createPending(headSha) {
-              await github.rest.checks.create({
+              await withRetry(() => github.rest.checks.create({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 name: CHECK_NAME,
@@ -133,7 +156,7 @@ jobs:
                   title: 'Evaluating Codex review',
                   summary: 'review-gate is evaluating current review evidence. Merge stays blocked until this check completes.',
                 },
-              });
+              }), `pending ${headSha.slice(0, 7)}`);
             }
 
             const shas = new Set();
@@ -228,6 +251,137 @@ jobs:
               return a !== '' && a === b;
             }
 
+            // Keep in sync with scripts/review-gate-evidence.js
+            function shaPrefixMatches(shown, headSha) {
+              const prefix = typeof shown === 'string' && /^[0-9a-f]{7,40}$/i.test(shown)
+                ? shown.toLowerCase()
+                : '';
+              const head = fullSha(headSha);
+              return prefix !== '' && head !== '' && head.startsWith(prefix);
+            }
+
+            const MENTIONED_SHA =
+              /`([0-9a-fA-F]{7,40})`|"commit_sha"\s*:\s*"([0-9a-fA-F]{7,40})"/g;
+
+            function mentionedShas(body) {
+              const found = [];
+              const text = body || '';
+              const re = new RegExp(MENTIONED_SHA.source, 'g');
+              let m;
+              while ((m = re.exec(text)) !== null) {
+                found.push((m[1] || m[2]).toLowerCase());
+              }
+              return found;
+            }
+
+            function mentionsNonHeadSha(body, headSha) {
+              return mentionedShas(body).some(s => !shaPrefixMatches(s, headSha));
+            }
+
+            function isCleanNoMajorIssuesBody(body) {
+              return /didn't find any major issues/i.test(body || '');
+            }
+
+            const SUMMARY_MARKER = '<!-- codex-pull-request-review-summary -->';
+            const COMPLETED_ROW =
+              /^\|[^|\n]*\bCode Review\b[^|\n]*\|[^|\n]*\bCompleted\b[^|\n]*\|\s*`([0-9a-fA-F]{7,40})`\s*\|/gm;
+
+            function summaryTableMarksHeadCompleted(body, headSha) {
+              const row = new RegExp(COMPLETED_ROW.source, 'gm');
+              let m;
+              while ((m = row.exec(body || '')) !== null) {
+                if (shaPrefixMatches(m[1], headSha)) return true;
+              }
+              return false;
+            }
+
+            function summaryStateMarksHeadCompleted(body, headSha) {
+              const m = /<!--\s*codex-review-state:v1\s+(\{.*?\})\s*-->/.exec(body || '');
+              if (!m) return false;
+              try {
+                const state = JSON.parse(m[1]);
+                const cr = state && state.code_review;
+                if (!cr || String(cr.status).toLowerCase() !== 'completed') return false;
+                return shaPrefixMatches(cr.commit_sha, headSha);
+              } catch (err) {
+                return false;
+              }
+            }
+
+            function summaryMarksHeadCompleted(body, headSha) {
+              const text = body || '';
+              if (!text.includes(SUMMARY_MARKER)) return false;
+              return summaryTableMarksHeadCompleted(text, headSha) ||
+                summaryStateMarksHeadCompleted(text, headSha);
+            }
+
+            function commentAcceptsCleanHead(comment, ctx) {
+              const body = (comment && comment.body) || '';
+              const updatedMs = Date.parse((comment && (comment.updated_at || comment.created_at)) || 0);
+              const createdMs = Date.parse((comment && comment.created_at) || 0);
+              const baseChangedMs = Number(ctx && ctx.baseChangedMs) || 0;
+              const headPushedMs = Number(ctx && ctx.headPushedMs) || 0;
+              const headSha = (ctx && ctx.headSha) || '';
+              if (!(updatedMs > baseChangedMs || createdMs > baseChangedMs)) return false;
+              if (mentionsNonHeadSha(body, headSha)) return false;
+              if (summaryMarksHeadCompleted(body, headSha)) return true;
+              if (isCleanNoMajorIssuesBody(body)) {
+                const mentionsHead = mentionedShas(body).some(s => shaPrefixMatches(s, headSha));
+                const postedAfterHead = headPushedMs > 0 && createdMs > headPushedMs;
+                return mentionsHead || postedAfterHead;
+              }
+              return false;
+            }
+
+            async function withRetry(fn, label) {
+              const delays = [1000, 2000, 4000];
+              let last;
+              for (let i = 0; i <= delays.length; i++) {
+                try {
+                  return await fn();
+                } catch (err) {
+                  last = err;
+                  const status = err && err.status;
+                  if (!(status >= 500 && status <= 599) || i === delays.length) throw err;
+                  core.warning(`${label}: GitHub API ${status}, retrying in ${delays[i]}ms`);
+                  await new Promise(r => setTimeout(r, delays[i]));
+                }
+              }
+              throw last;
+            }
+
+            async function headPushedMs(headSha) {
+              try {
+                const data = await github.graphql(
+                  `query($owner: String!, $name: String!, $oid: GitObjectID!) {
+                    repository(owner: $owner, name: $name) {
+                      object(oid: $oid) {
+                        ... on Commit { pushedDate committedDate }
+                      }
+                    }
+                  }`,
+                  { owner: context.repo.owner, name: context.repo.repo, oid: headSha }
+                );
+                const obj = data.repository && data.repository.object;
+                const iso = (obj && (obj.pushedDate || obj.committedDate)) || '';
+                const ms = Date.parse(iso);
+                if (Number.isFinite(ms) && ms > 0) return ms;
+              } catch (err) {
+                core.warning(`head push time GraphQL failed for ${headSha}: ${(err && err.message) || err}`);
+              }
+              const { data } = await github.rest.repos.getCommit({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: headSha,
+              });
+              const iso =
+                (data.commit && data.commit.committer && data.commit.committer.date) ||
+                (data.commit && data.commit.author && data.commit.author.date) ||
+                '';
+              const ms = Date.parse(iso);
+              return Number.isFinite(ms) ? ms : 0;
+            }
+
             function sameNumberSet(left, right) {
               if (left.size !== right.size) return false;
               for (const n of left) if (!right.has(n)) return false;
@@ -246,7 +400,7 @@ jobs:
             async function publishCheck(headSha, verdict, extra = {}) {
               const sha = fullSha(headSha);
               if (!sha) throw new Error('refusing to publish review-gate without a 40-character SHA');
-              await github.rest.checks.create({
+              await withRetry(() => github.rest.checks.create({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 name: CHECK_NAME,
@@ -257,7 +411,7 @@ jobs:
                   title: verdict.title,
                   summary: (extra.prefix || '') + verdict.summary + (extra.suffix || ''),
                 },
-              });
+              }), `publish ${sha.slice(0, 7)}`);
               core.info(`${sha.slice(0, 7)} -> ${verdict.conclusion}: ${verdict.title}`);
             }
 
@@ -450,17 +604,14 @@ jobs:
                 return isCodexUser(c.user) && /usage limits?/i.test(body);
               });
 
-              const SUMMARY_MARKER = '<!-- codex-pull-request-review-summary -->';
+              const headPushed = await headPushedMs(headSha);
               const cleanPassOnHead = comments.some(c => {
-                const body = c.body || '';
-                if (!isCodexUser(c.user) || !body.includes(SUMMARY_MARKER)) return false;
-                if (!(Date.parse(c.updated_at || c.created_at || 0) > baseChangedMs)) return false;
-                const row = /^\|[^|\n]*\bCode Review\b[^|\n]*\|[^|\n]*\bCompleted\b[^|\n]*\|\s*`([0-9a-fA-F]{40})`\s*\|/gm;
-                let m;
-                while ((m = row.exec(body)) !== null) {
-                  if (sameSha(m[1], headSha)) return true;
-                }
-                return false;
+                if (!isCodexUser(c.user)) return false;
+                return commentAcceptsCleanHead(c, {
+                  headSha,
+                  headPushedMs: headPushed,
+                  baseChangedMs,
+                });
               });
               // Clean-summary fallback is only a no-review/no-findings result.
               // Any Codex review on this head — including a dismissed one —
@@ -616,6 +767,22 @@ jobs:
                 ? value.toLowerCase()
                 : '';
             }
+            async function withRetry(fn, label) {
+              const delays = [1000, 2000, 4000];
+              let last;
+              for (let i = 0; i <= delays.length; i++) {
+                try {
+                  return await fn();
+                } catch (err) {
+                  last = err;
+                  const status = err && err.status;
+                  if (!(status >= 500 && status <= 599) || i === delays.length) throw err;
+                  core.warning(`${label}: GitHub API ${status}, retrying in ${delays[i]}ms`);
+                  await new Promise(r => setTimeout(r, delays[i]));
+                }
+              }
+              throw last;
+            }
             const shas = new Set(
               String(process.env.PENDING_SHAS || '')
                 .split(',')
@@ -628,7 +795,7 @@ jobs:
               if (sha) shas.add(sha);
             }
             for (const sha of shas) {
-              await github.rest.checks.create({
+              await withRetry(() => github.rest.checks.create({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 name: CHECK_NAME,
@@ -639,5 +806,5 @@ jobs:
                   title: 'Gate evaluation failed',
                   summary: 'review-gate crashed or was cancelled after posting a pending check. Fail-closed.',
                 },
-              });
+              }), `failed ${sha.slice(0, 7)}`);
             }
