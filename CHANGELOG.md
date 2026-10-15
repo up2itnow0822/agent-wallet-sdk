@@ -1,3 +1,11 @@
+## [Unreleased]
+
+### Security
+- Removed `smithery.yaml`. Its start command ran `npx -y @agentwallet/sdk mcp` and passed the user's agent key as `AGENT_PRIVATE_KEY`. `@agentwallet/sdk` is a third-party npm package, not this project's `agentwallet-sdk`. MCP belongs in [agentpay-mcp](https://github.com/up2itnow0822/agentpay-mcp). Rotate any wallet key ever entered through that Smithery listing.
+- Abstract x402 mainnet approved-facilitator list is now empty and fail-closed. The previous entry was the public Anvil/Hardhat first-deployment address, not a verified mainnet contract. Testnet still accepts that local-dev address. Do not treat it as an official Abstract mainnet facilitator.
+
+---
+
 ## [6.3.0] — 2026-10-11
 
 ### Added

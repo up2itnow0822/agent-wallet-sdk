@@ -45,8 +45,12 @@ export {
   AbstractDelegatedFacilitatorAdapter,
   ABSTRACT_CHAIN_IDS,
   ABSTRACT_USDC,
+  ABSTRACT_ANVIL_FACILITATOR,
   ABSTRACT_APPROVED_FACILITATORS,
+  ABSTRACT_TESTNET_APPROVED_FACILITATORS,
   ABSTRACT_SUPPORTED_CHAINS,
+  getAbstractApprovedFacilitators,
+  assertAbstractFacilitatorApproved,
 } from './chains/abstract/index.js';
 export type {
   AbstractDelegatedPaymentConfig,
