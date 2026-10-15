@@ -46,7 +46,6 @@ Codex Review: Didn't find any major issues. More of your lovely PRs please.
 **Reviewed commit:** \`982551f449\`
 `;
 
-const HEAD_PUSHED = Date.parse('2026-10-15T19:34:00Z');
 const BASE_CHANGED = 0;
 
 function accept(body: string, extra: Record<string, unknown> = {}) {
@@ -57,7 +56,7 @@ function accept(body: string, extra: Record<string, unknown> = {}) {
       updated_at: '2026-10-15T21:22:47Z',
       ...extra,
     },
-    { headSha: HEAD, headPushedMs: HEAD_PUSHED, baseChangedMs: BASE_CHANGED },
+    { headSha: HEAD, baseChangedMs: BASE_CHANGED },
   );
 }
 
@@ -113,7 +112,7 @@ describe('PR #87 Codex summary (the rejected case)', () => {
     expect(summaryMarksHeadCompleted(PR87_SUMMARY, OLDER)).toBe(false);
     expect(commentAcceptsCleanHead(
       { body: PR87_SUMMARY, created_at: '2026-10-15T21:22:45Z', updated_at: '2026-10-15T21:22:47Z' },
-      { headSha: OLDER, headPushedMs: HEAD_PUSHED, baseChangedMs: BASE_CHANGED },
+      { headSha: OLDER, baseChangedMs: BASE_CHANGED },
     )).toBe(false);
   });
 
@@ -132,17 +131,13 @@ describe('PR #87 clean no-major-issues receipt', () => {
     expect(accept(PR87_RECEIPT)).toBe(true);
   });
 
-  it('accepts a SHA-less no-major-issues comment posted after the head push', () => {
+  it('rejects a SHA-less no-major-issues comment even after the head exists', () => {
     const body = "Codex Review: Didn't find any major issues.";
-    expect(accept(body, { created_at: '2026-10-15T21:22:45Z' })).toBe(true);
-  });
-
-  it('rejects a SHA-less no-major-issues comment posted before the head push', () => {
-    const body = "Codex Review: Didn't find any major issues.";
+    expect(accept(body, { created_at: '2026-10-15T21:22:45Z' })).toBe(false);
     expect(accept(body, { created_at: '2026-10-15T19:00:00Z', updated_at: '2026-10-15T19:00:00Z' })).toBe(false);
   });
 
-  it('accepts a pre-push no-major-issues comment that names the head prefix', () => {
+  it('accepts a no-major-issues comment that names the head prefix', () => {
     expect(accept(PR87_RECEIPT, {
       created_at: '2026-10-15T19:00:00Z',
       updated_at: '2026-10-15T19:00:00Z',
@@ -151,6 +146,11 @@ describe('PR #87 clean no-major-issues receipt', () => {
 
   it('rejects a no-major-issues comment that names an older SHA', () => {
     const body = "Didn't find any major issues.\n**Reviewed commit:** `aaaaaaa`";
+    expect(accept(body)).toBe(false);
+  });
+
+  it('rejects a receipt that names both the head prefix and a different SHA', () => {
+    const body = `${PR87_RECEIPT}\nAlso saw \`${OLDER.slice(0, 7)}\`.`;
     expect(accept(body)).toBe(false);
   });
 });
@@ -164,7 +164,18 @@ describe('strict leftovers', () => {
   it('rejects evidence posted at or before the last base change', () => {
     expect(commentAcceptsCleanHead(
       { body: PR87_SUMMARY, created_at: '2026-10-15T21:22:45Z', updated_at: '2026-10-15T21:22:47Z' },
-      { headSha: HEAD, headPushedMs: HEAD_PUSHED, baseChangedMs: Date.parse('2026-10-15T22:00:00Z') },
+      { headSha: HEAD, baseChangedMs: Date.parse('2026-10-15T22:00:00Z') },
+    )).toBe(false);
+  });
+
+  it('never treats a prefix as some other commit — only the current head counts', () => {
+    const other = `982551f${'b'.repeat(33)}`;
+    expect(shaPrefixMatches('982551f', HEAD)).toBe(true);
+    expect(shaPrefixMatches('982551f', other)).toBe(true);
+    expect(accept(PR87_RECEIPT)).toBe(true);
+    expect(commentAcceptsCleanHead(
+      { body: PR87_RECEIPT, created_at: '2026-10-15T21:22:45Z', updated_at: '2026-10-15T21:22:47Z' },
+      { headSha: other, baseChangedMs: BASE_CHANGED },
     )).toBe(false);
   });
 });
@@ -218,6 +229,8 @@ describe('workflow stays in sync with this spec', () => {
     expect(yaml).toContain('shaPrefixMatches');
     expect(yaml).toContain('commentAcceptsCleanHead');
     expect(yaml).toContain('isCleanNoMajorIssuesBody');
+    expect(yaml).not.toContain('headPushedMs');
+    expect(yaml).not.toContain('postedAfterHead');
   });
 
   it('retries checks.create on GitHub 5xx', () => {

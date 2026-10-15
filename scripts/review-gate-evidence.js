@@ -24,6 +24,8 @@ export function fullSha(value) {
     : '';
 }
 
+// Prefixes are compared to the current 40-char head only.
+// Never resolve an abbreviation to some other commit.
 export function shaPrefixMatches(shown, headSha) {
   const prefix = typeof shown === 'string' && /^[0-9a-f]{7,40}$/i.test(shown)
     ? shown.toLowerCase()
@@ -84,15 +86,14 @@ export function summaryMarksHeadCompleted(body, headSha) {
  * A Codex issue comment or review-summary body counts as a clean head
  * review when it does not name any other SHA and either:
  *   - the summary marks Code Review Completed on a head-SHA prefix, or
- *   - the body is a "no major issues" receipt that names a head-SHA
- *     prefix or was posted after the head commit's push time.
+ *   - the body is a "no major issues" receipt that names a head-SHA prefix.
+ * SHA-less receipts never count, even if posted after the head was pushed.
  */
 export function commentAcceptsCleanHead(comment, ctx) {
   const body = (comment && comment.body) || '';
   const updatedMs = Date.parse((comment && (comment.updated_at || comment.created_at)) || 0);
   const createdMs = Date.parse((comment && comment.created_at) || 0);
   const baseChangedMs = Number(ctx && ctx.baseChangedMs) || 0;
-  const headPushedMs = Number(ctx && ctx.headPushedMs) || 0;
   const headSha = (ctx && ctx.headSha) || '';
 
   if (!(updatedMs > baseChangedMs || createdMs > baseChangedMs)) return false;
@@ -101,9 +102,7 @@ export function commentAcceptsCleanHead(comment, ctx) {
   if (summaryMarksHeadCompleted(body, headSha)) return true;
 
   if (isCleanNoMajorIssuesBody(body)) {
-    const mentionsHead = mentionedShas(body).some(s => shaPrefixMatches(s, headSha));
-    const postedAfterHead = headPushedMs > 0 && createdMs > headPushedMs;
-    return mentionsHead || postedAfterHead;
+    return mentionedShas(body).some(s => shaPrefixMatches(s, headSha));
   }
   return false;
 }

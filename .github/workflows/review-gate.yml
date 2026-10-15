@@ -13,15 +13,16 @@
 #      submitted after the PR's most recent base-branch change; or, for a
 #      clean pass (Codex submits no review when it has no findings), the
 #      Codex bot's own review-summary comment reports
-#      `Code Review | Completed | <head sha or unique prefix ≥7>` and was
-#      updated after the last base change. A Codex "Didn't find any major
-#      issues" issue comment also counts when it names a head-SHA prefix
-#      or was posted after the head commit's push time. Comments that
-#      mention a SHA that is not a prefix of the current head do not
-#      count. A dismissed Codex review on this head blocks the
-#      clean-summary fallback. Matchers are specified in
-#      scripts/review-gate-evidence.js (the workflow cannot check out PR
-#      content, so the helpers are inlined below).
+#      `Code Review | Completed | <head sha or prefix ≥7 of this head>`
+#      and was updated after the last base change. A Codex "Didn't find
+#      any major issues" issue comment also counts, but only when it
+#      names a SHA that is a prefix of the current head. Prefixes are
+#      compared to the current head SHA only — never resolved against
+#      other commits. Comments that mention any SHA that is not a prefix
+#      of the current head do not count. A dismissed Codex review on
+#      this head blocks the clean-summary fallback. Matchers are
+#      specified in scripts/review-gate-evidence.js (the workflow cannot
+#      check out PR content, so the helpers are inlined below).
 #      Findings arrive as review threads, which the ruleset's
 #      thread-resolution rule blocks separately.
 #   2. Waiver bound to this PR's label event and current base: an
@@ -252,6 +253,8 @@ jobs:
             }
 
             // Keep in sync with scripts/review-gate-evidence.js
+            // Prefixes are compared to the current 40-char head only.
+            // Never resolve an abbreviation to some other commit.
             function shaPrefixMatches(shown, headSha) {
               const prefix = typeof shown === 'string' && /^[0-9a-f]{7,40}$/i.test(shown)
                 ? shown.toLowerCase()
@@ -320,15 +323,12 @@ jobs:
               const updatedMs = Date.parse((comment && (comment.updated_at || comment.created_at)) || 0);
               const createdMs = Date.parse((comment && comment.created_at) || 0);
               const baseChangedMs = Number(ctx && ctx.baseChangedMs) || 0;
-              const headPushedMs = Number(ctx && ctx.headPushedMs) || 0;
               const headSha = (ctx && ctx.headSha) || '';
               if (!(updatedMs > baseChangedMs || createdMs > baseChangedMs)) return false;
               if (mentionsNonHeadSha(body, headSha)) return false;
               if (summaryMarksHeadCompleted(body, headSha)) return true;
               if (isCleanNoMajorIssuesBody(body)) {
-                const mentionsHead = mentionedShas(body).some(s => shaPrefixMatches(s, headSha));
-                const postedAfterHead = headPushedMs > 0 && createdMs > headPushedMs;
-                return mentionsHead || postedAfterHead;
+                return mentionedShas(body).some(s => shaPrefixMatches(s, headSha));
               }
               return false;
             }
@@ -348,38 +348,6 @@ jobs:
                 }
               }
               throw last;
-            }
-
-            async function headPushedMs(headSha) {
-              try {
-                const data = await github.graphql(
-                  `query($owner: String!, $name: String!, $oid: GitObjectID!) {
-                    repository(owner: $owner, name: $name) {
-                      object(oid: $oid) {
-                        ... on Commit { pushedDate committedDate }
-                      }
-                    }
-                  }`,
-                  { owner: context.repo.owner, name: context.repo.repo, oid: headSha }
-                );
-                const obj = data.repository && data.repository.object;
-                const iso = (obj && (obj.pushedDate || obj.committedDate)) || '';
-                const ms = Date.parse(iso);
-                if (Number.isFinite(ms) && ms > 0) return ms;
-              } catch (err) {
-                core.warning(`head push time GraphQL failed for ${headSha}: ${(err && err.message) || err}`);
-              }
-              const { data } = await github.rest.repos.getCommit({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                ref: headSha,
-              });
-              const iso =
-                (data.commit && data.commit.committer && data.commit.committer.date) ||
-                (data.commit && data.commit.author && data.commit.author.date) ||
-                '';
-              const ms = Date.parse(iso);
-              return Number.isFinite(ms) ? ms : 0;
             }
 
             function sameNumberSet(left, right) {
@@ -604,14 +572,9 @@ jobs:
                 return isCodexUser(c.user) && /usage limits?/i.test(body);
               });
 
-              const headPushed = await headPushedMs(headSha);
               const cleanPassOnHead = comments.some(c => {
                 if (!isCodexUser(c.user)) return false;
-                return commentAcceptsCleanHead(c, {
-                  headSha,
-                  headPushedMs: headPushed,
-                  baseChangedMs,
-                });
+                return commentAcceptsCleanHead(c, { headSha, baseChangedMs });
               });
               // Clean-summary fallback is only a no-review/no-findings result.
               // Any Codex review on this head — including a dismissed one —
