@@ -77,6 +77,11 @@ that `run` and requires:
 - the run has a successful `record-waiver` job (only that trusted workflow
   defines it, and only on Bill's `labeled` event)
 
+The latest waiver-label timeline event must be an allow-listed `labeled`
+event (Bill) whose actor matches the persisted record, and the record
+comment must be created at or after that event. Removing `codex-waived`
+and having someone else re-apply it does not resurrect the old record.
+
 A later push or retarget needs a new waiver. Human comments and comments
 posted by other workflows (including a PR-edited `security-review.yml`)
 do not count: they can impersonate the bot login but cannot mint a
@@ -104,12 +109,15 @@ Codex often cites a 7-character prefix. Those still count, but only when:
 
 ### Refresh budget
 
-`review-gate-refresh` caps **scheduled** reruns at 8 per CI run (GitHub's
-limit is 50). Trusted Codex comments, waiver labels, and manual dispatch
-still rerun after that so a late clean review is not stuck. Untrusted
-comments never call the rerun API. The 10-minute schedule backs off
-exponentially (10 / 20 / 40 / 80 minutes) and rechecks green gates. A new
-push opens a new CI run.
+`review-gate-refresh` caps **scheduled** reruns of *waiting* (non-success)
+gates at 8 per CI run (GitHub's limit is 50). Green counted checks keep
+being revalidated after that so a later formal Codex dismissal cannot
+stick. `pull_request_review` is omitted because GitHub would execute the
+PR's copy with `actions: write`; schedule is the base-trusted
+revalidation path. Trusted Codex comments, waiver labels, and manual
+dispatch still rerun after the waiting cap. Untrusted comments never call
+the rerun API. The 10-minute schedule backs off exponentially
+(10 / 20 / 40 / 80 minutes). A new push opens a new CI run.
 
 Fork PRs can have an empty `workflow_run.pull_requests[]` (actions/runner
 #3444). Refresh then matches the `pull_request` CI run by head SHA + head

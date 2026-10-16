@@ -31,6 +31,8 @@ import {
   isGithubActionsBot,
   isRetryableGithubStatus,
   isWaiverBoundToCurrentHead,
+  latestWaiverLabelAcceptsRecord,
+  scheduleCapsWaitingGate,
   mentionedShas,
   mentionsNonHeadSha,
   parseWaiverRecord,
@@ -591,7 +593,88 @@ describe('evaluatePr — Bill-only waiver bound to exact head SHA', () => {
       baseRef: 'main',
       baseSha: BASE_SHA,
       resolveWaiverRun: resolveTrustedWaiver,
+      lastWaiverEvent: labeled,
     })).toBe(true);
+  });
+
+  it('rejects resurrecting a revoked waiver when someone else re-applies the label', () => {
+    const contributorLabeled = {
+      event: 'labeled',
+      label: { name: WAIVE_LABEL },
+      actor: { login: 'contributor' },
+      created_at: '2026-10-15T22:20:00Z',
+    };
+    const timeline = [
+      labeled,
+      {
+        event: 'unlabeled',
+        label: { name: WAIVE_LABEL },
+        actor: { login: BILL },
+        created_at: '2026-10-15T22:10:00Z',
+      },
+      contributorLabeled,
+    ];
+    expect(latestWaiverLabelAcceptsRecord(contributorLabeled, waiverComment())).toBe(false);
+    expect(isWaiverBoundToCurrentHead({
+      labels: [WAIVE_LABEL],
+      comments: [waiverComment()],
+      headSha: HEAD,
+      prNumber: 87,
+      baseRef: 'main',
+      baseSha: BASE_SHA,
+      resolveWaiverRun: resolveTrustedWaiver,
+      lastWaiverEvent: contributorLabeled,
+    })).toBe(false);
+    const verdict = evaluatePr(snapshot({
+      pr: pr({ labels: [{ name: WAIVE_LABEL }] }),
+      comments: [waiverComment()],
+      timeline,
+    }));
+    expect(verdict.conclusion).toBe('failure');
+    expect(verdict.title).not.toBe('Codex waived');
+  });
+
+  it('rejects an old record after Bill removes and later re-applies the label', () => {
+    const relabeled = {
+      event: 'labeled',
+      label: { name: WAIVE_LABEL },
+      actor: { login: BILL },
+      created_at: '2026-10-15T23:00:00Z',
+    };
+    expect(latestWaiverLabelAcceptsRecord(relabeled, waiverComment())).toBe(false);
+    const verdict = evaluatePr(snapshot({
+      pr: pr({ labels: [{ name: WAIVE_LABEL }] }),
+      comments: [waiverComment()],
+      timeline: [
+        labeled,
+        {
+          event: 'unlabeled',
+          label: { name: WAIVE_LABEL },
+          actor: { login: BILL },
+          created_at: '2026-10-15T22:10:00Z',
+        },
+        relabeled,
+      ],
+    }));
+    expect(verdict.conclusion).toBe('failure');
+  });
+
+  it('accepts a new Bill record posted after the latest labeled event', () => {
+    const relabeled = {
+      event: 'labeled',
+      label: { name: WAIVE_LABEL },
+      actor: { login: BILL },
+      created_at: '2026-10-15T22:00:00Z',
+    };
+    const fresh = { ...waiverComment(), created_at: '2026-10-15T22:00:10Z' };
+    expect(latestWaiverLabelAcceptsRecord(relabeled, fresh)).toBe(true);
+    const verdict = evaluatePr(snapshot({
+      pr: pr({ labels: [{ name: WAIVE_LABEL }] }),
+      comments: [fresh],
+      timeline: [relabeled],
+    }));
+    expect(verdict.conclusion).toBe('success');
+    expect(verdict.title).toBe('Codex waived');
   });
 
   it('rejects a bot comment that only impersonates github-actions without run provenance', () => {
@@ -1088,7 +1171,19 @@ describe('refresh selects the counted CI job for this PR', () => {
     expect(rerunPlan({ ...run, run_attempt: 8 }, red, { eventName: 'issue_comment' })).toBe('rerun');
     expect(rerunPlan({ ...run, run_attempt: 8 }, red, { eventName: 'pull_request_target' })).toBe('rerun');
     expect(rerunPlan({ ...run, run_attempt: 8 }, red, { eventName: 'workflow_dispatch' })).toBe('rerun');
-    expect(rerunPlan({ ...run, run_attempt: 8 }, green, { eventName: 'schedule' })).toBe('capped');
+    expect(scheduleCapsWaitingGate({ ...run, run_attempt: 8 }, red)).toBe(true);
+    expect(scheduleCapsWaitingGate({ ...run, run_attempt: 8 }, green)).toBe(false);
+    expect(rerunPlan({ ...run, run_attempt: 8 }, red, { eventName: 'schedule' })).toBe('capped');
+    expect(rerunPlan({ ...run, run_attempt: 8 }, green, {
+      eventName: 'schedule',
+      nowMs: completed + 1000,
+      lastJobCompletedMs: completed,
+    })).toBe('backoff');
+    expect(rerunPlan({ ...run, run_attempt: 8 }, green, {
+      eventName: 'schedule',
+      nowMs: completed + scheduleBackoffMs(8) + 1,
+      lastJobCompletedMs: completed,
+    })).toBe('rerun');
   });
 
   it('refreshes only on trusted Codex comments, waiver labels, and base retargets', () => {
@@ -1249,7 +1344,9 @@ describe('workflows pin the counted context and never orphan checks.create', () 
     expect(refresh).toContain('head_repository');
     expect(refresh).toContain('pull_requests');
     expect(refresh).toContain('MAX_RUN_ATTEMPTS');
-    expect(refresh).toContain("context.eventName === 'schedule' && runAttemptCount(run) >= MAX_RUN_ATTEMPTS");
+    expect(refresh).toContain("context.eventName === 'schedule' &&");
+    expect(refresh).toContain('runAttemptCount(run) >= MAX_RUN_ATTEMPTS');
+    expect(refresh).toContain("job.conclusion !== 'success'");
     expect(refresh).toContain('scheduleBackoffMs');
     expect(refresh).toContain(WAIVER_MARKER);
     expect(refresh).toContain('createComment');

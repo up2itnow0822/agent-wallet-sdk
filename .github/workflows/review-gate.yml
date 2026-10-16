@@ -52,12 +52,14 @@
 #   result, never merely because a review exists.
 #   GitHub 5xx responses are retried with backoff.
 #
-# Rerun budget: schedule polling caps at MAX_RUN_ATTEMPTS (8), well under
-# GitHub's 50-rerun-per-run limit. Trusted Codex comments, waiver labels,
-# and manual dispatch still rerun after that so a late review is not stuck
-# red. Untrusted comments never call reRunJobForWorkflowRun, so they cannot
-# burn the cap. Schedule also backs off (10 / 20 / 40 / 80 min) and
-# rechecks green gates. A new push opens a new run.
+# Rerun budget: schedule polling of *waiting* (non-success) gates caps at
+# MAX_RUN_ATTEMPTS (8), well under GitHub's 50-rerun-per-run limit.
+# Green counted checks keep being revalidated after that so a later
+# formal Codex dismissal cannot stick (pull_request_review is omitted
+# because GitHub would run the PR's copy with actions: write). Trusted
+# Codex comments, waiver labels, and manual dispatch still rerun after
+# the waiting cap. Untrusted comments never call reRunJobForWorkflowRun.
+# Schedule backs off (10 / 20 / 40 / 80 min). A new push opens a new run.
 #
 # Residual risk (GitHub platform limit): any other pull_request workflow with
 # a job named `review-gate` can also produce the required context, and a PR
@@ -398,11 +400,6 @@ jobs:
                 continue;
               }
 
-              if (context.eventName === 'schedule' && runAttemptCount(run) >= MAX_RUN_ATTEMPTS) {
-                core.info(`#${n}: schedule capped (run ${run.id} attempt ${runAttemptCount(run)}/${MAX_RUN_ATTEMPTS})`);
-                continue;
-              }
-
               if (run.status !== 'completed') {
                 if (context.eventName === 'schedule') {
                   core.info(`#${n}: schedule skip (${run.status})`);
@@ -412,10 +409,6 @@ jobs:
                 run = await waitForRun(run.id);
                 if (run.status !== 'completed') {
                   core.info(`#${n}: CI run ${run.id} still ${run.status}; schedule will retry`);
-                  continue;
-                }
-                if (context.eventName === 'schedule' && runAttemptCount(run) >= MAX_RUN_ATTEMPTS) {
-                  core.info(`#${n}: schedule capped after wait (run ${run.id})`);
                   continue;
                 }
               }
@@ -429,6 +422,13 @@ jobs:
               const job = jobs.find(j => j.name === JOB_NAME);
               if (!job) {
                 core.info(`#${n}: CI run ${run.id} has no ${JOB_NAME} job`);
+                continue;
+              }
+
+              if (context.eventName === 'schedule' &&
+                  runAttemptCount(run) >= MAX_RUN_ATTEMPTS &&
+                  job.conclusion !== 'success') {
+                core.info(`#${n}: schedule capped (run ${run.id} attempt ${runAttemptCount(run)}/${MAX_RUN_ATTEMPTS})`);
                 continue;
               }
 

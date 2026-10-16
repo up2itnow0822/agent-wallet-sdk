@@ -27,10 +27,14 @@
  * path `.github/workflows/review-gate.yml`, event `pull_request_target`
  * (always main's copy), and a successful `record-waiver` job — a job
  * only that trusted workflow defines, and only on Bill's labeled event.
- * A PR-controlled workflow (including security-review.yml) can post as
- * the same bot but cannot mint that run identity. Timestamps are not
- * used. A Codex review counts only when it is a clean no-findings
- * result, never merely because a review exists.
+ * The latest waiver-label timeline event must also be an allow-listed
+ * `labeled` event for that same actor, and the persisted record must
+ * belong to that labeling (comment at or after the event). Re-applying
+ * the label after a revoke, without a new Bill record, does not
+ * resurrect the old waiver. A PR-controlled workflow (including
+ * security-review.yml) can post as the same bot but cannot mint that
+ * run identity. A Codex review counts only when it is a clean
+ * no-findings result, never merely because a review exists.
  */
 
 import fs from 'node:fs';
@@ -404,6 +408,31 @@ export function waiverRecordAcceptsHead(comment, {
   });
 }
 
+export function waiverActorLogin(event) {
+  return (event && event.actor && event.actor.login) ||
+    (event && event.sender && event.sender.login) ||
+    '';
+}
+
+/**
+ * Latest waiver-label timeline event must be an allow-listed `labeled`
+ * event, and the persisted record must belong to that labeling (same
+ * actor; comment created at or after the event). An old record left
+ * after Bill removes the label cannot be resurrected by someone else
+ * re-applying `codex-waived`.
+ */
+export function latestWaiverLabelAcceptsRecord(lastWaiverEvent, comment) {
+  if (!lastWaiverEvent || lastWaiverEvent.event !== 'labeled') return false;
+  const actor = waiverActorLogin(lastWaiverEvent);
+  if (!WAIVER_ACTORS.has(actor)) return false;
+  const rec = parseWaiverRecord(comment && comment.body);
+  if (!rec || rec.actor !== actor) return false;
+  const eventMs = Date.parse(lastWaiverEvent.created_at || 0);
+  const commentMs = Date.parse((comment && comment.created_at) || 0);
+  if (!Number.isFinite(eventMs) || !Number.isFinite(commentMs)) return false;
+  return commentMs >= eventMs;
+}
+
 export function isWaiverBoundToCurrentHead({
   labels,
   comments,
@@ -412,15 +441,19 @@ export function isWaiverBoundToCurrentHead({
   baseRef,
   baseSha,
   resolveWaiverRun,
+  lastWaiverEvent,
 }) {
   if (!labels || !labels.includes(WAIVE_LABEL)) return false;
-  return (comments || []).some(c => waiverRecordAcceptsHead(c, {
-    headSha,
-    prNumber,
-    baseRef,
-    baseSha,
-    resolveWaiverRun,
-  }));
+  return (comments || []).some(c =>
+    latestWaiverLabelAcceptsRecord(lastWaiverEvent, c) &&
+    waiverRecordAcceptsHead(c, {
+      headSha,
+      prNumber,
+      baseRef,
+      baseSha,
+      resolveWaiverRun,
+    }),
+  );
 }
 
 export function isRetryableGithubStatus(status) {
@@ -558,6 +591,7 @@ export function evaluatePr(input) {
           baseRef,
           baseSha,
           resolveWaiverRun,
+          lastWaiverEvent: facts.lastWaiverEvent,
         })) {
       return {
         prNumber,
@@ -832,13 +866,18 @@ export function shouldRerunOnSchedule(job) {
   return true;
 }
 
+export function scheduleCapsWaitingGate(run, job) {
+  return runAttemptCount(run) >= MAX_RUN_ATTEMPTS &&
+    !(job && job.conclusion === 'success');
+}
+
 export function rerunPlan(run, job, { eventName, nowMs, lastJobCompletedMs } = {}) {
   if (!run) return 'missing-run';
-  if (eventName === 'schedule' && runAttemptCount(run) >= MAX_RUN_ATTEMPTS) return 'capped';
   if (run.status && run.status !== 'completed') {
     return eventName === 'schedule' ? 'skip-in-progress' : 'wait-run';
   }
   if (!job) return 'missing-job';
+  if (eventName === 'schedule' && scheduleCapsWaitingGate(run, job)) return 'capped';
   if (eventName === 'schedule') {
     const completedMs = lastJobCompletedMs != null
       ? Number(lastJobCompletedMs)
@@ -1247,10 +1286,6 @@ export async function runRerun({ env, readFile, github } = {}) {
         console.log(`#${n}: CI run ${run.id} still ${finished.status}; schedule will retry`);
         continue;
       }
-      if (eventName === 'schedule' && runAttemptCount(finished) >= MAX_RUN_ATTEMPTS) {
-        console.log(`#${n}: schedule capped after wait (run ${run.id} attempt ${runAttemptCount(finished)})`);
-        continue;
-      }
       const freshJobs = await client.paginate(
         `/repos/${owner}/${repo}/actions/runs/${run.id}/jobs`,
         'jobs',
@@ -1258,6 +1293,11 @@ export async function runRerun({ env, readFile, github } = {}) {
       job = selectReviewGateJob(freshJobs);
       if (!job) {
         console.log(`#${n}: CI run ${run.id} finished without ${CHECK_JOB_NAME}`);
+        continue;
+      }
+      const waited = rerunPlan(finished, job, { eventName, nowMs: Date.now() });
+      if (waited !== 'rerun') {
+        console.log(`#${n}: ${waited} after wait (run ${run.id} attempt ${runAttemptCount(finished)})`);
         continue;
       }
     }
