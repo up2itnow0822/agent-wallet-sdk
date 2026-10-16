@@ -29,3 +29,29 @@ jobs:
         run: npm test
       - name: Lint source
         run: npm run lint
+
+  # Required check name. GitHub Actions records this job on the pull_request
+  # check suite — the suite ruleset 23222371 actually counts. Do not replace
+  # this with checks.create (that API attaches to the oldest Actions suite,
+  # which is often pull_request_target and then merge returns 405).
+  review-gate:
+    name: review-gate
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Evaluate Codex review on head
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/review-gate.mjs evaluate
