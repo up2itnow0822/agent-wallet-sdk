@@ -73,9 +73,17 @@ for the **current** head SHA, base ref, and base SHA. Evaluate then fetches
 that `run` and requires:
 
 - `path` is `.github/workflows/review-gate.yml`
-- `event` is `pull_request_target` (GitHub always executes `main`'s copy)
+- `event` is `pull_request_target`, `schedule`, or `workflow_dispatch`
+  (GitHub always executes `main`'s copy for those events)
 - the run has a successful `record-waiver` job (only that trusted workflow
-  defines it, and only on Bill's `labeled` event)
+  defines it)
+
+`record-waiver` does not depend on `pull_request_target` remaining allowed
+after 2 November 2026. Schedule (every 10 minutes) and `workflow_dispatch`
+scan open PRs from the default-branch copy and post a binding comment only
+when Bill's latest `codex-waived` timeline event is `labeled` after the
+last head move and base retarget. `pull_request_target` stays a faster
+path while GitHub still allows it. `issue_comment` never records a waiver.
 
 The latest waiver-label timeline event must be an allow-listed `labeled`
 event (Bill) whose actor matches the persisted record, and the record
@@ -85,7 +93,7 @@ and having someone else re-apply it does not resurrect the old record.
 A later push or retarget needs a new waiver. Human comments and comments
 posted by other workflows (including a PR-edited `security-review.yml`)
 do not count: they can impersonate the bot login but cannot mint a
-`pull_request_target` run of `review-gate.yml` that contains `record-waiver`.
+trusted `review-gate.yml` run that contains `record-waiver`.
 Check runs / commit statuses were not used because any PR workflow that
 adds `checks: write` or `statuses: write` can also mint those as the
 GitHub Actions app.
@@ -114,8 +122,10 @@ published `review-gate` conclusion already matches evaluate. That stops
 green polling from walking into GitHub's 50-rerun-per-run ceiling (~3
 days). Schedule still evaluates on the 10-minute cron and reruns only to
 *flip* the check (dismissal, new findings, new clean review, waiver
-revoke). A 403 on a green gate fails the refresh job instead of being
-swallowed. Waiting-state polls without a verdict still cap at 8.
+revoke). If reevaluation cannot produce a verdict, an existing green
+gate is rerun or ceiling-failed rather than treated as unchanged. A 403
+on a green gate fails the refresh job instead of being swallowed.
+Waiting-state polls without a verdict still cap at 8.
 
 `pull_request_review` is omitted because GitHub would execute the PR's
 copy with `actions: write`. When several Codex results exist on the same

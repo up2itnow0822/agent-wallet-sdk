@@ -14,6 +14,7 @@ import {
   MAX_RUN_ATTEMPTS,
   GITHUB_RERUN_CEILING,
   latestCodexHeadOutcome,
+  dismissalMsByReviewId,
   refreshAction,
   MENTIONED_SHA,
   NO_MAJOR_ISSUES,
@@ -53,6 +54,10 @@ import {
   selectReviewGateJob,
   shaPrefixMatches,
   shouldPostWaiverRecord,
+  shouldRecordWaiverOnEvent,
+  shouldScanRecordWaiver,
+  existingWaiverRecordForHead,
+  TRUSTED_WAIVER_RECORD_EVENTS,
   shouldRefreshOnEvent,
   shouldRerunOnSchedule,
   isTrustedRefreshComment,
@@ -499,6 +504,7 @@ describe('evaluatePr — Codex on head', () => {
   it('lets a later non-dismissed clean review supersede a dismissal on the same SHA', () => {
     const verdict = evaluatePr(snapshot({
       reviews: [{
+        id: 1001,
         user: CODEX_BOT,
         commit_id: HEAD,
         state: 'DISMISSED',
@@ -510,9 +516,73 @@ describe('evaluatePr — Codex on head', () => {
         body: PR87_RECEIPT,
         submitted_at: '2026-10-15T21:30:00Z',
       }],
+      timeline: [{
+        event: 'review_dismissed',
+        created_at: '2026-10-15T21:23:00Z',
+        dismissed_review: { review_id: 1001 },
+      }],
     }));
     expect(verdict.conclusion).toBe('success');
     expect(verdict.summary).toMatch(/no findings/);
+  });
+
+  it('orders a dismissed Codex review by the dismissal time, not submitted_at', () => {
+    const dismissed = {
+      id: 5548493803,
+      user: CODEX_BOT,
+      commit_id: HEAD,
+      state: 'DISMISSED',
+      submitted_at: '2026-10-15T21:10:00Z',
+    };
+    const cleanComment = {
+      user: CODEX_BOT,
+      body: PR87_SUMMARY,
+      created_at: '2026-10-15T21:22:45Z',
+      updated_at: '2026-10-15T21:22:47Z',
+    };
+    const dismissal = {
+      event: 'review_dismissed',
+      created_at: '2026-10-15T21:50:00Z',
+      dismissed_review: { review_id: 5548493803 },
+    };
+    expect(dismissalMsByReviewId([dismissal]).get(5548493803))
+      .toBe(Date.parse('2026-10-15T21:50:00Z'));
+    expect(latestCodexHeadOutcome({
+      reviews: [dismissed],
+      comments: [cleanComment],
+      headSha: HEAD,
+      uniqueResolve: uniqueToHead,
+      headPushedMs: HEAD_PUSHED_MS,
+      baseChangedMs: 0,
+      timeline: [dismissal],
+    })?.clean).toBe(false);
+
+    const verdict = evaluatePr(snapshot({
+      reviews: [dismissed],
+      comments: [cleanComment],
+      timeline: [dismissal],
+    }));
+    expect(verdict.conclusion).toBe('failure');
+    expect(verdict.title).toBe('Waiting for Codex on head');
+  });
+
+  it('fails closed when a dismissed review has no timeline dismissal time', () => {
+    const verdict = evaluatePr(snapshot({
+      reviews: [{
+        id: 77,
+        user: CODEX_BOT,
+        commit_id: HEAD,
+        state: 'DISMISSED',
+        submitted_at: '2026-10-15T21:10:00Z',
+      }],
+      comments: [{
+        user: CODEX_BOT,
+        body: PR87_SUMMARY,
+        created_at: '2026-10-15T21:22:45Z',
+        updated_at: '2026-10-15T21:22:47Z',
+      }],
+    }));
+    expect(verdict.conclusion).toBe('failure');
   });
 
   it('blocks the clean-summary fallback when a later dismissed Codex review sits on this head', () => {
@@ -990,6 +1060,104 @@ describe('evaluatePr — Bill-only waiver bound to exact head SHA', () => {
       workflow: REFRESH_WORKFLOW_PATH,
     });
   });
+
+  it('accepts a schedule or dispatch record-waiver run with an empty pull_requests list', () => {
+    expect(TRUSTED_WAIVER_RECORD_EVENTS.has('schedule')).toBe(true);
+    expect(TRUSTED_WAIVER_RECORD_EVENTS.has('workflow_dispatch')).toBe(true);
+    const scheduleRun = {
+      id: WAIVER_RUN_ID,
+      path: REFRESH_WORKFLOW_PATH,
+      event: 'schedule',
+      created_at: '2026-10-15T22:00:00Z',
+      updated_at: '2026-10-15T22:00:30Z',
+      pull_requests: [],
+    };
+    const jobs = [{ name: WAIVER_RECORD_JOB, status: 'completed', conclusion: 'success' }];
+    expect(waiverRunProvenanceAccepts(scheduleRun, jobs, {
+      prNumber: 87, headSha: HEAD, baseRef: 'main', baseSha: BASE_SHA,
+      commentCreatedMs: Date.parse('2026-10-15T22:00:01Z'),
+    })).toBe(true);
+    expect(waiverRunProvenanceAccepts({
+      ...scheduleRun, event: 'workflow_dispatch',
+    }, jobs, {
+      prNumber: 87, headSha: HEAD, baseRef: 'main', baseSha: BASE_SHA,
+      commentCreatedMs: Date.parse('2026-10-15T22:00:01Z'),
+    })).toBe(true);
+    expect(waiverRunProvenanceAccepts({
+      ...scheduleRun, event: 'pull_request_target',
+    }, jobs, {
+      prNumber: 87, headSha: HEAD, baseRef: 'main', baseSha: BASE_SHA,
+    })).toBe(false);
+    expect(waiverRunProvenanceAccepts({
+      ...scheduleRun, event: 'issue_comment',
+    }, jobs, { prNumber: 87 })).toBe(false);
+
+    const verdict = evaluatePr(snapshot({
+      pr: pr({ labels: [{ name: WAIVE_LABEL }] }),
+      comments: [waiverComment()],
+      timeline: [labeled],
+      resolveWaiverRun: () => ({ run: scheduleRun, jobs }),
+    }));
+    expect(verdict.conclusion).toBe('success');
+    expect(verdict.title).toBe('Codex waived');
+  });
+
+  it('records a schedule waiver only for Bill\'s latest labeled event on this head', () => {
+    expect(shouldRecordWaiverOnEvent('schedule')).toBe(true);
+    expect(shouldRecordWaiverOnEvent('workflow_dispatch')).toBe(true);
+    expect(shouldRecordWaiverOnEvent('issue_comment', {
+      action: 'created',
+      comment: { user: { login: 'chatgpt-codex-connector[bot]' } },
+    })).toBe(false);
+    expect(shouldRecordWaiverOnEvent('pull_request_target', {
+      action: 'labeled',
+      label: { name: WAIVE_LABEL },
+      sender: { login: BILL },
+    })).toBe(true);
+    expect(shouldRecordWaiverOnEvent('pull_request_target', {
+      action: 'labeled',
+      label: { name: WAIVE_LABEL },
+      sender: { login: 'contributor' },
+    })).toBe(false);
+
+    const scan = {
+      labels: [WAIVE_LABEL],
+      lastWaiverEvent: labeled,
+      lastHeadMoveMs: Date.parse('2026-10-15T21:00:00Z'),
+      baseChangedMs: 0,
+      comments: [],
+      headSha: HEAD,
+      baseRef: 'main',
+      baseSha: BASE_SHA,
+      prNumber: 87,
+    };
+    expect(shouldScanRecordWaiver(scan)).toBe(true);
+    expect(shouldScanRecordWaiver({
+      ...scan,
+      lastWaiverEvent: { ...labeled, actor: { login: 'contributor' } },
+    })).toBe(false);
+    expect(shouldScanRecordWaiver({
+      ...scan,
+      lastWaiverEvent: {
+        event: 'unlabeled',
+        label: { name: WAIVE_LABEL },
+        actor: { login: BILL },
+        created_at: '2026-10-15T22:10:00Z',
+      },
+    })).toBe(false);
+    expect(shouldScanRecordWaiver({
+      ...scan,
+      lastHeadMoveMs: Date.parse('2026-10-15T22:10:00Z'),
+    })).toBe(false);
+    expect(shouldScanRecordWaiver({
+      ...scan,
+      comments: [waiverComment()],
+    })).toBe(false);
+    expect(existingWaiverRecordForHead([waiverComment()], {
+      headSha: HEAD, baseRef: 'main', baseSha: BASE_SHA, prNumber: 87,
+      actor: BILL, labeledMs: Date.parse(labeled.created_at),
+    })).toBe(true);
+  });
 });
 
 describe('combineHeadVerdicts', () => {
@@ -1240,7 +1408,7 @@ describe('refresh selects the counted CI job for this PR', () => {
       eventName: 'schedule',
       nowMs: completed + 1000,
       lastJobCompletedMs: completed,
-    })).toBe('skip-unchanged');
+    })).toBe('rerun');
     expect(rerunPlan(run, green, {
       eventName: 'schedule',
       verdict: { conclusion: 'success' },
@@ -1269,11 +1437,21 @@ describe('refresh selects the counted CI job for this PR', () => {
     expect(scheduleCapsWaitingGate({ ...run, run_attempt: 8 }, red)).toBe(true);
     expect(scheduleCapsWaitingGate({ ...run, run_attempt: 8 }, green)).toBe(false);
     expect(rerunPlan({ ...run, run_attempt: 8 }, red, { eventName: 'schedule' })).toBe('capped');
-    expect(rerunPlan({ ...run, run_attempt: 8 }, green, { eventName: 'schedule' })).toBe('skip-unchanged');
+    expect(rerunPlan({ ...run, run_attempt: 8 }, green, { eventName: 'schedule' })).toBe('rerun');
     expect(rerunPlan({ ...run, run_attempt: 8 }, green, {
       eventName: 'schedule',
       verdict: { conclusion: 'failure' },
     })).toBe('rerun');
+    expect(refreshAction({
+      job: green,
+      eventName: 'schedule',
+      runAttempt: 2,
+    })).toBe('rerun');
+    expect(refreshAction({
+      job: green,
+      eventName: 'schedule',
+      runAttempt: GITHUB_RERUN_CEILING - 5,
+    })).toBe('ceiling-fail');
     expect(refreshAction({
       job: green,
       verdict: { conclusion: 'failure' },
@@ -1453,13 +1631,15 @@ describe('workflows pin the counted context and never orphan checks.create', () 
     expect(refresh).toContain('evaluatePrNumber');
     expect(refresh).toContain('attempt >= MAX_RUN_ATTEMPTS');
     expect(refresh).toContain('scheduleBackoffMs');
-    expect(refresh).toContain(WAIVER_MARKER);
-    expect(refresh).toContain('createComment');
+    expect(refresh).toContain('recordTrustedWaivers');
     expect(refresh).toMatch(/^ {2}record-waiver:/m);
     expect(refresh).toContain(WAIVER_RECORD_JOB);
     expect(refresh).toContain('context.runId');
-    expect(refresh).toContain('baseSha');
+    expect(refresh).toContain("if (current === 'success') return 'rerun'");
+    expect(refresh).toContain("job.conclusion !== 'success'");
+    expect(refresh).toContain('not treating an existing green gate as unchanged');
     expect(refreshExec).not.toMatch(/schedule skip \(success\)/);
+    expect(refresh).not.toMatch(/if \(!next\) \{[\s\S]*?if \(current === 'success'\) return 'skip-unchanged'/);
   });
 
   it('filters refresh to trusted Codex / waiver evidence and does not cancel on junk events', () => {
@@ -1475,6 +1655,26 @@ describe('workflows pin the counted context and never orphan checks.create', () 
       /issue_comment' && github\.event\.issue\.pull_request != null\)\s*$/m,
     );
     expect(refresh).not.toContain("github.event.comment.user.login == 'github-actions[bot]'");
+  });
+
+  it('records waivers on schedule and dispatch, not only pull_request_target', () => {
+    const recordBlock = (() => {
+      const rest = refresh.split(/^ {2}record-waiver:/m)[1] || '';
+      const next = rest.search(/^ {2}[A-Za-z0-9_-]+:/m);
+      return next === -1 ? rest : rest.slice(0, next);
+    })();
+    expect(recordBlock).toContain("github.event_name == 'schedule'");
+    expect(recordBlock).toContain("github.event_name == 'workflow_dispatch'");
+    expect(recordBlock).toContain("github.event_name == 'pull_request_target'");
+    expect(recordBlock).toContain("github.event.sender.login == 'up2itnow0822'");
+    expect(recordBlock).toContain('recordTrustedWaivers');
+    expect(recordBlock).toContain('contents/scripts/review-gate.mjs');
+    expect(recordBlock).toContain('context.sha');
+    expect(recordBlock).not.toContain('issue_comment');
+    expect(contributing).toContain('schedule');
+    expect(contributing).toContain('workflow_dispatch');
+    expect(readFileSync(resolve(process.cwd(), 'AGENTS.md'), 'utf8'))
+      .toMatch(/2 November 2026/);
   });
 
   it('keeps the #88 matcher constants and documents residual ci.yml risk', () => {

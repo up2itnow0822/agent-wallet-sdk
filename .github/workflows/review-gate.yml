@@ -45,9 +45,13 @@
 #   2. Bill-only (`up2itnow0822`) `codex-waived`, bound to head SHA + base
 #      ref + base SHA + PR by a github-actions[bot] comment that cites the
 #      review-gate-refresh run which wrote it. Evaluate requires that run's
-#      path to be this file, event pull_request_target (main's copy), and a
-#      successful record-waiver job. A PR-controlled workflow posting as
-#      the same bot cannot mint that provenance.
+#      path to be this file, event pull_request_target / schedule /
+#      workflow_dispatch (always main's copy), and a successful
+#      record-waiver job. Schedule and dispatch are the durable recorders
+#      after GitHub's 2 November 2026 default block on pull_request_target
+#      for public repos; they read Bill's latest labeled timeline event.
+#      A PR-controlled workflow posting as the same bot cannot mint that
+#      provenance.
 #   A Codex review counts only as a clean no-findings / "no major issues"
 #   result, never merely because a review exists.
 #   GitHub 5xx responses are retried with backoff.
@@ -56,9 +60,11 @@
 # change. That stops green (and red) polling from walking into GitHub's
 # 50-rerun ceiling. Schedule evaluates via the default-branch copy of
 # scripts/review-gate.mjs and only reruns to flip the check (dismissal,
-# new clean review, waiver revoke). A 403 on a green gate fails this
-# refresh instead of being swallowed. Waiting-state polls without a
-# verdict still cap at MAX_RUN_ATTEMPTS (8). A new push opens a new run.
+# new clean review, waiver revoke). If reevaluation cannot produce a
+# verdict, an existing green gate is rerun or ceiling-failed — never
+# treated as unchanged. A 403 on a green gate fails this refresh instead
+# of being swallowed. Waiting-state polls without a verdict still cap
+# at MAX_RUN_ATTEMPTS (8). A new push opens a new run.
 #
 # Residual risk (GitHub platform limit): any other pull_request workflow with
 # a job named `review-gate` can also produce the required context, and a PR
@@ -101,10 +107,14 @@ concurrency:
 jobs:
   record-waiver:
     if: >
-      github.event_name == 'pull_request_target' &&
-      github.event.action == 'labeled' &&
-      github.event.label.name == 'codex-waived' &&
-      github.event.sender.login == 'up2itnow0822'
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event_name == 'pull_request_target' &&
+        github.event.action == 'labeled' &&
+        github.event.label.name == 'codex-waived' &&
+        github.event.sender.login == 'up2itnow0822'
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -112,77 +122,44 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const WAIVE_LABEL = 'codex-waived';
-            const WAIVER_MARKER = '<!-- review-gate-waiver:v1';
-            const WORKFLOW_PATH = '.github/workflows/review-gate.yml';
-
-            function fullSha(value) {
-              return typeof value === 'string' && /^[0-9a-f]{40}$/i.test(value)
-                ? value.toLowerCase()
-                : '';
-            }
-
-            const pr = context.payload.pull_request;
-            const n = pr && pr.number;
-            const headSha = fullSha(pr && pr.head && pr.head.sha);
-            const base = pr && pr.base && pr.base.ref;
-            const baseSha = fullSha(pr && pr.base && pr.base.sha);
-            const actor = context.payload.sender && context.payload.sender.login;
-            if (!n || !headSha || !base || !baseSha || !actor) {
-              core.setFailed('waiver payload missing head/base SHA or actor');
+            const fs = require('fs');
+            const { pathToFileURL } = require('url');
+            const tmp = `${process.env.RUNNER_TEMP}/review-gate.mjs`;
+            let raw;
+            try {
+              raw = await github.request('GET /repos/{owner}/{repo}/contents/scripts/review-gate.mjs', {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: context.sha,
+                headers: { accept: 'application/vnd.github.raw' },
+              });
+            } catch (err) {
+              core.setFailed(`record-waiver: trusted evaluator fetch failed (${err && err.message})`);
               return;
             }
-
-            const comments = await github.paginate(github.rest.issues.listComments, {
+            fs.writeFileSync(tmp, typeof raw.data === 'string' ? raw.data : String(raw.data));
+            let gate;
+            try {
+              gate = await import(pathToFileURL(tmp).href);
+            } catch (err) {
+              core.setFailed(`record-waiver: trusted evaluator import failed (${err && err.message})`);
+              return;
+            }
+            const client = gate.createGithubClient({ token: process.env.GITHUB_TOKEN });
+            const result = await gate.recordTrustedWaivers({
+              client,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              issue_number: n,
-              per_page: 100,
+              eventName: context.eventName,
+              payload: context.payload,
+              runId: context.runId,
             });
-            const rec = {
-              sha: headSha,
-              base,
-              baseSha,
-              actor,
-              pr: n,
-              run: context.runId,
-              workflow: WORKFLOW_PATH,
-            };
-            const already = comments.some(c =>
-              c.user && c.user.login === 'github-actions[bot]' &&
-              c.body && c.body.includes(WAIVER_MARKER) &&
-              c.body.includes(`"sha":"${headSha}"`) &&
-              c.body.includes(`"baseSha":"${baseSha}"`) &&
-              c.body.includes(`"run":${context.runId}`)
-            );
-            if (already) {
-              core.info(`#${n}: waiver record already bound for this run`);
+            const posted = (result && result.posted) || [];
+            if (posted.length === 0) {
+              core.info('record-waiver: no new Bill binding to write');
               return;
             }
-            const body = `${WAIVER_MARKER} ${JSON.stringify(rec)} -->\n` +
-              `review-gate: \`${WAIVE_LABEL}\` bound to head \`${headSha}\` base \`${base}\` ` +
-              `(\`${baseSha}\`) by \`${actor}\` on PR #${n} via run ${context.runId}.`;
-            const delays = [1000, 2000, 4000];
-            let last;
-            for (let i = 0; i <= delays.length; i++) {
-              try {
-                await github.rest.issues.createComment({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: n,
-                  body,
-                });
-                last = null;
-                break;
-              } catch (err) {
-                last = err;
-                const status = err && err.status;
-                if (!(status >= 500 && status <= 599) || i === delays.length) throw err;
-                await new Promise(r => setTimeout(r, delays[i]));
-              }
-            }
-            if (last) throw last;
-            core.info(`#${n}: recorded unforgeable waiver binding run ${context.runId}`);
+            core.info(`recorded unforgeable waiver binding run ${context.runId} for #${posted.join(', #')}`);
 
   refresh:
     needs: [record-waiver]
@@ -324,7 +301,8 @@ jobs:
               const nearCeiling = attempt >= GITHUB_RERUN_CEILING - RERUN_CEILING_RESERVE;
               if (next && current === next) return 'skip-unchanged';
               if (!next) {
-                if (current === 'success') return 'skip-unchanged';
+                if (nearCeiling && current === 'success') return 'ceiling-fail';
+                if (current === 'success') return 'rerun';
                 if (eventName === 'schedule' && attempt >= MAX_RUN_ATTEMPTS) return 'capped';
                 return 'rerun';
               }
@@ -470,7 +448,10 @@ jobs:
                   },
                 );
               } catch (err) {
-                core.warning(`#${n}: evaluate skipped (${err && err.message})`);
+                core.warning(
+                  `#${n}: evaluate failed (${err && err.message}); ` +
+                  'not treating an existing green gate as unchanged',
+                );
               }
 
               const action = refreshAction(
@@ -495,7 +476,11 @@ jobs:
                 continue;
               }
 
-              if (context.eventName === 'schedule' && !(verdict && verdict.conclusion)) {
+              if (
+                context.eventName === 'schedule' &&
+                !(verdict && verdict.conclusion) &&
+                job.conclusion !== 'success'
+              ) {
                 const completedMs = Date.parse(job.completed_at || run.updated_at || 0);
                 const backoffMs = scheduleBackoffMs(runAttemptCount(run));
                 if (Number.isFinite(completedMs) && Date.now() - completedMs < backoffMs) {

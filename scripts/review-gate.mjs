@@ -28,8 +28,15 @@
  * github-actions[bot] comment that cites the review-gate-refresh
  * workflow run which wrote it. Evaluate fetches that run and requires
  * path `.github/workflows/review-gate.yml`, event `pull_request_target`
- * (always main's copy), and a successful `record-waiver` job — a job
- * only that trusted workflow defines, and only on Bill's labeled event.
+ * or `schedule` or `workflow_dispatch` (always main's copy), and a
+ * successful `record-waiver` job — a job only that trusted workflow
+ * defines. Recording does not depend on `pull_request_target` remaining
+ * allowed after 2 November 2026: schedule (every 10 minutes) and
+ * workflow_dispatch scan the label timeline from the default-branch
+ * copy. Bill must be the latest `codex-waived` `labeled` actor after
+ * the last head move and base retarget; the comment is written by that
+ * trusted run. `pull_request_target` stays a faster path until GitHub
+ * blocks it by default. `issue_comment` never records a waiver.
  * The latest waiver-label timeline event must also be an allow-listed
  * `labeled` event for that same actor, and the persisted record must
  * belong to that labeling (comment at or after the event). Re-applying
@@ -38,6 +45,11 @@
  * security-review.yml) can post as the same bot but cannot mint that
  * run identity. A Codex review counts only when it is a clean
  * no-findings result, never merely because a review exists.
+ * A dismissed Codex review is ordered by the timeline
+ * `review_dismissed.created_at`, not the review's original
+ * `submitted_at`. Missing dismissal time fails closed (sorts last).
+ * Refresh never treats a green counted gate as unchanged when
+ * reevaluation cannot produce a verdict — it reruns or ceiling-fails.
  */
 
 import fs from 'node:fs';
@@ -67,6 +79,11 @@ export const WAIVER_MARKER = '<!-- review-gate-waiver:v1';
 export const WAIVER_RECORD_RE = /<!--\s*review-gate-waiver:v1\s+(\{.*?\})\s*-->/;
 export const REFRESH_WORKFLOW_PATH = '.github/workflows/review-gate.yml';
 export const WAIVER_RECORD_JOB = 'record-waiver';
+export const TRUSTED_WAIVER_RECORD_EVENTS = new Set([
+  'pull_request_target',
+  'schedule',
+  'workflow_dispatch',
+]);
 
 // Well under GitHub's 50-rerun-per-run cap. A new push opens a new run.
 export const MAX_RUN_ATTEMPTS = 8;
@@ -322,20 +339,24 @@ export function waiverRunProvenanceAccepts(run, jobs, {
   commentCreatedMs,
 } = {}) {
   if (!run || !isRefreshWorkflowPath(run.path)) return false;
-  if (run.event !== 'pull_request_target') return false;
+  if (!TRUSTED_WAIVER_RECORD_EVENTS.has(run.event)) return false;
   const job = (jobs || []).find(j => j.name === WAIVER_RECORD_JOB);
   if (!job) return false;
   if (job.status && job.status !== 'completed' && job.status !== 'in_progress') return false;
   if (job.status === 'completed' && job.conclusion && job.conclusion !== 'success') return false;
   const prs = run.pull_requests || [];
-  const match = prs.find(p => prNumber == null || Number(p.number) === Number(prNumber));
-  if (!match) return false;
-  const runHead = fullSha(match.head && match.head.sha);
-  const runBaseRef = match.base && match.base.ref;
-  const runBaseSha = fullSha(match.base && match.base.sha);
-  if (headSha && (!runHead || !sameSha(runHead, headSha))) return false;
-  if (baseRef && runBaseRef && runBaseRef !== baseRef) return false;
-  if (baseSha && runBaseSha && !sameSha(runBaseSha, baseSha)) return false;
+  if (prs.length > 0) {
+    const match = prs.find(p => prNumber == null || Number(p.number) === Number(prNumber));
+    if (!match) return false;
+    const runHead = fullSha(match.head && match.head.sha);
+    const runBaseRef = match.base && match.base.ref;
+    const runBaseSha = fullSha(match.base && match.base.sha);
+    if (headSha && (!runHead || !sameSha(runHead, headSha))) return false;
+    if (baseRef && runBaseRef && runBaseRef !== baseRef) return false;
+    if (baseSha && runBaseSha && !sameSha(runBaseSha, baseSha)) return false;
+  } else if (run.event === 'pull_request_target') {
+    return false;
+  }
   if (commentCreatedMs != null) {
     const start = Date.parse(run.created_at || 0);
     const end = Date.parse(run.updated_at || run.created_at || 0);
@@ -522,14 +543,42 @@ function reviewBodyIsClean(review, headSha, uniqueResolve) {
   return false;
 }
 
-function reviewCompletedHeadOutcome(review, headSha, uniqueResolve, headPushedMs, baseChangedMs) {
+export function dismissalMsByReviewId(timeline) {
+  const map = new Map();
+  for (const e of timeline || []) {
+    if (!e || e.event !== 'review_dismissed') continue;
+    const id = Number(
+      (e.dismissed_review && e.dismissed_review.review_id) || e.review_id,
+    );
+    const ms = Date.parse(e.created_at || 0);
+    if (!Number.isFinite(id) || id <= 0 || !Number.isFinite(ms)) continue;
+    const prev = map.get(id);
+    if (prev == null || ms > prev) map.set(id, ms);
+  }
+  return map;
+}
+
+function dismissedReviewOutcomeMs(review, dismissalById) {
+  const reviewId = Number(review && review.id);
+  const fromTimeline = dismissalById && Number.isFinite(reviewId) && reviewId > 0
+    ? dismissalById.get(reviewId)
+    : undefined;
+  return Number.isFinite(fromTimeline) ? fromTimeline : Number.POSITIVE_INFINITY;
+}
+
+function reviewCompletedHeadOutcome(
+  review, headSha, uniqueResolve, headPushedMs, baseChangedMs, dismissalById,
+) {
   if (!isCodexUser(review && review.user)) return null;
   if (!prefixUniquelyMatchesHead(review.commit_id, headSha, uniqueResolve)) return null;
   const submitted = Date.parse(review.submitted_at || 0);
   const exact = fullSha(review.commit_id) !== '' && sameSha(review.commit_id, headSha);
-  if (!evidenceAfterHeadPush(submitted, headPushedMs, { fullExact: exact })) return null;
   const dismissed = String(review.state).toUpperCase() === 'DISMISSED';
-  if (dismissed) return { ms: submitted, clean: false, dismissed: true, source: 'review' };
+  if (dismissed) {
+    const ms = dismissedReviewOutcomeMs(review, dismissalById);
+    return { ms, clean: false, dismissed: true, source: 'review' };
+  }
+  if (!evidenceAfterHeadPush(submitted, headPushedMs, { fullExact: exact })) return null;
   if (!(submitted > (baseChangedMs || 0))) return null;
   return {
     ms: submitted,
@@ -583,11 +632,13 @@ export function latestCodexHeadOutcome({
   uniqueResolve,
   headPushedMs,
   baseChangedMs,
+  timeline,
 } = {}) {
+  const dismissalById = dismissalMsByReviewId(timeline);
   const outcomes = [];
   for (const r of reviews || []) {
     const o = reviewCompletedHeadOutcome(
-      r, headSha, uniqueResolve, headPushedMs, baseChangedMs,
+      r, headSha, uniqueResolve, headPushedMs, baseChangedMs, dismissalById,
     );
     if (o) outcomes.push(o);
   }
@@ -636,6 +687,171 @@ export function shouldPostWaiverRecord(event, pr, headSha) {
     baseChangedMs: 0,
     lastWaiverEvent: null,
   });
+}
+
+export function shouldRecordWaiverOnEvent(eventName, payload = {}) {
+  if (eventName === 'schedule' || eventName === 'workflow_dispatch') return true;
+  if (eventName === 'pull_request_target') {
+    return payload.action === 'labeled' &&
+      payload.label && payload.label.name === WAIVE_LABEL &&
+      WAIVER_ACTORS.has((payload.sender && payload.sender.login) || '');
+  }
+  return false;
+}
+
+export function existingWaiverRecordForHead(comments, {
+  headSha,
+  baseRef,
+  baseSha,
+  prNumber,
+  actor,
+  labeledMs,
+} = {}) {
+  return (comments || []).some(c => {
+    if (!isGithubActionsBot(c && c.user)) return false;
+    const rec = parseWaiverRecord(c && c.body);
+    if (!rec) return false;
+    if (!sameSha(rec.sha, headSha)) return false;
+    if (rec.base !== baseRef) return false;
+    if (baseSha && !sameSha(rec.baseSha, baseSha)) return false;
+    if (prNumber != null && rec.pr != null && Number(rec.pr) !== Number(prNumber)) return false;
+    if (actor && rec.actor !== actor) return false;
+    if (labeledMs != null) {
+      const commentMs = Date.parse((c && c.created_at) || 0);
+      if (!Number.isFinite(commentMs) || commentMs < labeledMs) return false;
+    }
+    return true;
+  });
+}
+
+/**
+ * Schedule / dispatch may post a waiver only when Bill's latest
+ * `codex-waived` event is `labeled` after the last head move and base
+ * retarget, and no binding comment yet exists for this sha/base/PR.
+ * A leftover label after a new push does not mint a new waiver.
+ */
+export function shouldScanRecordWaiver({
+  labels,
+  lastWaiverEvent,
+  lastHeadMoveMs,
+  baseChangedMs,
+  comments,
+  headSha,
+  baseRef,
+  baseSha,
+  prNumber,
+} = {}) {
+  if (!labels || !labels.includes(WAIVE_LABEL)) return false;
+  if (!lastWaiverEvent || lastWaiverEvent.event !== 'labeled') return false;
+  const actor = waiverActorLogin(lastWaiverEvent);
+  if (!WAIVER_ACTORS.has(actor)) return false;
+  const eventMs = Date.parse(lastWaiverEvent.created_at || 0);
+  if (!Number.isFinite(eventMs)) return false;
+  if (baseChangedMs && eventMs <= baseChangedMs) return false;
+  if (lastHeadMoveMs && eventMs <= lastHeadMoveMs) return false;
+  if (!fullSha(headSha) || !baseRef || !fullSha(baseSha)) return false;
+  return !existingWaiverRecordForHead(comments, {
+    headSha,
+    baseRef,
+    baseSha,
+    prNumber,
+    actor,
+    labeledMs: eventMs,
+  });
+}
+
+export async function recordTrustedWaivers({
+  client,
+  owner,
+  repo,
+  eventName,
+  payload = {},
+  runId,
+} = {}) {
+  if (!shouldRecordWaiverOnEvent(eventName, payload)) return { posted: [] };
+  const posted = [];
+  const numbers = [];
+  if (eventName === 'pull_request_target' && payload.pull_request) {
+    numbers.push(payload.pull_request.number);
+  } else {
+    const requested = payload.inputs && payload.inputs.pr_number;
+    if (requested) {
+      const n = parseInt(requested, 10);
+      if (!Number.isFinite(n)) throw new Error(`bad pr_number: ${requested}`);
+      numbers.push(n);
+    } else {
+      const prs = await client.paginate(`/repos/${owner}/${repo}/pulls?state=open`);
+      for (const p of prs) numbers.push(p.number);
+    }
+  }
+
+  for (const n of numbers) {
+    const pr = await client.get(`/repos/${owner}/${repo}/pulls/${n}`);
+    const headSha = fullSha(pr.head && pr.head.sha);
+    const baseRef = pr.base && pr.base.ref;
+    const baseSha = fullSha(pr.base && pr.base.sha);
+    if (!headSha || !baseRef || !baseSha) continue;
+
+    let actor = (payload.sender && payload.sender.login) || '';
+    if (eventName === 'pull_request_target') {
+      if (!shouldPostWaiverRecord({
+        name: eventName,
+        action: payload.action,
+        sender: payload.sender,
+        label: payload.label,
+        pull_request: payload.pull_request,
+      }, pr, headSha)) {
+        continue;
+      }
+    } else {
+      const [comments, timeline] = await Promise.all([
+        client.paginate(`/repos/${owner}/${repo}/issues/${n}/comments`),
+        client.paginate(`/repos/${owner}/${repo}/issues/${n}/timeline`),
+      ]);
+      const facts = timelineFacts(timeline);
+      const labels = (pr.labels || []).map(l => l.name);
+      if (!shouldScanRecordWaiver({
+        labels,
+        lastWaiverEvent: facts.lastWaiverEvent,
+        lastHeadMoveMs: facts.lastHeadMoveMs,
+        baseChangedMs: facts.baseChangedMs,
+        comments,
+        headSha,
+        baseRef,
+        baseSha,
+        prNumber: n,
+      })) {
+        continue;
+      }
+      actor = waiverActorLogin(facts.lastWaiverEvent);
+    }
+
+    if (!WAIVER_ACTORS.has(actor)) continue;
+    const run = Number(runId);
+    if (!Number.isFinite(run) || run <= 0) continue;
+
+    const comments = await client.paginate(`/repos/${owner}/${repo}/issues/${n}/comments`);
+    const already = comments.some(c =>
+      isGithubActionsBot(c && c.user) &&
+      (c.body || '').includes(WAIVER_MARKER) &&
+      (c.body || '').includes(`"run":${run}`) &&
+      (c.body || '').includes(`"sha":"${headSha}"`),
+    );
+    if (already) continue;
+
+    await client.post(`/repos/${owner}/${repo}/issues/${n}/comments`, {
+      body: formatWaiverComment({
+        sha: headSha,
+        base: baseRef,
+        baseSha,
+        actor,
+        pr: n,
+        run,
+      }),
+    });
+    posted.push(n);
+  }
+  return { posted };
 }
 
 export function evaluatePr(input) {
@@ -704,6 +920,7 @@ export function evaluatePr(input) {
     uniqueResolve,
     headPushedMs,
     baseChangedMs: facts.baseChangedMs,
+    timeline: input.timeline || [],
   });
 
   const usageLimited = comments.some(c => {
@@ -949,7 +1166,8 @@ export function refreshAction({ job, verdict, eventName, runAttempt } = {}) {
   if (next && current === next) return 'skip-unchanged';
 
   if (!next) {
-    if (current === 'success') return 'skip-unchanged';
+    if (nearCeiling && current === 'success') return 'ceiling-fail';
+    if (current === 'success') return 'rerun';
     if (eventName === 'schedule' && attempt >= MAX_RUN_ATTEMPTS) return 'capped';
     return 'rerun';
   }
@@ -974,8 +1192,13 @@ export function rerunPlan(run, job, { eventName, nowMs, lastJobCompletedMs, verd
   });
   if (action !== 'rerun') return action;
   // Back off only the no-verdict waiting poll. A conclusion flip
-  // (dismissal, new clean review) reruns immediately.
-  if (eventName === 'schedule' && !(verdict && verdict.conclusion)) {
+  // (dismissal, new clean review) reruns immediately. A green gate
+  // whose reevaluation failed must not wait — invalidate now.
+  if (
+    eventName === 'schedule' &&
+    !(verdict && verdict.conclusion) &&
+    job.conclusion !== 'success'
+  ) {
     const completedMs = lastJobCompletedMs != null
       ? Number(lastJobCompletedMs)
       : Date.parse((job && job.completed_at) || run.updated_at || 0);
@@ -1271,37 +1494,6 @@ async function waitForRun(client, owner, repo, runId, opts = {}) {
   }
 }
 
-async function ensureWaiverComment(client, owner, repo, pr, headSha, event) {
-  if (!shouldPostWaiverRecord(event, pr, headSha)) return false;
-  const base = pr.base && pr.base.ref;
-  const baseSha = fullSha(pr.base && pr.base.sha);
-  const runId = Number((event && event.runId) || process.env.GITHUB_RUN_ID);
-  if (!base || !baseSha || !Number.isFinite(runId) || runId <= 0) return false;
-  const comments = await client.paginate(`/repos/${owner}/${repo}/issues/${pr.number}/comments`);
-  const resolveWaiverRun = await buildWaiverResolver(client, owner, repo, comments);
-  if (comments.some(c => waiverRecordAcceptsHead(c, {
-    headSha,
-    prNumber: pr.number,
-    baseRef: base,
-    baseSha,
-    resolveWaiverRun,
-  }))) {
-    return false;
-  }
-  const actor = (event.sender && event.sender.login) || '';
-  await client.post(`/repos/${owner}/${repo}/issues/${pr.number}/comments`, {
-    body: formatWaiverComment({
-      sha: headSha,
-      base,
-      baseSha,
-      actor,
-      pr: pr.number,
-      run: runId,
-    }),
-  });
-  return true;
-}
-
 export async function runRerun({ env, readFile, github } = {}) {
   const environment = env || process.env;
   const read = readFile || (path => fs.readFileSync(path, 'utf8'));
@@ -1323,6 +1515,23 @@ export async function runRerun({ env, readFile, github } = {}) {
     console.log('Ignoring untrusted refresh event');
     return { reran: [] };
   }
+  try {
+    await recordTrustedWaivers({
+      client,
+      owner,
+      repo,
+      eventName,
+      payload,
+      runId: environment.GITHUB_RUN_ID,
+    });
+  } catch (err) {
+    const status = err && err.status;
+    if (status === 403 || status === 422) {
+      console.log(`waiver record skipped (${status} ${err.message})`);
+    } else {
+      throw err;
+    }
+  }
   const numbers = await resolvePrNumbers({ eventName, payload, client, owner, repo });
   if (numbers.length === 0) {
     console.log('No pull requests to refresh.');
@@ -1337,16 +1546,6 @@ export async function runRerun({ env, readFile, github } = {}) {
     if (!headSha) {
       console.log(`#${n}: skip, head is not a 40-character SHA`);
       continue;
-    }
-    try {
-      await ensureWaiverComment(client, owner, repo, pr, headSha, event);
-    } catch (err) {
-      const status = err && err.status;
-      if (status === 403 || status === 422) {
-        console.log(`#${n}: waiver comment skipped (${status} ${err.message})`);
-      } else {
-        throw err;
-      }
     }
     const runs = await client.paginate(
       `/repos/${owner}/${repo}/actions/workflows/${CI_WORKFLOW_FILE}/runs?head_sha=${headSha}&event=pull_request`,
