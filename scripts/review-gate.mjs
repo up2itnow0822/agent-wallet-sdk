@@ -376,10 +376,10 @@ export function waiverRunProvenanceAccepts(run, jobs, {
 } = {}) {
   if (!run || !isRefreshWorkflowPath(run.path)) return false;
   if (!TRUSTED_WAIVER_RECORD_EVENTS.has(run.event)) return false;
+  if (run.status && run.status !== 'completed') return false;
+  if (run.conclusion && run.conclusion !== 'success') return false;
   const job = (jobs || []).find(j => j.name === WAIVER_RECORD_JOB);
-  if (!job) return false;
-  if (job.status && job.status !== 'completed' && job.status !== 'in_progress') return false;
-  if (job.status === 'completed' && job.conclusion && job.conclusion !== 'success') return false;
+  if (!job || job.status !== 'completed' || job.conclusion !== 'success') return false;
   const prs = run.pull_requests || [];
   if (prs.length > 0) {
     const match = prs.find(p => prNumber == null || Number(p.number) === Number(prNumber));
@@ -505,8 +505,10 @@ export function isWaiverBoundToCurrentHead({
   baseSha,
   resolveWaiverRun,
   lastWaiverEvent,
+  headMovedAfterWaiver,
 }) {
   if (!labels || !labels.includes(WAIVE_LABEL)) return false;
+  if (headMovedAfterWaiver) return false;
   return (comments || []).some(c =>
     latestWaiverLabelAcceptsRecord(lastWaiverEvent, c) &&
     waiverRecordAcceptsHead(c, {
@@ -733,7 +735,8 @@ function isFreshBillWaiver(pr, headSha, event, facts) {
     payloadBase === (pr.base && pr.base.ref) &&
     (!pr.base || !pr.base.sha || !payloadBaseSha || sameSha(payloadBaseSha, pr.base.sha)) &&
     WAIVER_ACTORS.has(sender) &&
-    afterBase
+    afterBase &&
+    !facts.headMovedAfterWaiver
   );
 }
 
@@ -761,21 +764,26 @@ export function existingWaiverRecordForHead(comments, {
   prNumber,
   actor,
   labeledMs,
+  lastWaiverEvent,
+  resolveWaiverRun,
 } = {}) {
   return (comments || []).some(c => {
-    if (!isGithubActionsBot(c && c.user)) return false;
-    const rec = parseWaiverRecord(c && c.body);
-    if (!rec) return false;
-    if (!sameSha(rec.sha, headSha)) return false;
-    if (rec.base !== baseRef) return false;
-    if (baseSha && !sameSha(rec.baseSha, baseSha)) return false;
-    if (prNumber != null && rec.pr != null && Number(rec.pr) !== Number(prNumber)) return false;
-    if (actor && rec.actor !== actor) return false;
-    if (labeledMs != null) {
+    if (lastWaiverEvent && !latestWaiverLabelAcceptsRecord(lastWaiverEvent, c)) return false;
+    if (labeledMs != null && !lastWaiverEvent) {
       const commentMs = Date.parse((c && c.created_at) || 0);
       if (!Number.isFinite(commentMs) || commentMs < labeledMs) return false;
     }
-    return true;
+    if (actor) {
+      const rec = parseWaiverRecord(c && c.body);
+      if (!rec || rec.actor !== actor) return false;
+    }
+    return waiverRecordAcceptsHead(c, {
+      headSha,
+      prNumber,
+      baseRef,
+      baseSha,
+      resolveWaiverRun,
+    });
   });
 }
 
@@ -798,6 +806,7 @@ export function shouldScanRecordWaiver({
   baseRef,
   baseSha,
   prNumber,
+  resolveWaiverRun,
 } = {}) {
   if (!labels || !labels.includes(WAIVE_LABEL)) return false;
   if (!lastWaiverEvent || lastWaiverEvent.event !== 'labeled') return false;
@@ -817,7 +826,8 @@ export function shouldScanRecordWaiver({
     baseSha,
     prNumber,
     actor,
-    labeledMs: eventMs,
+    lastWaiverEvent,
+    resolveWaiverRun,
   });
 }
 
@@ -872,6 +882,7 @@ export async function recordTrustedWaivers({
       const facts = timelineFacts(timeline);
       const labels = (pr.labels || []).map(l => l.name);
       const headPushedMs = await loadHeadPushMs(client, owner, repo, headSha);
+      const resolveWaiverRun = await buildWaiverResolver(client, owner, repo, comments);
       if (!shouldScanRecordWaiver({
         labels,
         lastWaiverEvent: facts.lastWaiverEvent,
@@ -883,6 +894,7 @@ export async function recordTrustedWaivers({
         baseRef,
         baseSha,
         prNumber: n,
+        resolveWaiverRun,
       })) {
         continue;
       }
@@ -952,6 +964,7 @@ export function evaluatePr(input) {
           baseSha,
           resolveWaiverRun,
           lastWaiverEvent: facts.lastWaiverEvent,
+          headMovedAfterWaiver: facts.headMovedAfterWaiver,
         })) {
       return {
         prNumber,
@@ -1274,7 +1287,39 @@ export function rerunPlan(run, job, { eventName, nowMs, lastJobCompletedMs, verd
   return 'rerun';
 }
 
-export function createGithubClient({ token, fetchImpl, apiBase } = {}) {
+export function githubClientFromOctokit(octokit) {
+  if (!octokit || typeof octokit.request !== 'function') {
+    throw new Error('octokit client is required');
+  }
+  async function request(method, path, body) {
+    const res = await octokit.request(`${method} ${path}`, body !== undefined ? { data: body } : {});
+    return { status: res.status, data: res.data };
+  }
+  async function paginate(path, listKey) {
+    const items = [];
+    let page = 1;
+    const sep = path.includes('?') ? '&' : '?';
+    for (;;) {
+      const { data } = await request('GET', `${path}${sep}per_page=100&page=${page}`);
+      const batch = listKey
+        ? (data && data[listKey]) || []
+        : (Array.isArray(data) ? data : []);
+      items.push(...batch);
+      if (batch.length < 100) break;
+      page += 1;
+    }
+    return items;
+  }
+  return {
+    request,
+    paginate,
+    get: async path => (await request('GET', path)).data,
+    post: async (path, body) => (await request('POST', path, body)).data,
+  };
+}
+
+export function createGithubClient({ token, fetchImpl, apiBase, octokit } = {}) {
+  if (octokit) return githubClientFromOctokit(octokit);
   const fetchFn = fetchImpl || globalThis.fetch;
   const base = apiBase || 'https://api.github.com';
   if (!token) throw new Error('GITHUB_TOKEN is required for review-gate API reads');

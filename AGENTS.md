@@ -50,7 +50,11 @@
   stays a faster path while GitHub still allows it. `issue_comment`
   never records a waiver. Evaluate accepts a cited run only when its
   event is `pull_request_target`, `schedule`, or `workflow_dispatch`,
-  the path is this workflow file, and `record-waiver` succeeded.
+  the path is this workflow file, and `record-waiver` finished with
+  `status: completed` and `conclusion: success`. A syntactically valid
+  github-actions[bot] marker does not suppress a later genuine record.
+  A later `committed` or force-push after the label invalidates a
+  persisted binding even if the SHA returns (A→B→A).
 
 ## Verification
 

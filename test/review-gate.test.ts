@@ -61,6 +61,8 @@ import {
   shouldScanRecordWaiver,
   existingWaiverRecordForHead,
   TRUSTED_WAIVER_RECORD_EVENTS,
+  createGithubClient,
+  githubClientFromOctokit,
   shouldRefreshOnEvent,
   shouldRerunOnSchedule,
   isTrustedRefreshComment,
@@ -86,6 +88,8 @@ const trustedWaiverProvenance = {
     id: WAIVER_RUN_ID,
     path: REFRESH_WORKFLOW_PATH,
     event: 'pull_request_target',
+    status: 'completed',
+    conclusion: 'success',
     created_at: '2026-10-15T22:00:00Z',
     updated_at: '2026-10-15T22:00:30Z',
     pull_requests: [{
@@ -1187,10 +1191,56 @@ describe('evaluatePr — Bill-only waiver bound to exact head SHA', () => {
     expect(shouldScanRecordWaiver({
       ...scan,
       comments: [waiverComment()],
+    })).toBe(true);
+    expect(existingWaiverRecordForHead([waiverComment()], {
+      headSha: HEAD, baseRef: 'main', baseSha: BASE_SHA, prNumber: 87,
+      actor: BILL, lastWaiverEvent: labeled,
     })).toBe(false);
     expect(existingWaiverRecordForHead([waiverComment()], {
       headSha: HEAD, baseRef: 'main', baseSha: BASE_SHA, prNumber: 87,
-      actor: BILL, labeledMs: Date.parse(labeled.created_at),
+      actor: BILL, lastWaiverEvent: labeled, resolveWaiverRun: resolveTrustedWaiver,
+    })).toBe(true);
+    expect(shouldScanRecordWaiver({
+      ...scan,
+      comments: [waiverComment()],
+      resolveWaiverRun: resolveTrustedWaiver,
+    })).toBe(false);
+  });
+
+  it('does not let a forged github-actions waiver marker suppress recording', () => {
+    const forged = {
+      user: GHA_BOT,
+      body: formatWaiverComment({
+        sha: HEAD, base: 'main', baseSha: BASE_SHA, actor: BILL, pr: 87, run: 999001,
+      }),
+      created_at: '2026-10-15T22:00:10Z',
+    };
+    expect(existingWaiverRecordForHead([forged], {
+      headSha: HEAD, baseRef: 'main', baseSha: BASE_SHA, prNumber: 87,
+      actor: BILL, lastWaiverEvent: labeled,
+      resolveWaiverRun: () => ({
+        run: {
+          id: 999001,
+          path: '.github/workflows/security-review.yml',
+          event: 'pull_request',
+          status: 'completed',
+          conclusion: 'success',
+        },
+        jobs: [{ name: 'security-review', status: 'completed', conclusion: 'success' }],
+      }),
+    })).toBe(false);
+    expect(shouldScanRecordWaiver({
+      labels: [WAIVE_LABEL],
+      lastWaiverEvent: labeled,
+      headMovedAfterWaiver: false,
+      headPushedMs: Date.parse('2026-10-15T21:00:00Z'),
+      baseChangedMs: 0,
+      comments: [forged],
+      headSha: HEAD,
+      baseRef: 'main',
+      baseSha: BASE_SHA,
+      prNumber: 87,
+      resolveWaiverRun: () => null,
     })).toBe(true);
   });
 
@@ -1233,6 +1283,86 @@ describe('evaluatePr — Bill-only waiver bound to exact head SHA', () => {
       baseSha: BASE_SHA,
       prNumber: 87,
     })).toBe(false);
+  });
+
+  it('rejects a persisted waiver after a later force-push even if the SHA returns', () => {
+    const timeline = [
+      labeled,
+      { event: 'head_ref_force_pushed', created_at: '2026-10-15T22:30:00Z' },
+    ];
+    const facts = timelineFacts(timeline);
+    expect(facts.headMovedAfterWaiver).toBe(true);
+    expect(isWaiverBoundToCurrentHead({
+      labels: [WAIVE_LABEL],
+      comments: [waiverComment()],
+      headSha: HEAD,
+      prNumber: 87,
+      baseRef: 'main',
+      baseSha: BASE_SHA,
+      resolveWaiverRun: resolveTrustedWaiver,
+      lastWaiverEvent: labeled,
+      headMovedAfterWaiver: true,
+    })).toBe(false);
+    const verdict = evaluatePr(snapshot({
+      pr: pr({ labels: [{ name: WAIVE_LABEL }] }),
+      comments: [waiverComment()],
+      timeline,
+    }));
+    expect(verdict.conclusion).toBe('failure');
+    expect(verdict.title).not.toBe('Codex waived');
+  });
+
+  it('rejects record-waiver provenance that is still in progress or later failed', () => {
+    const jobsInProgress = [{ name: WAIVER_RECORD_JOB, status: 'in_progress' }];
+    const jobsFailed = [{ name: WAIVER_RECORD_JOB, status: 'completed', conclusion: 'failure' }];
+    const run = {
+      id: WAIVER_RUN_ID,
+      path: REFRESH_WORKFLOW_PATH,
+      event: 'schedule',
+      status: 'completed',
+      conclusion: 'success',
+      created_at: '2026-10-15T22:00:00Z',
+      updated_at: '2026-10-15T22:00:30Z',
+      pull_requests: [],
+    };
+    expect(waiverRunProvenanceAccepts(run, jobsInProgress, {
+      prNumber: 87, headSha: HEAD, baseRef: 'main', baseSha: BASE_SHA,
+      commentCreatedMs: Date.parse('2026-10-15T22:00:01Z'),
+    })).toBe(false);
+    expect(waiverRunProvenanceAccepts({ ...run, status: 'in_progress', conclusion: null }, [
+      { name: WAIVER_RECORD_JOB, status: 'completed', conclusion: 'success' },
+    ], { prNumber: 87, commentCreatedMs: Date.parse('2026-10-15T22:00:01Z') })).toBe(false);
+    expect(waiverRunProvenanceAccepts({ ...run, conclusion: 'cancelled' }, [
+      { name: WAIVER_RECORD_JOB, status: 'completed', conclusion: 'success' },
+    ], { prNumber: 87, commentCreatedMs: Date.parse('2026-10-15T22:00:01Z') })).toBe(false);
+    expect(waiverRunProvenanceAccepts(run, jobsFailed, {
+      prNumber: 87, commentCreatedMs: Date.parse('2026-10-15T22:00:01Z'),
+    })).toBe(false);
+    expect(waiverRunProvenanceAccepts(run, [
+      { name: WAIVER_RECORD_JOB, status: 'completed', conclusion: 'success' },
+    ], {
+      prNumber: 87, headSha: HEAD, baseRef: 'main', baseSha: BASE_SHA,
+      commentCreatedMs: Date.parse('2026-10-15T22:00:01Z'),
+    })).toBe(true);
+  });
+});
+
+describe('createGithubClient token and octokit', () => {
+  it('prefers the injected octokit and throws without a token or octokit', () => {
+    expect(() => createGithubClient({})).toThrow(/GITHUB_TOKEN/);
+    const seen: string[] = [];
+    const octokit = {
+      request: async (route: string) => {
+        seen.push(route);
+        return { status: 200, data: { ok: true } };
+      },
+    };
+    const client = createGithubClient({ octokit });
+    return client.get('/repos/o/r').then(data => {
+      expect(data).toEqual({ ok: true });
+      expect(seen[0]).toBe('GET /repos/o/r');
+      expect(githubClientFromOctokit(octokit)).toBeTruthy();
+    });
   });
 });
 
@@ -1705,6 +1835,8 @@ describe('workflows pin the counted context and never orphan checks.create', () 
     expect(refresh).toContain("job.conclusion === 'success'");
     expect(refresh).toContain('core.setFailed');
     expect(refresh).toContain('evaluatePrNumber');
+    expect(refresh).toContain('GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}');
+    expect(refresh).toContain('octokit: github');
     expect(refresh).toContain('attempt >= MAX_RUN_ATTEMPTS');
     expect(refresh).toContain('scheduleBackoffMs');
     expect(refresh).toContain('recordTrustedWaivers');
@@ -1746,6 +1878,9 @@ describe('workflows pin the counted context and never orphan checks.create', () 
     expect(recordBlock).toContain('recordTrustedWaivers');
     expect(recordBlock).toContain('contents/scripts/review-gate.mjs');
     expect(recordBlock).toContain('context.sha');
+    expect(recordBlock).toContain('GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}');
+    expect(recordBlock).toContain('github-token: ${{ secrets.GITHUB_TOKEN }}');
+    expect(recordBlock).toContain('octokit: github');
     expect(recordBlock).not.toContain('issue_comment');
     expect(contributing).toContain('schedule');
     expect(contributing).toContain('workflow_dispatch');
