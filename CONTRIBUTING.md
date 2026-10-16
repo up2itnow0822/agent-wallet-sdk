@@ -14,8 +14,11 @@ on using `pull_request_target` as a required status.
 current head (a "Didn't find any major issues" receipt or a summary whose
 state has `has_any_findings: false`) — never merely because a Codex review
 exists — or Bill applies `codex-waived` on that exact head and base.
-Label, comment (created / edited / deleted), retarget (`edited`), and
-schedule events re-run that same CI job; they do not post a separate check.
+Trusted Codex comments (created / edited / deleted), Bill's `codex-waived`
+label, base retarget, ready-for-review, reopen, schedule, and dispatch
+re-run that same CI job; they do not post a separate check. Author
+comments, title/body edits, junk labels, and `github-actions[bot]`
+comments (including `security-review.yml`) do not consume a rerun.
 
 ### Trusted evaluator
 
@@ -102,10 +105,16 @@ Codex often cites a 7-character prefix. Those still count, but only when:
 ### Refresh budget
 
 `review-gate-refresh` caps **scheduled** reruns at 8 per CI run (GitHub's
-limit is 50). Codex comments, waiver labels, and manual dispatch still
-rerun after that so a late clean review is not stuck. The 10-minute
-schedule backs off exponentially (10 / 20 / 40 / 80 minutes) and rechecks
-green gates. A new push opens a new CI run.
+limit is 50). Trusted Codex comments, waiver labels, and manual dispatch
+still rerun after that so a late clean review is not stuck. Untrusted
+comments never call the rerun API. The 10-minute schedule backs off
+exponentially (10 / 20 / 40 / 80 minutes) and rechecks green gates. A new
+push opens a new CI run.
+
+Fork PRs can have an empty `workflow_run.pull_requests[]` (actions/runner
+#3444). Refresh then matches the `pull_request` CI run by head SHA + head
+repository + branch. If several open PRs share a SHA and the run cannot be
+attributed, refresh fails closed rather than rerunning the wrong job.
 
 ## How to Contribute
 

@@ -11,7 +11,9 @@
  * The pull_request_target / issue_comment / schedule workflow reruns the
  * CI job; it never calls checks.create. pull_request_review is omitted
  * because GitHub would run the PR's copy of that workflow with
- * actions: write.
+ * actions: write. Refresh starts only on trusted evidence (Codex bot
+ * comments, Bill's waiver label, base retarget, ready/reopen, schedule,
+ * dispatch) so authors cannot burn GitHub's 50-rerun cap.
  *
  * Short-SHA Codex comments stay valid (PR #88) only when the prefix
  * uniquely resolves to the current 40-char head AND the comment's
@@ -695,23 +697,117 @@ export function runMatchesPr(run, prNumber) {
   return prs.some(p => Number(p.number) === n);
 }
 
-export function selectCiRun(runs, { prNumber } = {}) {
-  const matches = (runs || []).filter(r => {
-    const path = r.path || '';
-    const isCi = path === `.github/workflows/${CI_WORKFLOW_FILE}` ||
-      path.endsWith(`/${CI_WORKFLOW_FILE}`) ||
-      path === CI_WORKFLOW_FILE ||
-      r.name === 'CI';
-    if (!(isCi && r.event === 'pull_request')) return false;
-    if (prNumber != null && !runMatchesPr(r, prNumber)) return false;
-    return true;
-  });
-  matches.sort((a, b) => {
+export function isCiPullRequestRun(run) {
+  if (!run || run.event !== 'pull_request') return false;
+  const path = run.path || '';
+  return path === `.github/workflows/${CI_WORKFLOW_FILE}` ||
+    path.endsWith(`/${CI_WORKFLOW_FILE}`) ||
+    path === CI_WORKFLOW_FILE ||
+    run.name === 'CI';
+}
+
+export function runIsUnattributed(run) {
+  return ((run && run.pull_requests) || []).length === 0;
+}
+
+export function headRepoFullName(pr) {
+  const name = pr && pr.head && pr.head.repo && pr.head.repo.full_name;
+  return typeof name === 'string' ? name : '';
+}
+
+export function runHeadRepoFullName(run) {
+  const name = run && run.head_repository && run.head_repository.full_name;
+  return typeof name === 'string' ? name : '';
+}
+
+export function prHeadBranch(pr) {
+  const ref = pr && pr.head && pr.head.ref;
+  return typeof ref === 'string' ? ref : '';
+}
+
+/**
+ * Fork PRs often have an empty workflow_run.pull_requests[] (actions/runner#3444).
+ * Match the already-SHA-filtered run by head repo + branch instead.
+ * Never treat a run attributed to some other PR as a candidate.
+ */
+export function runMatchesUnattributedHead(run, pr) {
+  if (!run || !pr || !runIsUnattributed(run)) return false;
+  const sha = fullSha(pr.head && pr.head.sha);
+  const branch = prHeadBranch(pr);
+  const repoName = headRepoFullName(pr);
+  if (!sha || !branch || !repoName) return false;
+  if (!sameSha(run.head_sha, sha)) return false;
+  if ((run.head_branch || '') !== branch) return false;
+  return runHeadRepoFullName(run) === repoName;
+}
+
+export function countOpenHeadsWithSha(openPrs, headSha) {
+  const sha = fullSha(headSha);
+  if (!sha) return 0;
+  return (openPrs || []).filter(p => sameSha(p.head && p.head.sha, sha)).length;
+}
+
+export function latestCiRun(runs) {
+  const list = (runs || []).slice();
+  list.sort((a, b) => {
     const byNumber = (b.run_number || 0) - (a.run_number || 0);
     if (byNumber !== 0) return byNumber;
     return Date.parse(b.created_at || 0) - Date.parse(a.created_at || 0);
   });
-  return matches[0] || null;
+  return list[0] || null;
+}
+
+/**
+ * Pick the pull_request CI run that belongs to this PR.
+ *   1. Numbered pull_requests[] match wins.
+ *   2. Else an unattributed run whose head SHA + repo + branch match.
+ *   3. Else, if this SHA belongs to only one open PR and there is
+ *      exactly one unattributed CI run, use it.
+ *   4. Else null (ambiguous / missing). Never use a run whose
+ *      pull_requests[] lists a different PR.
+ */
+export function selectCiRun(runs, { prNumber, pr, headIsUnique } = {}) {
+  const ci = (runs || []).filter(isCiPullRequestRun);
+  const numbered = ci.filter(r => runMatchesPr(r, prNumber));
+  if (numbered.length > 0) return latestCiRun(numbered);
+
+  const unattributed = ci.filter(runIsUnattributed);
+  const headMatched = unattributed.filter(r => runMatchesUnattributedHead(r, pr));
+  if (headMatched.length > 0) return latestCiRun(headMatched);
+
+  if (headIsUnique && unattributed.length === 1) return unattributed[0];
+  return null;
+}
+
+export function isTrustedRefreshComment(event) {
+  if (!event || event.name !== 'issue_comment') return false;
+  if (!event.issue || !event.issue.pull_request) return false;
+  const action = event.action;
+  if (action !== 'created' && action !== 'edited' && action !== 'deleted') return false;
+  return isCodexUser(event.comment && event.comment.user);
+}
+
+export function isTrustedPullRequestRefreshEvent(event) {
+  if (!event || event.name !== 'pull_request_target') return false;
+  const action = event.action;
+  if (action === 'ready_for_review' || action === 'reopened') return true;
+  if (event.label && event.label.name === WAIVE_LABEL) {
+    if (action === 'unlabeled') return true;
+    if (action === 'labeled') {
+      const sender = (event.sender && event.sender.login) || '';
+      return WAIVER_ACTORS.has(sender);
+    }
+  }
+  if (action === 'edited') return !!(event.changes && event.changes.base);
+  return false;
+}
+
+export function shouldRefreshOnEvent(event) {
+  if (!event || !event.name) return false;
+  if (event.name === 'schedule' || event.name === 'workflow_dispatch') return true;
+  if (event.name === 'issue_comment') return isTrustedRefreshComment(event);
+  if (event.name === 'pull_request_target') return isTrustedPullRequestRefreshEvent(event);
+  return false;
 }
 
 export function selectReviewGateJob(jobs) {
@@ -1079,13 +1175,21 @@ export async function runRerun({ env, readFile, github } = {}) {
     sender: payload.sender,
     label: payload.label,
     pull_request: payload.pull_request,
+    issue: payload.issue,
+    comment: payload.comment,
+    changes: payload.changes,
   };
+  if (!shouldRefreshOnEvent(event)) {
+    console.log('Ignoring untrusted refresh event');
+    return { reran: [] };
+  }
   const numbers = await resolvePrNumbers({ eventName, payload, client, owner, repo });
   if (numbers.length === 0) {
     console.log('No pull requests to refresh.');
     return { reran: [] };
   }
 
+  const openPrs = await client.paginate(`/repos/${owner}/${repo}/pulls?state=open`);
   const reran = [];
   for (const n of numbers) {
     const pr = await client.get(`/repos/${owner}/${repo}/pulls/${n}`);
@@ -1108,7 +1212,8 @@ export async function runRerun({ env, readFile, github } = {}) {
       `/repos/${owner}/${repo}/actions/workflows/${CI_WORKFLOW_FILE}/runs?head_sha=${headSha}&event=pull_request`,
       'workflow_runs',
     );
-    const run = selectCiRun(runs, { prNumber: n });
+    const headIsUnique = countOpenHeadsWithSha(openPrs, headSha) <= 1;
+    const run = selectCiRun(runs, { prNumber: n, pr, headIsUnique });
     if (!run) {
       console.log(`#${n} ${headSha.slice(0, 7)}: no pull_request CI run for this PR on this head yet`);
       continue;

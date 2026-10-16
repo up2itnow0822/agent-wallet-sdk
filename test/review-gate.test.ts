@@ -42,12 +42,17 @@ import {
   rerunPlan,
   runAttemptCount,
   runMatchesPr,
+  runMatchesUnattributedHead,
   scheduleBackoffMs,
   selectCiRun,
   selectReviewGateJob,
   shaPrefixMatches,
   shouldPostWaiverRecord,
+  shouldRefreshOnEvent,
   shouldRerunOnSchedule,
+  isTrustedRefreshComment,
+  isTrustedPullRequestRefreshEvent,
+  countOpenHeadsWithSha,
   summaryMarksCleanHeadCompleted,
   summaryMarksHeadCompleted,
   waiverRecordAcceptsHead,
@@ -928,11 +933,112 @@ describe('refresh selects the counted CI job for this PR', () => {
     expect(run).toBeNull();
   });
 
-  it('rejects a SHA-matching run with no pull_requests attribution', () => {
+  it('rejects a SHA-matching run with no pull_requests attribution when the head is not unique', () => {
     const run = selectCiRun([
       { id: 2, event: 'pull_request', path: `.github/workflows/${CI_WORKFLOW_FILE}`, created_at: '2026-10-16T00:01:00Z', run_number: 11 },
-    ], { prNumber: 87 });
+    ], { prNumber: 87, headIsUnique: false });
     expect(run).toBeNull();
+  });
+
+  const forkPr = {
+    number: 87,
+    head: {
+      sha: HEAD,
+      ref: 'cloud/review-gate-ci-job-6adb',
+      repo: { full_name: 'contributor/agent-wallet-sdk' },
+    },
+  };
+  const forkRun = {
+    id: 4,
+    event: 'pull_request',
+    path: `.github/workflows/${CI_WORKFLOW_FILE}`,
+    created_at: '2026-10-16T00:03:00Z',
+    run_number: 13,
+    head_sha: HEAD,
+    head_branch: 'cloud/review-gate-ci-job-6adb',
+    head_repository: { full_name: 'contributor/agent-wallet-sdk' },
+    pull_requests: [],
+  };
+
+  it('matches an unattributed fork CI run by head SHA + repo + branch (actions/runner#3444)', () => {
+    expect(runMatchesUnattributedHead(forkRun, forkPr)).toBe(true);
+    const run = selectCiRun([forkRun], { prNumber: 87, pr: forkPr, headIsUnique: false });
+    expect(run && run.id).toBe(4);
+  });
+
+  it('does not match an unattributed run from a different fork or branch', () => {
+    expect(runMatchesUnattributedHead({
+      ...forkRun,
+      head_repository: { full_name: 'other/agent-wallet-sdk' },
+    }, forkPr)).toBe(false);
+    expect(runMatchesUnattributedHead({
+      ...forkRun,
+      head_branch: 'other-branch',
+    }, forkPr)).toBe(false);
+    expect(selectCiRun([{
+      ...forkRun,
+      head_repository: { full_name: 'other/agent-wallet-sdk' },
+    }], { prNumber: 87, pr: forkPr, headIsUnique: false })).toBeNull();
+  });
+
+  it('never uses a run attributed to a different PR, even when fork metadata matches', () => {
+    const stolen = {
+      ...forkRun,
+      id: 5,
+      pull_requests: [{ number: 90 }],
+    };
+    expect(runMatchesUnattributedHead(stolen, forkPr)).toBe(false);
+    expect(selectCiRun([stolen], { prNumber: 87, pr: forkPr, headIsUnique: true })).toBeNull();
+  });
+
+  it('prefers a numbered pull_requests match over an unattributed fork run', () => {
+    const run = selectCiRun([
+      forkRun,
+      { ...pr87run, id: 3, run_number: 12, head_sha: HEAD },
+    ], { prNumber: 87, pr: forkPr, headIsUnique: true });
+    expect(run && run.id).toBe(3);
+  });
+
+  it('uses the single unattributed run only when the head SHA is unique among open PRs', () => {
+    const bare = {
+      id: 6,
+      event: 'pull_request',
+      path: `.github/workflows/${CI_WORKFLOW_FILE}`,
+      created_at: '2026-10-16T00:04:00Z',
+      run_number: 14,
+      head_sha: HEAD,
+      pull_requests: [],
+    };
+    expect(selectCiRun([bare], { prNumber: 87, pr: forkPr, headIsUnique: true })?.id).toBe(6);
+    expect(selectCiRun([bare], { prNumber: 87, pr: forkPr, headIsUnique: false })).toBeNull();
+    expect(selectCiRun([bare, { ...bare, id: 7, run_number: 15 }], {
+      prNumber: 87, pr: forkPr, headIsUnique: true,
+    })).toBeNull();
+  });
+
+  it('fails closed when several open PRs share a SHA and the unattributed run is ambiguous', () => {
+    const otherFork = {
+      ...forkPr,
+      number: 91,
+      head: { ...forkPr.head, repo: { full_name: 'other/agent-wallet-sdk' } },
+    };
+    expect(countOpenHeadsWithSha([forkPr, otherFork], HEAD)).toBe(2);
+    expect(selectCiRun([
+      forkRun,
+      { ...forkRun, id: 8, head_repository: { full_name: 'other/agent-wallet-sdk' } },
+    ], { prNumber: 87, pr: { number: 87, head: { sha: HEAD } }, headIsUnique: false })).toBeNull();
+  });
+
+  it('disambiguates shared-SHA fork PRs by head repo + branch', () => {
+    const other = {
+      ...forkRun,
+      id: 8,
+      head_repository: { full_name: 'other/agent-wallet-sdk' },
+      head_branch: 'cloud/review-gate-ci-job-6adb',
+    };
+    expect(selectCiRun([forkRun, other], {
+      prNumber: 87, pr: forkPr, headIsUnique: false,
+    })?.id).toBe(4);
   });
 
   it('selects the job named exactly review-gate', () => {
@@ -983,6 +1089,81 @@ describe('refresh selects the counted CI job for this PR', () => {
     expect(rerunPlan({ ...run, run_attempt: 8 }, red, { eventName: 'pull_request_target' })).toBe('rerun');
     expect(rerunPlan({ ...run, run_attempt: 8 }, red, { eventName: 'workflow_dispatch' })).toBe('rerun');
     expect(rerunPlan({ ...run, run_attempt: 8 }, green, { eventName: 'schedule' })).toBe('capped');
+  });
+
+  it('refreshes only on trusted Codex comments, waiver labels, and base retargets', () => {
+    const codexComment = {
+      name: 'issue_comment',
+      action: 'edited',
+      issue: { pull_request: {} },
+      comment: { user: CODEX_BOT },
+    };
+    expect(isTrustedRefreshComment(codexComment)).toBe(true);
+    expect(shouldRefreshOnEvent(codexComment)).toBe(true);
+    expect(shouldRefreshOnEvent({ ...codexComment, action: 'created' })).toBe(true);
+    expect(shouldRefreshOnEvent({ ...codexComment, action: 'deleted' })).toBe(true);
+
+    expect(shouldRefreshOnEvent({
+      name: 'issue_comment',
+      action: 'created',
+      issue: { pull_request: {} },
+      comment: { user: { login: 'contributor', type: 'User' } },
+    })).toBe(false);
+    expect(shouldRefreshOnEvent({
+      name: 'issue_comment',
+      action: 'edited',
+      issue: { pull_request: {} },
+      comment: { user: GHA_BOT },
+    })).toBe(false);
+    expect(isTrustedRefreshComment({
+      name: 'issue_comment',
+      action: 'created',
+      issue: {},
+      comment: { user: CODEX_BOT },
+    })).toBe(false);
+
+    expect(isTrustedPullRequestRefreshEvent({
+      name: 'pull_request_target',
+      action: 'labeled',
+      label: { name: WAIVE_LABEL },
+      sender: { login: BILL },
+    })).toBe(true);
+    expect(isTrustedPullRequestRefreshEvent({
+      name: 'pull_request_target',
+      action: 'labeled',
+      label: { name: WAIVE_LABEL },
+      sender: { login: 'contributor' },
+    })).toBe(false);
+    expect(isTrustedPullRequestRefreshEvent({
+      name: 'pull_request_target',
+      action: 'unlabeled',
+      label: { name: WAIVE_LABEL },
+    })).toBe(true);
+    expect(isTrustedPullRequestRefreshEvent({
+      name: 'pull_request_target',
+      action: 'ready_for_review',
+    })).toBe(true);
+    expect(isTrustedPullRequestRefreshEvent({
+      name: 'pull_request_target',
+      action: 'reopened',
+    })).toBe(true);
+    expect(isTrustedPullRequestRefreshEvent({
+      name: 'pull_request_target',
+      action: 'edited',
+      changes: { base: { ref: { from: 'develop' } } },
+    })).toBe(true);
+    expect(shouldRefreshOnEvent({
+      name: 'pull_request_target',
+      action: 'edited',
+      changes: { title: { from: 'old' } },
+    })).toBe(false);
+    expect(shouldRefreshOnEvent({
+      name: 'pull_request_target',
+      action: 'labeled',
+      label: { name: 'junk' },
+    })).toBe(false);
+    expect(shouldRefreshOnEvent({ name: 'schedule' })).toBe(true);
+    expect(shouldRefreshOnEvent({ name: 'workflow_dispatch' })).toBe(true);
   });
 
   it('waits for an in-progress CI run on comment events, and skips that wait on schedule', () => {
@@ -1063,6 +1244,9 @@ describe('workflows pin the counted context and never orphan checks.create', () 
 
   it('matches the CI run to the PR number, caps reruns, and records an unforgeable waiver', () => {
     expect(refresh).toContain('runMatchesPr');
+    expect(refresh).toContain('runMatchesUnattributedHead');
+    expect(refresh).toContain('headIsUnique');
+    expect(refresh).toContain('head_repository');
     expect(refresh).toContain('pull_requests');
     expect(refresh).toContain('MAX_RUN_ATTEMPTS');
     expect(refresh).toContain("context.eventName === 'schedule' && runAttemptCount(run) >= MAX_RUN_ATTEMPTS");
@@ -1074,6 +1258,21 @@ describe('workflows pin the counted context and never orphan checks.create', () 
     expect(refresh).toContain('context.runId');
     expect(refresh).toContain('baseSha');
     expect(refreshExec).not.toMatch(/schedule skip \(success\)/);
+  });
+
+  it('filters refresh to trusted Codex / waiver evidence and does not cancel on junk events', () => {
+    expect(refresh).toContain('needs: [record-waiver]');
+    expect(refresh).toContain('chatgpt-codex-connector[bot]');
+    expect(refresh).toContain("github.event.label.name == 'codex-waived'");
+    expect(refresh).toContain("github.event.sender.login == 'up2itnow0822'");
+    expect(refresh).toContain('github.event.changes.base != null');
+    expect(refresh).toContain('cancel-in-progress: false');
+    expect(refresh).toMatch(/github\.event\.action == 'ready_for_review'/);
+    expect(refresh).toMatch(/github\.event\.action == 'reopened'/);
+    expect(refresh).not.toMatch(
+      /issue_comment' && github\.event\.issue\.pull_request != null\)\s*$/m,
+    );
+    expect(refresh).not.toContain("github.event.comment.user.login == 'github-actions[bot]'");
   });
 
   it('keeps the #88 matcher constants and documents residual ci.yml risk', () => {

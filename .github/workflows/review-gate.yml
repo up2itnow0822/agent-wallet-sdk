@@ -11,21 +11,30 @@
 #   counted. A job named exactly `review-gate` in `.github/workflows/ci.yml`
 #   is recorded on the pull_request suite, which GitHub always counts.
 #
-#   Re-evaluation (Codex comment created/edited/deleted, waiver label, base
-#   edit) therefore reruns that CI job via the Actions API. This workflow
-#   never calls checks.create, so it cannot leave orphaned in_progress
-#   "Evaluating Codex review" runs and cannot land a result in the wrong suite.
+#   Re-evaluation (trusted Codex comments, Bill's waiver label, base
+#   retarget, ready/reopen) therefore reruns that CI job via the Actions API.
+#   This workflow never calls checks.create, so it cannot leave orphaned
+#   in_progress "Evaluating Codex review" runs and cannot land a result in
+#   the wrong suite.
 #
 # Security:
 #   No checkout. The rerun lives in this workflow file. Triggers are only
 #   events GitHub runs from the default-branch copy (pull_request_target,
-#   issue_comment, schedule, workflow_dispatch). pull_request_review is
-#   omitted on purpose: GitHub would execute the PR's workflow file with
-#   actions: write. Codex reviews still arrive as issue comments or are
-#   picked up when the schedule rechecks a green gate.
+#   issue_comment, schedule, workflow_dispatch). The refresh job then
+#   filters to trusted evidence: Codex bot comments, Bill's `codex-waived`
+#   label (via record-waiver, then refresh), base retarget, ready/reopen,
+#   schedule, and dispatch. Author comments, title/body edits, junk labels,
+#   and github-actions[bot] comments (security-review.yml can post those)
+#   do not rerun. pull_request_review is omitted on purpose: GitHub would
+#   execute the PR's workflow file with actions: write. Codex reviews still
+#   arrive as issue comments or are picked up when the schedule rechecks.
 #   No repo secrets are passed. Evaluation reads PR data only through the
 #   API with the CI job's read-only token, using the evaluator fetched from
 #   the base SHA.
+#   Fork PRs can have an empty workflow_run.pull_requests[] (actions/runner
+#   #3444). Refresh matches those runs by head SHA + head repo + branch,
+#   and fails closed when several open PRs share a SHA and the run is
+#   ambiguous.
 #
 # Pass conditions stay the ones in scripts/review-gate.mjs (includes #88):
 #   1. A non-dismissed chatgpt-codex-connector[bot] review on the current
@@ -44,10 +53,11 @@
 #   GitHub 5xx responses are retried with backoff.
 #
 # Rerun budget: schedule polling caps at MAX_RUN_ATTEMPTS (8), well under
-# GitHub's 50-rerun-per-run limit. Codex comments, waiver labels, and
-# manual dispatch still rerun after that so a late review is not stuck
-# red. Schedule also backs off (10 / 20 / 40 / 80 min) and rechecks green
-# gates. A new push opens a new run.
+# GitHub's 50-rerun-per-run limit. Trusted Codex comments, waiver labels,
+# and manual dispatch still rerun after that so a late review is not stuck
+# red. Untrusted comments never call reRunJobForWorkflowRun, so they cannot
+# burn the cap. Schedule also backs off (10 / 20 / 40 / 80 min) and
+# rechecks green gates. A new push opens a new run.
 #
 # Residual risk (GitHub platform limit): any other pull_request workflow with
 # a job named `review-gate` can also produce the required context, and a PR
@@ -83,7 +93,9 @@ concurrency:
       github.event.inputs.pr_number ||
       format('run-{0}', github.run_id)
     }}
-  cancel-in-progress: ${{ github.event.action != 'labeled' }}
+  # Never cancel. Untrusted comments / title edits still start a skipped
+  # run; cancelling would let them clobber a Codex or waiver refresh.
+  cancel-in-progress: false
 
 jobs:
   record-waiver:
@@ -172,11 +184,42 @@ jobs:
             core.info(`#${n}: recorded unforgeable waiver binding run ${context.runId}`);
 
   refresh:
+    needs: [record-waiver]
     if: >
-      github.event_name == 'pull_request_target' ||
-      github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'schedule' ||
-      (github.event_name == 'issue_comment' && github.event.issue.pull_request != null)
+      always() &&
+      (needs.record-waiver.result == 'success' || needs.record-waiver.result == 'skipped') &&
+      (
+        github.event_name == 'workflow_dispatch' ||
+        github.event_name == 'schedule' ||
+        (
+          github.event_name == 'issue_comment' &&
+          github.event.issue.pull_request != null &&
+          (
+            github.event.comment.user.login == 'chatgpt-codex-connector[bot]' ||
+            github.event.comment.user.login == 'chatgpt-codex-connector'
+          )
+        ) ||
+        (
+          github.event_name == 'pull_request_target' &&
+          (
+            github.event.action == 'ready_for_review' ||
+            github.event.action == 'reopened' ||
+            (
+              github.event.action == 'unlabeled' &&
+              github.event.label.name == 'codex-waived'
+            ) ||
+            (
+              github.event.action == 'labeled' &&
+              github.event.label.name == 'codex-waived' &&
+              github.event.sender.login == 'up2itnow0822'
+            ) ||
+            (
+              github.event.action == 'edited' &&
+              github.event.changes.base != null
+            )
+          )
+        )
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -214,6 +257,50 @@ jobs:
 
             function runMatchesPr(run, prNumber) {
               return (run.pull_requests || []).some(p => Number(p.number) === Number(prNumber));
+            }
+
+            function runIsUnattributed(run) {
+              return ((run && run.pull_requests) || []).length === 0;
+            }
+
+            function headRepoFullName(pr) {
+              const name = pr && pr.head && pr.head.repo && pr.head.repo.full_name;
+              return typeof name === 'string' ? name : '';
+            }
+
+            function runHeadRepoFullName(run) {
+              const name = run && run.head_repository && run.head_repository.full_name;
+              return typeof name === 'string' ? name : '';
+            }
+
+            function runMatchesUnattributedHead(run, pr) {
+              if (!run || !pr || !runIsUnattributed(run)) return false;
+              const sha = fullSha(pr.head && pr.head.sha);
+              const branch = (pr.head && pr.head.ref) || '';
+              const repoName = headRepoFullName(pr);
+              if (!sha || !branch || !repoName) return false;
+              if (fullSha(run.head_sha) !== sha) return false;
+              if ((run.head_branch || '') !== branch) return false;
+              return runHeadRepoFullName(run) === repoName;
+            }
+
+            function latestCiRun(runs) {
+              return (runs || []).slice().sort((a, b) => {
+                const byNumber = (b.run_number || 0) - (a.run_number || 0);
+                if (byNumber !== 0) return byNumber;
+                return Date.parse(b.created_at || 0) - Date.parse(a.created_at || 0);
+              })[0] || null;
+            }
+
+            function selectCiRun(runs, { prNumber, pr, headIsUnique } = {}) {
+              const ci = (runs || []).filter(r => r.event === 'pull_request');
+              const numbered = ci.filter(r => runMatchesPr(r, prNumber));
+              if (numbered.length > 0) return latestCiRun(numbered);
+              const unattributed = ci.filter(runIsUnattributed);
+              const headMatched = unattributed.filter(r => runMatchesUnattributedHead(r, pr));
+              if (headMatched.length > 0) return latestCiRun(headMatched);
+              if (headIsUnique && unattributed.length === 1) return unattributed[0];
+              return null;
             }
 
             function runAttemptCount(run) {
@@ -271,6 +358,13 @@ jobs:
               return;
             }
 
+            const openPrs = await github.paginate(github.rest.pulls.list, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              per_page: 100,
+            });
+
             for (const n of numbers) {
               const { data: pr } = await withRetry(
                 () => github.rest.pulls.get({
@@ -286,6 +380,10 @@ jobs:
                 continue;
               }
 
+              const headIsUnique = openPrs.filter(p =>
+                fullSha(p.head && p.head.sha) === headSha
+              ).length <= 1;
+
               const runs = await github.paginate(github.rest.actions.listWorkflowRuns, {
                 owner: context.repo.owner,
                 repo: context.repo.repo,
@@ -294,10 +392,7 @@ jobs:
                 event: 'pull_request',
                 per_page: 100,
               });
-              let run = runs
-                .filter(r => runMatchesPr(r, n))
-                .slice()
-                .sort((a, b) => (b.run_number || 0) - (a.run_number || 0))[0];
+              let run = selectCiRun(runs, { prNumber: n, pr, headIsUnique });
               if (!run) {
                 core.info(`#${n} ${headSha.slice(0, 7)}: no pull_request CI run for this PR on this head yet`);
                 continue;
