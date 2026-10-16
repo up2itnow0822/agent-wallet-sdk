@@ -1,5 +1,8 @@
 ## [Unreleased]
 
+### Added
+- Optional `withSpotCheck(config, opts)` for x402 clients. It is opt-in and uses the optional peer `x402-spotcheck` (>= 1.2.0). Before paying, it runs your `onBeforePayment` first, then a terms check (local rules by default, no network). A `skip` verdict declines the payment. After paying, it is off unless `afterPay: true`: a failed transfer with a tx hash is looked up and the result goes to `onAfterPay`. Fail-open if the peer is missing, slow, or throws.
+
 ### Security
 - Removed `smithery.yaml`. Its start command ran `npx -y @agentwallet/sdk mcp` and passed the user's agent key as `AGENT_PRIVATE_KEY`. `@agentwallet/sdk` is a third-party npm package, not this project's `agentwallet-sdk`. MCP belongs in [agentpay-mcp](https://github.com/up2itnow0822/agentpay-mcp). Rotate any wallet key ever entered through that Smithery listing.
 - Abstract x402 mainnet approved-facilitator list is now empty and fail-closed. The previous entry was the public Anvil/Hardhat first-deployment address, not a verified mainnet contract. Testnet still accepts that local-dev address. Do not treat it as an official Abstract mainnet facilitator.
