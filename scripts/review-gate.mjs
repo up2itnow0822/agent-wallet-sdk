@@ -89,6 +89,7 @@ export const WAIVER_RECORD_JOB = 'record-waiver';
 export const WAIVER_RECEIPT_TITLE = 'review-gate-waiver-receipt';
 export const WAIVER_RECEIPT_MARKER = 'review-gate-waiver-receipt:v1';
 export const MAX_PREFIX_RESOLVES = 20;
+export const MAX_WAIVER_RUN_RESOLVES = 20;
 export const TRUSTED_WAIVER_RECORD_EVENTS = new Set([
   'pull_request_target',
   'schedule',
@@ -471,7 +472,8 @@ export function waiverRunProvenanceAccepts(run, jobs, {
     if (baseSha && runBaseSha && !sameSha(runBaseSha, baseSha)) return false;
   } else if (run.event === 'pull_request_target') {
     return false;
-  } else if (run.event === 'schedule' || run.event === 'workflow_dispatch') {
+  }
+  if (run.event === 'schedule' || run.event === 'workflow_dispatch') {
     if (!waiverReceiptAcceptsComment(receipts, { id: commentId }, {
       prNumber,
       headSha,
@@ -1501,6 +1503,22 @@ export async function resolvePrefixToHead(client, owner, repo, prefix, headSha) 
   }
 }
 
+export function collectResolvableWaiverRuns(comments) {
+  const runs = [];
+  const seen = new Set();
+  for (const c of comments || []) {
+    if (runs.length >= MAX_WAIVER_RUN_RESOLVES) break;
+    if (!isGithubActionsBot(c && c.user)) continue;
+    const rec = parseWaiverRecord(c && c.body);
+    if (!rec) continue;
+    const id = Number(rec.run);
+    if (!Number.isFinite(id) || id <= 0 || seen.has(id)) continue;
+    seen.add(id);
+    runs.push(id);
+  }
+  return runs;
+}
+
 export function collectResolvablePrefixes(reviews, comments, headSha) {
   const prefixes = [];
   const seen = new Set();
@@ -1607,23 +1625,21 @@ async function loadJobReceipts(client, owner, repo, job) {
 async function buildWaiverResolver(client, owner, repo, comments) {
   const map = new Map();
   const defaultBranch = await loadRepoDefaultBranch(client, owner, repo);
-  for (const c of comments || []) {
-    const rec = parseWaiverRecord(c && c.body);
-    if (!rec || map.has(rec.run)) continue;
+  for (const runId of collectResolvableWaiverRuns(comments)) {
     try {
-      const run = await client.get(`/repos/${owner}/${repo}/actions/runs/${rec.run}`);
+      const run = await client.get(`/repos/${owner}/${repo}/actions/runs/${runId}`);
       const jobs = await client.paginate(
-        `/repos/${owner}/${repo}/actions/runs/${rec.run}/jobs`,
+        `/repos/${owner}/${repo}/actions/runs/${runId}/jobs`,
         'jobs',
       );
       const recordJob = (jobs || []).find(j => j.name === WAIVER_RECORD_JOB);
       const receipts = await loadJobReceipts(client, owner, repo, recordJob);
-      map.set(rec.run, { run, jobs, receipts, defaultBranch });
+      map.set(runId, { run, jobs, receipts, defaultBranch });
     } catch {
-      map.set(rec.run, null);
+      map.set(runId, null);
     }
   }
-  return runId => map.get(Number(runId)) || null;
+  return resolved => map.get(Number(resolved)) || null;
 }
 
 export async function runEvaluate({ env, readFile, github } = {}) {

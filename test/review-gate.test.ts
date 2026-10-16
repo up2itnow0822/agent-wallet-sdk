@@ -13,7 +13,9 @@ import {
   COMPLETED_ROW,
   MAX_RUN_ATTEMPTS,
   MAX_PREFIX_RESOLVES,
+  MAX_WAIVER_RUN_RESOLVES,
   collectResolvablePrefixes,
+  collectResolvableWaiverRuns,
   waiverRunIsDefaultBranchRevision,
   waiverReceiptAcceptsComment,
   parseWaiverReceipts,
@@ -310,6 +312,29 @@ describe('prefix resolution stays Codex-only and bounded', () => {
     const many = Array.from({ length: 30 }, (_, i) => '`' + HEAD.slice(0, 7 + i) + '`').join(' ');
     const prefixes = collectResolvablePrefixes([], [{ user: CODEX_BOT, body: many }], HEAD);
     expect(prefixes.length).toBeLessThanOrEqual(MAX_PREFIX_RESOLVES);
+  });
+
+  it('resolves waiver run ids only from github-actions comments and caps lookups', () => {
+    expect(MAX_WAIVER_RUN_RESOLVES).toBeLessThanOrEqual(20);
+    expect(collectResolvableWaiverRuns([{
+      user: { login: 'contributor', type: 'User' },
+      body: formatWaiverComment({
+        sha: HEAD, base: 'main', baseSha: BASE_SHA, actor: BILL, pr: 87, run: 111,
+      }),
+    }])).toEqual([]);
+    expect(collectResolvableWaiverRuns([{
+      user: GHA_BOT,
+      body: formatWaiverComment({
+        sha: HEAD, base: 'main', baseSha: BASE_SHA, actor: BILL, pr: 87, run: WAIVER_RUN_ID,
+      }),
+    }])).toEqual([WAIVER_RUN_ID]);
+    const flood = Array.from({ length: 30 }, (_, i) => ({
+      user: GHA_BOT,
+      body: formatWaiverComment({
+        sha: HEAD, base: 'main', baseSha: BASE_SHA, actor: BILL, pr: 87, run: 700000 + i,
+      }),
+    }));
+    expect(collectResolvableWaiverRuns(flood).length).toBeLessThanOrEqual(MAX_WAIVER_RUN_RESOLVES);
   });
 });
 
@@ -1164,9 +1189,18 @@ describe('evaluatePr — Bill-only waiver bound to exact head SHA', () => {
     expect(waiverRunIsDefaultBranchRevision({
       event: 'workflow_dispatch', head_branch: 'evil',
     }, 'main')).toBe(false);
+    expect(waiverRunIsDefaultBranchRevision({
+      event: 'workflow_dispatch', head_branch: '',
+    }, 'main')).toBe(false);
     expect(waiverRunProvenanceAccepts({
       ...scheduleRun, event: 'workflow_dispatch', head_branch: 'evil',
     }, jobs, bound)).toBe(false);
+    expect(waiverRunProvenanceAccepts({
+      ...scheduleRun,
+      pull_requests: [{
+        number: 87, head: { sha: HEAD }, base: { ref: 'main', sha: BASE_SHA },
+      }],
+    }, jobs, { ...bound, receipts: [] })).toBe(false);
     expect(waiverRunProvenanceAccepts({
       ...scheduleRun, event: 'pull_request_target',
     }, jobs, bound)).toBe(false);
@@ -1957,6 +1991,7 @@ describe('workflows pin the counted context and never orphan checks.create', () 
     expect(recordBlock).toContain('octokit: github');
     expect(recordBlock).toContain('review-gate-waiver-receipt');
     expect(recordBlock).toContain('core.notice');
+    expect(recordBlock).toContain("file: '.github/workflows/review-gate.yml'");
     expect(recordBlock).not.toContain('issue_comment');
     expect(contributing).toContain('schedule');
     expect(contributing).toContain('workflow_dispatch');

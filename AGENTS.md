@@ -56,7 +56,9 @@
   `gh workflow run --ref` of another branch is rejected. Schedule and
   dispatch comments must match a `review-gate-waiver-receipt`
   annotation emitted by that specific job — a bot comment in the
-  wall-clock window is not enough. A syntactically valid
+  wall-clock window is not enough, including when
+  `pull_requests[]` is populated. Prefix and cited-run API
+  lookups stay Codex- or github-actions-authored and bounded. A syntactically valid
   github-actions[bot] marker does not suppress a later genuine record.
   A later `committed` or force-push after the label invalidates a
   persisted binding even if the SHA returns (A→B→A).
