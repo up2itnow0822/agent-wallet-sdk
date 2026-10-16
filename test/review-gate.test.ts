@@ -574,12 +574,13 @@ describe('workflows pin the counted context and never orphan checks.create', () 
   });
 
   it('refreshes by rerunning that CI job and never calls checks.create', () => {
-    expect(refresh).toContain('scripts/review-gate.mjs rerun');
+    expect(refresh).toContain('actions/github-script@v7');
+    expect(refresh).toContain('reRunJobForWorkflowRun');
     expect(refresh).toContain('actions: write');
     expect(refreshExec).not.toContain('checks: write');
     expect(refreshExec).not.toContain('checks.create');
     expect(refreshExec).not.toContain('Evaluating Codex review');
-    expect(refresh).toContain('ref: ${{ github.event.repository.default_branch }}');
+    expect(refreshExec).not.toContain('actions/checkout');
     expect(refresh).toContain('pull_request_target');
     expect(refresh).toContain('issue_comment');
     expect(refresh).toContain('pull_request_review');

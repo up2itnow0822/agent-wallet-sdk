@@ -17,12 +17,12 @@
 #   "Evaluating Codex review" runs and cannot land a result in the wrong suite.
 #
 # Security:
-#   pull_request_target / issue_comment / schedule run the copy on the default
-#   branch. Checkout is pinned to default_branch with persist-credentials
-#   false, so PR code is never executed here and no repo secrets are passed.
-#   pull_request_review uses the PR's workflow file (GitHub platform limit);
-#   that copy can only rerun the CI job named review-gate. Evaluation itself
-#   reads PR data only through the API with the CI job's read-only token.
+#   No checkout. The rerun lives in this workflow file, so pull_request_target
+#   / issue_comment / schedule execute the default-branch copy and never run
+#   PR JavaScript. No repo secrets are passed. pull_request_review uses the
+#   PR's workflow file (GitHub platform limit); that copy can only rerun the
+#   CI job named review-gate. Evaluation itself reads PR data only through
+#   the API with the CI job's read-only token.
 #
 # Pass conditions stay the ones in scripts/review-gate.mjs (includes #88):
 #   1. A non-dismissed chatgpt-codex-connector[bot] review on the current
@@ -83,16 +83,155 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Checkout default branch only
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.repository.default_branch }}
-          persist-credentials: false
-      - name: Use Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
       - name: Re-run CI review-gate job
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: node scripts/review-gate.mjs rerun
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const CI_WORKFLOW = 'ci.yml';
+            const JOB_NAME = 'review-gate';
+
+            async function withRetry(fn, label) {
+              const delays = [1000, 2000, 4000];
+              let last;
+              for (let i = 0; i <= delays.length; i++) {
+                try {
+                  return await fn();
+                } catch (err) {
+                  last = err;
+                  const status = err && err.status;
+                  if (!(status >= 500 && status <= 599) || i === delays.length) throw err;
+                  core.warning(`${label}: GitHub API ${status}, retrying in ${delays[i]}ms`);
+                  await new Promise(r => setTimeout(r, delays[i]));
+                }
+              }
+              throw last;
+            }
+
+            function fullSha(value) {
+              return typeof value === 'string' && /^[0-9a-f]{40}$/i.test(value)
+                ? value.toLowerCase()
+                : '';
+            }
+
+            async function resolvePrNumbers() {
+              if (context.payload.pull_request) return [context.payload.pull_request.number];
+              if (context.payload.issue && context.payload.issue.pull_request) {
+                return [context.payload.issue.number];
+              }
+              if (context.payload.inputs && context.payload.inputs.pr_number) {
+                const n = parseInt(context.payload.inputs.pr_number, 10);
+                if (!Number.isFinite(n)) throw new Error(`bad pr_number: ${context.payload.inputs.pr_number}`);
+                return [n];
+              }
+              if (context.eventName === 'schedule' || context.eventName === 'workflow_dispatch') {
+                const prs = await github.paginate(github.rest.pulls.list, {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  state: 'open',
+                  per_page: 100,
+                });
+                return prs.map(pr => pr.number);
+              }
+              return [];
+            }
+
+            async function waitForRun(runId) {
+              const deadline = Date.now() + 8 * 60 * 1000;
+              for (;;) {
+                const { data: run } = await withRetry(
+                  () => github.rest.actions.getWorkflowRun({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    run_id: runId,
+                  }),
+                  `run ${runId}`,
+                );
+                if (run.status === 'completed') return run;
+                if (Date.now() >= deadline) return run;
+                await new Promise(r => setTimeout(r, 10000));
+              }
+            }
+
+            const numbers = await resolvePrNumbers();
+            if (numbers.length === 0) {
+              core.info('No pull requests to refresh.');
+              return;
+            }
+
+            for (const n of numbers) {
+              const { data: pr } = await withRetry(
+                () => github.rest.pulls.get({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: n,
+                }),
+                `pr ${n}`,
+              );
+              const headSha = fullSha(pr.head && pr.head.sha);
+              if (!headSha) {
+                core.info(`#${n}: skip, head is not a 40-character SHA`);
+                continue;
+              }
+
+              const runs = await github.paginate(github.rest.actions.listWorkflowRuns, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                workflow_id: CI_WORKFLOW,
+                head_sha: headSha,
+                event: 'pull_request',
+                per_page: 100,
+              });
+              let run = runs.slice().sort((a, b) => (b.run_number || 0) - (a.run_number || 0))[0];
+              if (!run) {
+                core.info(`#${n} ${headSha.slice(0, 7)}: no pull_request CI run on this head yet`);
+                continue;
+              }
+
+              if (run.status !== 'completed') {
+                if (context.eventName === 'schedule') {
+                  core.info(`#${n}: schedule skip (${run.status})`);
+                  continue;
+                }
+                core.info(`#${n}: waiting for CI run ${run.id} (${run.status})`);
+                run = await waitForRun(run.id);
+                if (run.status !== 'completed') {
+                  core.info(`#${n}: CI run ${run.id} still ${run.status}; schedule will retry`);
+                  continue;
+                }
+              }
+
+              const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: run.id,
+                per_page: 100,
+              });
+              const job = jobs.find(j => j.name === JOB_NAME);
+              if (!job) {
+                core.info(`#${n}: CI run ${run.id} has no ${JOB_NAME} job`);
+                continue;
+              }
+              if (context.eventName === 'schedule' && job.conclusion === 'success') {
+                core.info(`#${n}: schedule skip (success)`);
+                continue;
+              }
+
+              try {
+                await withRetry(
+                  () => github.rest.actions.reRunJobForWorkflowRun({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    job_id: job.id,
+                  }),
+                  `rerun ${job.id}`,
+                );
+                core.info(`#${n}: reran ${JOB_NAME} job ${job.id} on run ${run.id}`);
+              } catch (err) {
+                const status = err && err.status;
+                if (status === 403 || status === 409 || status === 422) {
+                  core.info(`#${n}: rerun skipped (${status} ${err.message})`);
+                  continue;
+                }
+                throw err;
+              }
+            }
