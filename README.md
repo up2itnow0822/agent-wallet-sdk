@@ -7,7 +7,9 @@ The `agentwallet-sdk` npm package is a TypeScript library for policy-aware
 agent payments. It is non-custodial: callers supply their own viem
 `WalletClient`, and the SDK does not store keys or operate a custodial service.
 
-The current npm package is `agentwallet-sdk` v6.3.0.
+The current npm package is `agentwallet-sdk` v6.3.0. That is the only
+npm name this project publishes. `@agentwallet/sdk` is a different
+package owned by an unrelated maintainer and is not part of this SDK.
 
 ## What ships
 
@@ -164,7 +166,8 @@ external payment endpoint is available.
 ## Related repositories
 
 - [AgentPay MCP](https://github.com/up2itnow0822/agentpay-mcp) exposes payment
-  tools through MCP.
+  tools through MCP and owns the Smithery listing. This SDK does not ship a
+  Smithery start command and must not be installed as `@agentwallet/sdk`.
 - [AgentPay Wallet Starter](https://github.com/up2itnow0822/agentpay-wallet-starter)
   provides a no-funds combined verification path.
 

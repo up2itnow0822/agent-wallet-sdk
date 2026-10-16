@@ -25,13 +25,79 @@ export const ABSTRACT_CHAIN_IDS = {
 /** USDC on Abstract Mainnet (official Bridged USDC) */
 export const ABSTRACT_USDC: Record<number, Address> = {
   2741: '0x84A71ccD554Cc1b02749b35d22F684CC8ec987e1', // Abstract Mainnet USDC
-  11124: '0x3eBdeaA0DB3FfDe96E7a0DBBAFEC961FC50F725f', // Abstract Testnet USDC
+  11124: '0x3eBDeaA0DB3FfDe96E7a0DBBAFEC961FC50F725F', // Abstract Testnet USDC
 };
 
-/** Abstract's approved payment facilitator contracts */
-export const ABSTRACT_APPROVED_FACILITATORS: Address[] = [
-  '0x5FbDB2315678afecb367f032d93F642f64180aa3', // Abstract official facilitator (mainnet)
+/**
+ * Anvil/Hardhat first-deployment address (account 0, nonce 0).
+ * Valid as a local/testnet fixture only. Not an Abstract mainnet contract.
+ */
+export const ABSTRACT_ANVIL_FACILITATOR: Address =
+  '0x5FbDB2315678afecb367f032d93F642f64180aa3';
+
+/**
+ * Approved Abstract mainnet facilitators.
+ * Empty until a verified mainnet contract address is configured.
+ * Do not invent or copy a local-dev address here.
+ */
+export const ABSTRACT_APPROVED_FACILITATORS: Address[] = [];
+
+/** Approved Abstract testnet facilitators (local Anvil first-deployment address). */
+export const ABSTRACT_TESTNET_APPROVED_FACILITATORS: Address[] = [
+  ABSTRACT_ANVIL_FACILITATOR,
 ];
+
+function addressesInclude(list: readonly Address[], address: Address): boolean {
+  const target = address.toLowerCase();
+  return list.some((a) => a.toLowerCase() === target);
+}
+
+/** Official approved-facilitator list for the given Abstract chain. */
+export function getAbstractApprovedFacilitators(chainId: number): readonly Address[] {
+  if (chainId === ABSTRACT_CHAIN_IDS.testnet) {
+    return ABSTRACT_TESTNET_APPROVED_FACILITATORS;
+  }
+  if (chainId === ABSTRACT_CHAIN_IDS.mainnet) {
+    return ABSTRACT_APPROVED_FACILITATORS;
+  }
+  return [];
+}
+
+/**
+ * Fail-closed facilitator check.
+ * Mainnet rejects every address against the official list until a verified
+ * facilitator is configured. `userAllowlist` is an explicit caller opt-in
+ * and does not populate the official mainnet list.
+ */
+export function assertAbstractFacilitatorApproved(
+  facilitatorAddress: Address,
+  chainId: number,
+  userAllowlist: readonly Address[] = [],
+): void {
+  if (addressesInclude(userAllowlist, facilitatorAddress)) {
+    return;
+  }
+
+  const approved = getAbstractApprovedFacilitators(chainId);
+
+  if (chainId === ABSTRACT_CHAIN_IDS.mainnet && approved.length === 0) {
+    throw new Error(
+      `No verified Abstract mainnet facilitator is configured. ` +
+      `Mainnet facilitator checks fail closed until a verified address is added. ` +
+      `Rejected facilitator ${facilitatorAddress}. ` +
+      `Do not treat the Anvil/Hardhat default deployment address ` +
+      `${ABSTRACT_ANVIL_FACILITATOR} as an official mainnet facilitator. ` +
+      `Pass a caller-verified contract in userAllowlist to opt in explicitly.`,
+    );
+  }
+
+  if (!addressesInclude(approved, facilitatorAddress)) {
+    throw new Error(
+      `Facilitator ${facilitatorAddress} is not on the Abstract approved list. ` +
+      `Pass it in userAllowlist to explicitly allow it.`,
+    );
+  }
+}
 
 // ─── EIP-712 Types for Abstract Delegated Payment ───────────────────────────
 
@@ -98,9 +164,13 @@ export interface AbstractPaymentResult {
  *
  * @example
  * ```typescript
- * const adapter = new AbstractDelegatedFacilitatorAdapter(walletClient, {
- *   facilitatorAddress: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
- * });
+ * // Mainnet has no verified facilitator yet and fail-closes.
+ * // Testnet accepts the Anvil/Hardhat first-deployment address.
+ * const adapter = new AbstractDelegatedFacilitatorAdapter(
+ *   walletClient,
+ *   { facilitatorAddress: ABSTRACT_TESTNET_APPROVED_FACILITATORS[0] },
+ *   ABSTRACT_CHAIN_IDS.testnet,
+ * );
  *
  * const result = await adapter.signPaymentPermit({
  *   amount: 1_000_000n, // 1 USDC (6 decimals)
@@ -123,20 +193,11 @@ export class AbstractDelegatedFacilitatorAdapter {
     this.walletClient = walletClient;
     this.chainId = chainId;
 
-    // Validate facilitator
-    const approved = [
-      ...ABSTRACT_APPROVED_FACILITATORS,
-      ...(config.userAllowlist ?? []),
-    ];
-    const isApproved = approved.some(
-      (a) => a.toLowerCase() === config.facilitatorAddress.toLowerCase()
+    assertAbstractFacilitatorApproved(
+      config.facilitatorAddress,
+      chainId,
+      config.userAllowlist ?? [],
     );
-    if (!isApproved) {
-      throw new Error(
-        `Facilitator ${config.facilitatorAddress} is not on the Abstract approved list. ` +
-        `Pass it in userAllowlist to explicitly allow it.`
-      );
-    }
 
     this.config = {
       facilitatorAddress: config.facilitatorAddress,

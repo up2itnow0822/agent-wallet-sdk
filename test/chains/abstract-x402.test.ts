@@ -1,38 +1,43 @@
 /**
  * Integration tests — Abstract x402 Delegated Payment Facilitator Adapter
  *
- * Tests the AbstractDelegatedFacilitatorAdapter's EIP-712 permit signing flow.
- * Uses a mock WalletClient to avoid requiring a live Abstract RPC.
+ * Uses a local viem account so EIP-712 signing is real. No live Abstract RPC
+ * or funds: the transport is pointed at a local URL and never broadcast.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
+import { createWalletClient, getAddress, http, type WalletClient } from 'viem';
+import { privateKeyToAccount } from 'viem/accounts';
 import {
   AbstractDelegatedFacilitatorAdapter,
   ABSTRACT_CHAIN_IDS,
   ABSTRACT_USDC,
+  ABSTRACT_ANVIL_FACILITATOR,
   ABSTRACT_APPROVED_FACILITATORS,
+  ABSTRACT_TESTNET_APPROVED_FACILITATORS,
   ABSTRACT_SUPPORTED_CHAINS,
+  getAbstractApprovedFacilitators,
+  assertAbstractFacilitatorApproved,
 } from '../../src/x402/chains/abstract/index.js';
 
-// ─── Mock WalletClient ────────────────────────────────────────────────────────
+// Well-known Anvil account 0. Public test key; never used with live funds.
+const TEST_ACCOUNT = privateKeyToAccount(
+  '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80',
+);
 
-const MOCK_ACCOUNT = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266' as `0x${string}`;
-const MOCK_SIGNATURE = '0xabc123def456abc123def456abc123def456abc123def456abc123def456abc123def456abc123def456abc123def456abc123def456abc123def456abc123def456abc1b' as `0x${string}`;
+function createLocalWalletClient(): WalletClient {
+  return createWalletClient({
+    account: TEST_ACCOUNT,
+    transport: http('http://127.0.0.1:8545'),
+  });
+}
 
-const mockWalletClient = {
-  account: { address: MOCK_ACCOUNT },
-  signTypedData: vi.fn().mockResolvedValue(MOCK_SIGNATURE),
-};
-
-// ─── Test Constants ───────────────────────────────────────────────────────────
-
-const MOCK_FACILITATOR = ABSTRACT_APPROVED_FACILITATORS[0];
+const TESTNET_FACILITATOR = ABSTRACT_TESTNET_APPROVED_FACILITATORS[0];
 const MOCK_MERCHANT = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8' as `0x${string}`;
 const MOCK_AMOUNT = 1_000_000n; // 1 USDC
 const MOCK_NONCE = 0n;
 const MOCK_RESOURCE = 'https://api.example.com/premium-resource';
-
-// ─── Chain ID Tests ───────────────────────────────────────────────────────────
+const UNAPPROVED = '0x1234567890123456789012345678901234567890' as `0x${string}`;
 
 describe('Abstract Chain Constants', () => {
   it('has correct mainnet chain ID (2741)', () => {
@@ -43,9 +48,9 @@ describe('Abstract Chain Constants', () => {
     expect(ABSTRACT_CHAIN_IDS.testnet).toBe(11124);
   });
 
-  it('has USDC addresses for both chains', () => {
-    expect(ABSTRACT_USDC[2741]).toMatch(/^0x[a-fA-F0-9]{40}$/);
-    expect(ABSTRACT_USDC[11124]).toMatch(/^0x[a-fA-F0-9]{40}$/);
+  it('has checksummed USDC addresses for both chains', () => {
+    expect(ABSTRACT_USDC[2741]).toBe(getAddress(ABSTRACT_USDC[2741]));
+    expect(ABSTRACT_USDC[11124]).toBe(getAddress(ABSTRACT_USDC[11124]));
   });
 
   it('includes abstract:2741 in SUPPORTED_CHAINS', () => {
@@ -60,54 +65,108 @@ describe('Abstract Chain Constants', () => {
   });
 });
 
-// ─── Adapter Instantiation Tests ──────────────────────────────────────────────
+describe('Abstract approved facilitators — fail closed on mainnet', () => {
+  it('ships an empty mainnet approved list', () => {
+    expect(ABSTRACT_APPROVED_FACILITATORS).toEqual([]);
+    expect(getAbstractApprovedFacilitators(ABSTRACT_CHAIN_IDS.mainnet)).toEqual([]);
+  });
+
+  it('does not treat the Anvil/Hardhat default address as a mainnet facilitator', () => {
+    expect(ABSTRACT_APPROVED_FACILITATORS).not.toContain(ABSTRACT_ANVIL_FACILITATOR);
+    expect(() =>
+      assertAbstractFacilitatorApproved(
+        ABSTRACT_ANVIL_FACILITATOR,
+        ABSTRACT_CHAIN_IDS.mainnet,
+      ),
+    ).toThrow(/fail closed/i);
+  });
+
+  it('rejects any mainnet facilitator until a verified address is configured', () => {
+    expect(() =>
+      assertAbstractFacilitatorApproved(UNAPPROVED, ABSTRACT_CHAIN_IDS.mainnet),
+    ).toThrow(/No verified Abstract mainnet facilitator is configured/);
+  });
+
+  it('keeps the Anvil/Hardhat address on the testnet list only', () => {
+    expect(ABSTRACT_TESTNET_APPROVED_FACILITATORS).toEqual([ABSTRACT_ANVIL_FACILITATOR]);
+    expect(getAbstractApprovedFacilitators(ABSTRACT_CHAIN_IDS.testnet)).toEqual([
+      ABSTRACT_ANVIL_FACILITATOR,
+    ]);
+    expect(() =>
+      assertAbstractFacilitatorApproved(
+        ABSTRACT_ANVIL_FACILITATOR,
+        ABSTRACT_CHAIN_IDS.testnet,
+      ),
+    ).not.toThrow();
+  });
+
+  it('rejects an unapproved testnet facilitator', () => {
+    expect(() =>
+      assertAbstractFacilitatorApproved(UNAPPROVED, ABSTRACT_CHAIN_IDS.testnet),
+    ).toThrow('not on the Abstract approved list');
+  });
+});
 
 describe('AbstractDelegatedFacilitatorAdapter — instantiation', () => {
-  it('creates adapter with approved facilitator', () => {
+  it('creates adapter with the testnet approved facilitator', () => {
     const adapter = new AbstractDelegatedFacilitatorAdapter(
-      mockWalletClient as any,
-      { facilitatorAddress: MOCK_FACILITATOR },
-      ABSTRACT_CHAIN_IDS.mainnet
+      createLocalWalletClient(),
+      { facilitatorAddress: TESTNET_FACILITATOR },
+      ABSTRACT_CHAIN_IDS.testnet,
     );
     expect(adapter).toBeDefined();
   });
 
-  it('throws when facilitator is not approved and not in userAllowlist', () => {
-    const unapproved = '0x1234567890123456789012345678901234567890' as `0x${string}`;
+  it('throws on mainnet when the official list is empty', () => {
     expect(() =>
       new AbstractDelegatedFacilitatorAdapter(
-        mockWalletClient as any,
-        { facilitatorAddress: unapproved },
-        ABSTRACT_CHAIN_IDS.mainnet
-      )
+        createLocalWalletClient(),
+        { facilitatorAddress: ABSTRACT_ANVIL_FACILITATOR },
+        ABSTRACT_CHAIN_IDS.mainnet,
+      ),
+    ).toThrow(/No verified Abstract mainnet facilitator is configured/);
+  });
+
+  it('defaults to mainnet and fail-closes without a verified facilitator', () => {
+    expect(() =>
+      new AbstractDelegatedFacilitatorAdapter(
+        createLocalWalletClient(),
+        { facilitatorAddress: ABSTRACT_ANVIL_FACILITATOR },
+      ),
+    ).toThrow(/fail closed/i);
+  });
+
+  it('throws when a testnet facilitator is not approved and not in userAllowlist', () => {
+    expect(() =>
+      new AbstractDelegatedFacilitatorAdapter(
+        createLocalWalletClient(),
+        { facilitatorAddress: UNAPPROVED },
+        ABSTRACT_CHAIN_IDS.testnet,
+      ),
     ).toThrow('not on the Abstract approved list');
   });
 
-  it('creates adapter with user-allowlisted facilitator', () => {
-    const customFacilitator = '0x1234567890123456789012345678901234567890' as `0x${string}`;
+  it('creates a mainnet adapter only with an explicit userAllowlist opt-in', () => {
     const adapter = new AbstractDelegatedFacilitatorAdapter(
-      mockWalletClient as any,
+      createLocalWalletClient(),
       {
-        facilitatorAddress: customFacilitator,
-        userAllowlist: [customFacilitator],
+        facilitatorAddress: UNAPPROVED,
+        userAllowlist: [UNAPPROVED],
       },
-      ABSTRACT_CHAIN_IDS.mainnet
+      ABSTRACT_CHAIN_IDS.mainnet,
     );
     expect(adapter).toBeDefined();
   });
 });
 
-// ─── Permit Signing Tests ─────────────────────────────────────────────────────
-
 describe('AbstractDelegatedFacilitatorAdapter — permit signing', () => {
   let adapter: AbstractDelegatedFacilitatorAdapter;
 
   beforeEach(() => {
-    vi.clearAllMocks();
     adapter = new AbstractDelegatedFacilitatorAdapter(
-      mockWalletClient as any,
-      { facilitatorAddress: MOCK_FACILITATOR },
-      ABSTRACT_CHAIN_IDS.mainnet
+      createLocalWalletClient(),
+      { facilitatorAddress: TESTNET_FACILITATOR },
+      ABSTRACT_CHAIN_IDS.testnet,
     );
   });
 
@@ -119,9 +178,8 @@ describe('AbstractDelegatedFacilitatorAdapter — permit signing', () => {
       resource: MOCK_RESOURCE,
     });
 
-    expect(mockWalletClient.signTypedData).toHaveBeenCalledOnce();
-    expect(result.permitSignature).toBe(MOCK_SIGNATURE);
-    expect(result.chainId).toBe(ABSTRACT_CHAIN_IDS.mainnet);
+    expect(result.permitSignature).toMatch(/^0x[a-fA-F0-9]{130}$/);
+    expect(result.chainId).toBe(ABSTRACT_CHAIN_IDS.testnet);
   });
 
   it('permit includes correct fields', async () => {
@@ -132,8 +190,8 @@ describe('AbstractDelegatedFacilitatorAdapter — permit signing', () => {
       resource: MOCK_RESOURCE,
     });
 
-    expect(result.permit.facilitator).toBe(MOCK_FACILITATOR);
-    expect(result.permit.token).toBe(ABSTRACT_USDC[ABSTRACT_CHAIN_IDS.mainnet]);
+    expect(result.permit.facilitator).toBe(TESTNET_FACILITATOR);
+    expect(result.permit.token).toBe(ABSTRACT_USDC[ABSTRACT_CHAIN_IDS.testnet]);
     expect(result.permit.amount).toBe(MOCK_AMOUNT);
     expect(result.permit.payTo).toBe(MOCK_MERCHANT);
     expect(result.permit.nonce).toBe(MOCK_NONCE);
@@ -168,14 +226,14 @@ describe('AbstractDelegatedFacilitatorAdapter — permit signing', () => {
   });
 
   it('uses custom token when provided', async () => {
-    const customToken = '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48' as `0x${string}`; // USDC on mainnet (valid checksum)
+    const customToken = '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48' as `0x${string}`;
     const customAdapter = new AbstractDelegatedFacilitatorAdapter(
-      mockWalletClient as any,
+      createLocalWalletClient(),
       {
-        facilitatorAddress: MOCK_FACILITATOR,
+        facilitatorAddress: TESTNET_FACILITATOR,
         token: customToken,
       },
-      ABSTRACT_CHAIN_IDS.mainnet
+      ABSTRACT_CHAIN_IDS.testnet,
     );
 
     const result = await customAdapter.signPaymentPermit({
@@ -189,17 +247,14 @@ describe('AbstractDelegatedFacilitatorAdapter — permit signing', () => {
   });
 });
 
-// ─── x402 Payload Tests ───────────────────────────────────────────────────────
-
 describe('AbstractDelegatedFacilitatorAdapter — x402 payload', () => {
   let adapter: AbstractDelegatedFacilitatorAdapter;
 
   beforeEach(() => {
-    vi.clearAllMocks();
     adapter = new AbstractDelegatedFacilitatorAdapter(
-      mockWalletClient as any,
-      { facilitatorAddress: MOCK_FACILITATOR },
-      ABSTRACT_CHAIN_IDS.mainnet
+      createLocalWalletClient(),
+      { facilitatorAddress: TESTNET_FACILITATOR },
+      ABSTRACT_CHAIN_IDS.testnet,
     );
   });
 
@@ -212,9 +267,9 @@ describe('AbstractDelegatedFacilitatorAdapter — x402 payload', () => {
     });
 
     expect(payload.scheme).toBe('abstract-delegated');
-    expect(payload.chainId).toBe(ABSTRACT_CHAIN_IDS.mainnet);
-    expect(payload.facilitator).toBe(MOCK_FACILITATOR);
-    expect(payload.permitSignature).toBe(MOCK_SIGNATURE);
+    expect(payload.chainId).toBe(ABSTRACT_CHAIN_IDS.testnet);
+    expect(payload.facilitator).toBe(TESTNET_FACILITATOR);
+    expect(payload.permitSignature).toMatch(/^0x[a-fA-F0-9]{130}$/);
     expect(payload.amount).toBe(MOCK_AMOUNT.toString());
   });
 
@@ -231,8 +286,6 @@ describe('AbstractDelegatedFacilitatorAdapter — x402 payload', () => {
     expect(typeof payload.deadline).toBe('string');
   });
 });
-
-// ─── Static Utility Tests ─────────────────────────────────────────────────────
 
 describe('AbstractDelegatedFacilitatorAdapter — static utilities', () => {
   it('isAbstractChain returns true for mainnet', () => {
