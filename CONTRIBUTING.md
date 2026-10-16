@@ -109,15 +109,18 @@ Codex often cites a 7-character prefix. Those still count, but only when:
 
 ### Refresh budget
 
-`review-gate-refresh` caps **scheduled** reruns of *waiting* (non-success)
-gates at 8 per CI run (GitHub's limit is 50). Green counted checks keep
-being revalidated after that so a later formal Codex dismissal cannot
-stick. `pull_request_review` is omitted because GitHub would execute the
-PR's copy with `actions: write`; schedule is the base-trusted
-revalidation path. Trusted Codex comments, waiver labels, and manual
-dispatch still rerun after the waiting cap. Untrusted comments never call
-the rerun API. The 10-minute schedule backs off exponentially
-(10 / 20 / 40 / 80 minutes). A new push opens a new CI run.
+`review-gate-refresh` never calls `reRunJobForWorkflowRun` when the
+published `review-gate` conclusion already matches evaluate. That stops
+green polling from walking into GitHub's 50-rerun-per-run ceiling (~3
+days). Schedule still evaluates on the 10-minute cron and reruns only to
+*flip* the check (dismissal, new findings, new clean review, waiver
+revoke). A 403 on a green gate fails the refresh job instead of being
+swallowed. Waiting-state polls without a verdict still cap at 8.
+
+`pull_request_review` is omitted because GitHub would execute the PR's
+copy with `actions: write`. When several Codex results exist on the same
+SHA, the newest completed result wins: later findings override an older
+clean review or comment.
 
 Fork PRs can have an empty `workflow_run.pull_requests[]` (actions/runner
 #3444). Refresh then matches the `pull_request` CI run by head SHA + head

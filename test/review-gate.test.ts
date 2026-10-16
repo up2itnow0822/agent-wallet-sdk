@@ -12,6 +12,9 @@ import {
   CI_WORKFLOW_FILE,
   COMPLETED_ROW,
   MAX_RUN_ATTEMPTS,
+  GITHUB_RERUN_CEILING,
+  latestCodexHeadOutcome,
+  refreshAction,
   MENTIONED_SHA,
   NO_MAJOR_ISSUES,
   SCHEDULE_INTERVAL_MS,
@@ -512,13 +515,13 @@ describe('evaluatePr — Codex on head', () => {
     expect(verdict.summary).toMatch(/no findings/);
   });
 
-  it('blocks the clean-summary fallback when a dismissed Codex review sits on this head', () => {
+  it('blocks the clean-summary fallback when a later dismissed Codex review sits on this head', () => {
     const verdict = evaluatePr(snapshot({
       reviews: [{
         user: CODEX_BOT,
         commit_id: HEAD,
         state: 'DISMISSED',
-        submitted_at: '2026-10-15T21:22:45Z',
+        submitted_at: '2026-10-15T21:23:00Z',
       }],
       comments: [{
         user: CODEX_BOT,
@@ -529,6 +532,85 @@ describe('evaluatePr — Codex on head', () => {
     }));
     expect(verdict.conclusion).toBe('failure');
     expect(verdict.title).toBe('Waiting for Codex on head');
+  });
+
+  it('lets later findings override an older clean review or comment on the same SHA', () => {
+    expect(latestCodexHeadOutcome({
+      reviews: [{
+        user: CODEX_BOT,
+        commit_id: HEAD,
+        state: 'COMMENTED',
+        body: PR87_RECEIPT,
+        submitted_at: '2026-10-15T21:22:45Z',
+      }, {
+        user: CODEX_BOT,
+        commit_id: HEAD,
+        state: 'COMMENTED',
+        body: CODEX_FINDINGS_REVIEW,
+        submitted_at: '2026-10-15T21:40:00Z',
+      }],
+      comments: [],
+      headSha: HEAD,
+      uniqueResolve: uniqueToHead,
+      headPushedMs: HEAD_PUSHED_MS,
+      baseChangedMs: 0,
+    })?.clean).toBe(false);
+
+    const laterFindingsReview = evaluatePr(snapshot({
+      reviews: [{
+        user: CODEX_BOT,
+        commit_id: HEAD,
+        state: 'COMMENTED',
+        body: PR87_RECEIPT,
+        submitted_at: '2026-10-15T21:22:45Z',
+      }, {
+        user: CODEX_BOT,
+        commit_id: HEAD,
+        state: 'COMMENTED',
+        body: CODEX_FINDINGS_REVIEW,
+        submitted_at: '2026-10-15T21:40:00Z',
+      }],
+    }));
+    expect(laterFindingsReview.conclusion).toBe('failure');
+    expect(laterFindingsReview.title).toBe('Codex found issues on head');
+
+    const laterFindingsComment = evaluatePr(snapshot({
+      reviews: [{
+        user: CODEX_BOT,
+        commit_id: HEAD,
+        state: 'COMMENTED',
+        body: PR87_RECEIPT,
+        submitted_at: '2026-10-15T21:22:45Z',
+      }],
+      comments: [{
+        user: CODEX_BOT,
+        body: FINDINGS_SUMMARY.replace(
+          '2026-10-15T21:22:46.906149Z',
+          '2026-10-15T21:40:00.000000Z',
+        ),
+        created_at: '2026-10-15T21:40:00Z',
+        updated_at: '2026-10-15T21:40:00Z',
+      }],
+    }));
+    expect(laterFindingsComment.conclusion).toBe('failure');
+    expect(laterFindingsComment.title).toBe('Codex found issues on head');
+
+    const laterClean = evaluatePr(snapshot({
+      reviews: [{
+        user: CODEX_BOT,
+        commit_id: HEAD,
+        state: 'COMMENTED',
+        body: CODEX_FINDINGS_REVIEW,
+        submitted_at: '2026-10-15T21:22:45Z',
+      }, {
+        user: CODEX_BOT,
+        commit_id: HEAD,
+        state: 'COMMENTED',
+        body: PR87_RECEIPT,
+        submitted_at: '2026-10-15T21:40:00Z',
+      }],
+    }));
+    expect(laterClean.conclusion).toBe('success');
   });
 
   it('ignores a human comment that copies the Codex summary shape', () => {
@@ -1153,16 +1235,29 @@ describe('refresh selects the counted CI job for this PR', () => {
     const green = { id: 11, name: CHECK_JOB_NAME, status: 'completed', conclusion: 'success', completed_at: '2026-10-16T00:00:00Z' };
     const red = { id: 11, name: CHECK_JOB_NAME, status: 'completed', conclusion: 'failure', completed_at: '2026-10-16T00:00:00Z' };
 
+    expect(GITHUB_RERUN_CEILING).toBe(50);
     expect(rerunPlan(run, green, {
       eventName: 'schedule',
       nowMs: completed + 1000,
       lastJobCompletedMs: completed,
-    })).toBe('backoff');
+    })).toBe('skip-unchanged');
     expect(rerunPlan(run, green, {
       eventName: 'schedule',
-      nowMs: completed + scheduleBackoffMs(2) + 1,
-      lastJobCompletedMs: completed,
+      verdict: { conclusion: 'success' },
+    })).toBe('skip-unchanged');
+    expect(rerunPlan(run, red, {
+      eventName: 'schedule',
+      verdict: { conclusion: 'failure' },
+    })).toBe('skip-unchanged');
+    expect(rerunPlan(run, green, {
+      eventName: 'schedule',
+      verdict: { conclusion: 'failure' },
     })).toBe('rerun');
+    expect(rerunPlan(run, red, {
+      eventName: 'schedule',
+      nowMs: completed + 1000,
+      lastJobCompletedMs: completed,
+    })).toBe('backoff');
     expect(rerunPlan(run, red, {
       eventName: 'schedule',
       nowMs: completed + scheduleBackoffMs(2) + 1,
@@ -1174,16 +1269,21 @@ describe('refresh selects the counted CI job for this PR', () => {
     expect(scheduleCapsWaitingGate({ ...run, run_attempt: 8 }, red)).toBe(true);
     expect(scheduleCapsWaitingGate({ ...run, run_attempt: 8 }, green)).toBe(false);
     expect(rerunPlan({ ...run, run_attempt: 8 }, red, { eventName: 'schedule' })).toBe('capped');
+    expect(rerunPlan({ ...run, run_attempt: 8 }, green, { eventName: 'schedule' })).toBe('skip-unchanged');
     expect(rerunPlan({ ...run, run_attempt: 8 }, green, {
       eventName: 'schedule',
-      nowMs: completed + 1000,
-      lastJobCompletedMs: completed,
-    })).toBe('backoff');
-    expect(rerunPlan({ ...run, run_attempt: 8 }, green, {
-      eventName: 'schedule',
-      nowMs: completed + scheduleBackoffMs(8) + 1,
-      lastJobCompletedMs: completed,
+      verdict: { conclusion: 'failure' },
     })).toBe('rerun');
+    expect(refreshAction({
+      job: green,
+      verdict: { conclusion: 'failure' },
+      eventName: 'schedule',
+      runAttempt: GITHUB_RERUN_CEILING - 5,
+    })).toBe('ceiling-fail');
+    expect(rerunPlan({ ...run, run_attempt: 8 }, red, {
+      eventName: 'issue_comment',
+      verdict: { conclusion: 'failure' },
+    })).toBe('skip-unchanged');
   });
 
   it('refreshes only on trusted Codex comments, waiver labels, and base retargets', () => {
@@ -1344,9 +1444,14 @@ describe('workflows pin the counted context and never orphan checks.create', () 
     expect(refresh).toContain('head_repository');
     expect(refresh).toContain('pull_requests');
     expect(refresh).toContain('MAX_RUN_ATTEMPTS');
-    expect(refresh).toContain("context.eventName === 'schedule' &&");
-    expect(refresh).toContain('runAttemptCount(run) >= MAX_RUN_ATTEMPTS');
-    expect(refresh).toContain("job.conclusion !== 'success'");
+    expect(refresh).toContain('refreshAction');
+    expect(refresh).toContain('skip-unchanged');
+    expect(refresh).toContain('ceiling-fail');
+    expect(refresh).toContain('GITHUB_RERUN_CEILING');
+    expect(refresh).toContain("job.conclusion === 'success'");
+    expect(refresh).toContain('core.setFailed');
+    expect(refresh).toContain('evaluatePrNumber');
+    expect(refresh).toContain('attempt >= MAX_RUN_ATTEMPTS');
     expect(refresh).toContain('scheduleBackoffMs');
     expect(refresh).toContain(WAIVER_MARKER);
     expect(refresh).toContain('createComment');

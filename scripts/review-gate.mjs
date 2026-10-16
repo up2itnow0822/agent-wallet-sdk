@@ -13,7 +13,10 @@
  * because GitHub would run the PR's copy of that workflow with
  * actions: write. Refresh starts only on trusted evidence (Codex bot
  * comments, Bill's waiver label, base retarget, ready/reopen, schedule,
- * dispatch) so authors cannot burn GitHub's 50-rerun cap.
+ * dispatch) so authors cannot burn GitHub's 50-rerun cap. Schedule never
+ * reruns a check whose conclusion would not change, so green polling
+ * cannot exhaust the 50-rerun ceiling. A 403 on a green gate fails the
+ * refresh instead of being swallowed.
  *
  * Short-SHA Codex comments stay valid (PR #88) only when the prefix
  * uniquely resolves to the current 40-char head AND the comment's
@@ -67,7 +70,10 @@ export const WAIVER_RECORD_JOB = 'record-waiver';
 
 // Well under GitHub's 50-rerun-per-run cap. A new push opens a new run.
 export const MAX_RUN_ATTEMPTS = 8;
+export const GITHUB_RERUN_CEILING = 50;
+export const RERUN_CEILING_RESERVE = 5;
 export const SCHEDULE_INTERVAL_MS = 10 * 60 * 1000;
+export const RECEIPT_MARKER = '<!-- codex-review-receipt:v1 -->';
 
 export function isCodexLogin(login) {
   return !!login && CODEX_LOGINS.has(login);
@@ -501,14 +507,6 @@ export function timelineFacts(events) {
   return { baseChangedMs, lastWaiverEvent, lastHeadMoveMs };
 }
 
-function reviewMatchesHead(review, headSha, uniqueResolve, headPushedMs) {
-  if (!isCodexUser(review.user)) return false;
-  if (!prefixUniquelyMatchesHead(review.commit_id, headSha, uniqueResolve)) return false;
-  const submitted = Date.parse(review.submitted_at || 0);
-  const exact = fullSha(review.commit_id) !== '' && sameSha(review.commit_id, headSha);
-  return evidenceAfterHeadPush(submitted, headPushedMs, { fullExact: exact });
-}
-
 function reviewBodyIsClean(review, headSha, uniqueResolve) {
   const body = (review && review.body) || '';
   if (isCleanNoMajorIssuesBody(body)) {
@@ -522,6 +520,89 @@ function reviewBodyIsClean(review, headSha, uniqueResolve) {
     return summaryCompletedPrefixIsUnique(body, headSha, uniqueResolve);
   }
   return false;
+}
+
+function reviewCompletedHeadOutcome(review, headSha, uniqueResolve, headPushedMs, baseChangedMs) {
+  if (!isCodexUser(review && review.user)) return null;
+  if (!prefixUniquelyMatchesHead(review.commit_id, headSha, uniqueResolve)) return null;
+  const submitted = Date.parse(review.submitted_at || 0);
+  const exact = fullSha(review.commit_id) !== '' && sameSha(review.commit_id, headSha);
+  if (!evidenceAfterHeadPush(submitted, headPushedMs, { fullExact: exact })) return null;
+  const dismissed = String(review.state).toUpperCase() === 'DISMISSED';
+  if (dismissed) return { ms: submitted, clean: false, dismissed: true, source: 'review' };
+  if (!(submitted > (baseChangedMs || 0))) return null;
+  return {
+    ms: submitted,
+    clean: reviewBodyIsClean(review, headSha, uniqueResolve),
+    dismissed: false,
+    source: 'review',
+  };
+}
+
+export function commentIsHeadFindingsReceipt(body, headSha, uniqueResolve) {
+  const text = body || '';
+  if (!text.includes('codex-review-receipt')) return false;
+  if (isCleanNoMajorIssuesBody(text)) return false;
+  if (mentionsNonHeadSha(text, headSha)) return false;
+  return mentionedShas(text).some(s => prefixUniquelyMatchesHead(s, headSha, uniqueResolve));
+}
+
+export function commentCompletedHeadOutcome(comment, ctx) {
+  if (!isCodexUser(comment && comment.user)) return null;
+  const body = (comment && comment.body) || '';
+  const headSha = (ctx && ctx.headSha) || '';
+  const uniqueResolve = ctx && ctx.uniqueResolve;
+  const eventMs = commentEvidenceMs(comment, ctx);
+  if (!Number.isFinite(eventMs)) return null;
+  if (!(eventMs > (Number(ctx && ctx.baseChangedMs) || 0))) return null;
+  if (!evidenceAfterHeadPush(eventMs, ctx && ctx.headPushedMs)) return null;
+  if (mentionsNonHeadSha(body, headSha)) return null;
+  if (commentAcceptsCleanHead(comment, ctx)) {
+    return { ms: eventMs, clean: true, dismissed: false, source: 'comment' };
+  }
+  if (summaryMarksHeadCompleted(body, headSha)) {
+    if (!summaryCompletedPrefixIsUnique(body, headSha, uniqueResolve)) return null;
+    return { ms: eventMs, clean: false, dismissed: false, source: 'comment' };
+  }
+  if (commentIsHeadFindingsReceipt(body, headSha, uniqueResolve)) {
+    return { ms: eventMs, clean: false, dismissed: false, source: 'comment' };
+  }
+  return null;
+}
+
+/**
+ * Newest completed Codex result on this head wins. An older clean
+ * review/comment must not hide later findings, and a later clean
+ * result supersedes earlier findings or a dismissal.
+ * Equal timestamps fail closed (non-clean wins).
+ */
+export function latestCodexHeadOutcome({
+  reviews,
+  comments,
+  headSha,
+  uniqueResolve,
+  headPushedMs,
+  baseChangedMs,
+} = {}) {
+  const outcomes = [];
+  for (const r of reviews || []) {
+    const o = reviewCompletedHeadOutcome(
+      r, headSha, uniqueResolve, headPushedMs, baseChangedMs,
+    );
+    if (o) outcomes.push(o);
+  }
+  const ctx = { headSha, uniqueResolve, headPushedMs, baseChangedMs };
+  for (const c of comments || []) {
+    const o = commentCompletedHeadOutcome(c, ctx);
+    if (o) outcomes.push(o);
+  }
+  if (outcomes.length === 0) return null;
+  outcomes.sort((a, b) => {
+    if (b.ms !== a.ms) return b.ms - a.ms;
+    if (a.clean !== b.clean) return a.clean ? 1 : -1;
+    return 0;
+  });
+  return outcomes[0];
 }
 
 function isFreshBillWaiver(pr, headSha, event, facts) {
@@ -616,40 +697,21 @@ export function evaluatePr(input) {
   }
 
   const reviews = input.reviews || [];
-  const codexReviewsOnHead = reviews.filter(r =>
-    reviewMatchesHead(r, headSha, uniqueResolve, headPushedMs),
-  );
-  const dismissedOnHead = reviews.some(r =>
-    isCodexUser(r.user) &&
-    prefixUniquelyMatchesHead(r.commit_id, headSha, uniqueResolve) &&
-    String(r.state).toUpperCase() === 'DISMISSED',
-  );
-  const codexOnHead = codexReviewsOnHead.filter(r =>
-    String(r.state).toUpperCase() !== 'DISMISSED' &&
-    Date.parse(r.submitted_at || 0) > facts.baseChangedMs
-  );
-  const cleanReviewOnHead = codexOnHead.some(r =>
-    reviewBodyIsClean(r, headSha, uniqueResolve),
-  );
+  const latest = latestCodexHeadOutcome({
+    reviews,
+    comments,
+    headSha,
+    uniqueResolve,
+    headPushedMs,
+    baseChangedMs: facts.baseChangedMs,
+  });
 
   const usageLimited = comments.some(c => {
     const body = c.body || '';
     return isCodexUser(c.user) && /usage limits?/i.test(body);
   });
 
-  const cleanCommentOnHead = comments.some(c => {
-    if (!isCodexUser(c.user)) return false;
-    return commentAcceptsCleanHead(c, {
-      headSha,
-      baseChangedMs: facts.baseChangedMs,
-      headPushedMs,
-      uniqueResolve,
-    });
-  });
-  const acceptedCleanPass =
-    cleanReviewOnHead || (cleanCommentOnHead && !dismissedOnHead);
-
-  if (acceptedCleanPass) {
+  if (latest && latest.clean) {
     return {
       prNumber,
       headSha,
@@ -659,7 +721,7 @@ export function evaluatePr(input) {
     };
   }
 
-  if (codexOnHead.length > 0) {
+  if (latest && !latest.clean && !latest.dismissed) {
     return {
       prNumber,
       headSha,
@@ -871,14 +933,49 @@ export function scheduleCapsWaitingGate(run, job) {
     !(job && job.conclusion === 'success');
 }
 
-export function rerunPlan(run, job, { eventName, nowMs, lastJobCompletedMs } = {}) {
+/**
+ * Decide whether to spend a rerun. Never no-op-rerun a published
+ * conclusion (green polling was exhausting GitHub's 50-rerun ceiling).
+ * Flip only when evaluate disagrees with the published job. Near the
+ * ceiling, refuse to touch a green gate (caller must fail closed).
+ */
+export function refreshAction({ job, verdict, eventName, runAttempt } = {}) {
+  if (!job) return 'missing-job';
+  const current = job.conclusion;
+  const next = verdict && verdict.conclusion;
+  const attempt = runAttemptCount({ run_attempt: runAttempt });
+  const nearCeiling = attempt >= GITHUB_RERUN_CEILING - RERUN_CEILING_RESERVE;
+
+  if (next && current === next) return 'skip-unchanged';
+
+  if (!next) {
+    if (current === 'success') return 'skip-unchanged';
+    if (eventName === 'schedule' && attempt >= MAX_RUN_ATTEMPTS) return 'capped';
+    return 'rerun';
+  }
+
+  if (nearCeiling) {
+    return current === 'success' ? 'ceiling-fail' : 'capped';
+  }
+  return 'rerun';
+}
+
+export function rerunPlan(run, job, { eventName, nowMs, lastJobCompletedMs, verdict } = {}) {
   if (!run) return 'missing-run';
   if (run.status && run.status !== 'completed') {
     return eventName === 'schedule' ? 'skip-in-progress' : 'wait-run';
   }
   if (!job) return 'missing-job';
-  if (eventName === 'schedule' && scheduleCapsWaitingGate(run, job)) return 'capped';
-  if (eventName === 'schedule') {
+  const action = refreshAction({
+    job,
+    verdict,
+    eventName,
+    runAttempt: runAttemptCount(run),
+  });
+  if (action !== 'rerun') return action;
+  // Back off only the no-verdict waiting poll. A conclusion flip
+  // (dismissal, new clean review) reruns immediately.
+  if (eventName === 'schedule' && !(verdict && verdict.conclusion)) {
     const completedMs = lastJobCompletedMs != null
       ? Number(lastJobCompletedMs)
       : Date.parse((job && job.completed_at) || run.updated_at || 0);
@@ -887,7 +984,6 @@ export function rerunPlan(run, job, { eventName, nowMs, lastJobCompletedMs } = {
     if (Number.isFinite(completedMs) && Number.isFinite(now) && now - completedMs < wait) {
       return 'backoff';
     }
-    return 'rerun';
   }
   return 'rerun';
 }
@@ -1007,6 +1103,11 @@ async function loadHeadPushMs(client, owner, repo, headSha) {
     workflowRuns: runs,
     checkSuites: (suiteData && suiteData.check_suites) || [],
   });
+}
+
+export async function evaluatePrNumber(client, owner, repo, prNumber, event) {
+  const snap = await loadSnapshot(client, owner, repo, prNumber, event || {});
+  return evaluatePr(snap);
 }
 
 async function loadSnapshot(client, owner, repo, prNumber, event) {
@@ -1262,7 +1363,23 @@ export async function runRerun({ env, readFile, github } = {}) {
       'jobs',
     );
     let job = selectReviewGateJob(jobs);
-    const plan = rerunPlan(run, job, { eventName, nowMs: Date.now() });
+    let verdict;
+    try {
+      verdict = await evaluatePrNumber(client, owner, repo, n, event);
+    } catch (err) {
+      console.log(`#${n}: evaluate failed (${err && err.message}); using published conclusion only`);
+    }
+    const plan = rerunPlan(run, job, { eventName, nowMs: Date.now(), verdict });
+    if (plan === 'skip-unchanged') {
+      console.log(`#${n}: skip unchanged (${job && job.conclusion})`);
+      continue;
+    }
+    if (plan === 'ceiling-fail') {
+      throw new Error(
+        `#${n}: green gate is at the rerun ceiling; not swallowing a stuck success. ` +
+        'Push a new head or re-run CI to mint a fresh counted run.',
+      );
+    }
     if (plan === 'capped') {
       console.log(`#${n}: schedule capped (run ${run.id} attempt ${runAttemptCount(run)}/${MAX_RUN_ATTEMPTS})`);
       continue;
@@ -1295,7 +1412,7 @@ export async function runRerun({ env, readFile, github } = {}) {
         console.log(`#${n}: CI run ${run.id} finished without ${CHECK_JOB_NAME}`);
         continue;
       }
-      const waited = rerunPlan(finished, job, { eventName, nowMs: Date.now() });
+      const waited = rerunPlan(finished, job, { eventName, nowMs: Date.now(), verdict });
       if (waited !== 'rerun') {
         console.log(`#${n}: ${waited} after wait (run ${run.id} attempt ${runAttemptCount(finished)})`);
         continue;
@@ -1307,6 +1424,12 @@ export async function runRerun({ env, readFile, github } = {}) {
       reran.push({ pr: n, job: job.id, run: run.id });
     } catch (err) {
       const status = err && err.status;
+      if (status === 403 && job && job.conclusion === 'success') {
+        throw new Error(
+          `#${n}: GitHub refused to rerun a green gate (${err.message}). ` +
+          'Not swallowing 403; the counted check would stay green.',
+        );
+      }
       if (status === 403 || status === 409 || status === 422) {
         console.log(`#${n}: rerun skipped (${status} ${err.message})`);
         continue;

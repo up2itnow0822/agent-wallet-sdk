@@ -52,14 +52,13 @@
 #   result, never merely because a review exists.
 #   GitHub 5xx responses are retried with backoff.
 #
-# Rerun budget: schedule polling of *waiting* (non-success) gates caps at
-# MAX_RUN_ATTEMPTS (8), well under GitHub's 50-rerun-per-run limit.
-# Green counted checks keep being revalidated after that so a later
-# formal Codex dismissal cannot stick (pull_request_review is omitted
-# because GitHub would run the PR's copy with actions: write). Trusted
-# Codex comments, waiver labels, and manual dispatch still rerun after
-# the waiting cap. Untrusted comments never call reRunJobForWorkflowRun.
-# Schedule backs off (10 / 20 / 40 / 80 min). A new push opens a new run.
+# Rerun budget: never reRunJob when the published conclusion would not
+# change. That stops green (and red) polling from walking into GitHub's
+# 50-rerun ceiling. Schedule evaluates via the default-branch copy of
+# scripts/review-gate.mjs and only reruns to flip the check (dismissal,
+# new clean review, waiver revoke). A 403 on a green gate fails this
+# refresh instead of being swallowed. Waiting-state polls without a
+# verdict still cap at MAX_RUN_ATTEMPTS (8). A new push opens a new run.
 #
 # Residual risk (GitHub platform limit): any other pull_request workflow with
 # a job named `review-gate` can also produce the required context, and a PR
@@ -232,6 +231,8 @@ jobs:
             const CI_WORKFLOW = 'ci.yml';
             const JOB_NAME = 'review-gate';
             const MAX_RUN_ATTEMPTS = 8;
+            const GITHUB_RERUN_CEILING = 50;
+            const RERUN_CEILING_RESERVE = 5;
             const SCHEDULE_INTERVAL_MS = 10 * 60 * 1000;
 
             async function withRetry(fn, label) {
@@ -313,6 +314,22 @@ jobs:
             function scheduleBackoffMs(attempt) {
               const exp = Math.min(Math.max((Number(attempt) || 1) - 1, 0), 3);
               return SCHEDULE_INTERVAL_MS * (2 ** exp);
+            }
+
+            function refreshAction(job, verdict, eventName, runAttempt) {
+              if (!job) return 'missing-job';
+              const current = job.conclusion;
+              const next = verdict && verdict.conclusion;
+              const attempt = runAttemptCount({ run_attempt: runAttempt });
+              const nearCeiling = attempt >= GITHUB_RERUN_CEILING - RERUN_CEILING_RESERVE;
+              if (next && current === next) return 'skip-unchanged';
+              if (!next) {
+                if (current === 'success') return 'skip-unchanged';
+                if (eventName === 'schedule' && attempt >= MAX_RUN_ATTEMPTS) return 'capped';
+                return 'rerun';
+              }
+              if (nearCeiling) return current === 'success' ? 'ceiling-fail' : 'capped';
+              return 'rerun';
             }
 
             async function resolvePrNumbers() {
@@ -425,14 +442,60 @@ jobs:
                 continue;
               }
 
-              if (context.eventName === 'schedule' &&
-                  runAttemptCount(run) >= MAX_RUN_ATTEMPTS &&
-                  job.conclusion !== 'success') {
+              let verdict = null;
+              try {
+                const fs = require('fs');
+                const { pathToFileURL } = require('url');
+                const tmp = `${process.env.RUNNER_TEMP}/review-gate.mjs`;
+                const raw = await github.request('GET /repos/{owner}/{repo}/contents/scripts/review-gate.mjs', {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  ref: context.sha,
+                  headers: { accept: 'application/vnd.github.raw' },
+                });
+                fs.writeFileSync(tmp, typeof raw.data === 'string' ? raw.data : String(raw.data));
+                const gate = await import(pathToFileURL(tmp).href);
+                const client = gate.createGithubClient({ token: process.env.GITHUB_TOKEN });
+                verdict = await gate.evaluatePrNumber(
+                  client,
+                  context.repo.owner,
+                  context.repo.repo,
+                  n,
+                  {
+                    name: context.eventName,
+                    action: context.payload.action,
+                    sender: context.payload.sender,
+                    label: context.payload.label,
+                    pull_request: context.payload.pull_request,
+                  },
+                );
+              } catch (err) {
+                core.warning(`#${n}: evaluate skipped (${err && err.message})`);
+              }
+
+              const action = refreshAction(
+                job,
+                verdict,
+                context.eventName,
+                runAttemptCount(run),
+              );
+              if (action === 'skip-unchanged') {
+                core.info(`#${n}: skip unchanged (${job.conclusion})`);
+                continue;
+              }
+              if (action === 'capped') {
                 core.info(`#${n}: schedule capped (run ${run.id} attempt ${runAttemptCount(run)}/${MAX_RUN_ATTEMPTS})`);
                 continue;
               }
+              if (action === 'ceiling-fail') {
+                core.setFailed(
+                  `#${n}: green gate is at the rerun ceiling; not swallowing a stuck success. ` +
+                  'Push a new head to mint a fresh counted run.',
+                );
+                continue;
+              }
 
-              if (context.eventName === 'schedule') {
+              if (context.eventName === 'schedule' && !(verdict && verdict.conclusion)) {
                 const completedMs = Date.parse(job.completed_at || run.updated_at || 0);
                 const backoffMs = scheduleBackoffMs(runAttemptCount(run));
                 if (Number.isFinite(completedMs) && Date.now() - completedMs < backoffMs) {
@@ -453,6 +516,13 @@ jobs:
                 core.info(`#${n}: reran ${JOB_NAME} job ${job.id} on run ${run.id}`);
               } catch (err) {
                 const status = err && err.status;
+                if (status === 403 && job.conclusion === 'success') {
+                  core.setFailed(
+                    `#${n}: GitHub refused to rerun a green gate (${err.message}). ` +
+                    'Not swallowing 403; the counted check would stay green.',
+                  );
+                  continue;
+                }
                 if (status === 403 || status === 409 || status === 422) {
                   core.info(`#${n}: rerun skipped (${status} ${err.message})`);
                   continue;
