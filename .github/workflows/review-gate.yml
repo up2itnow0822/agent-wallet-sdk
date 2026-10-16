@@ -91,6 +91,7 @@ permissions:
   actions: write
   issues: write
   pull-requests: read
+  checks: read
 
 concurrency:
   group: >-
@@ -161,9 +162,16 @@ jobs:
               runId: context.runId,
             });
             const posted = (result && result.posted) || [];
+            const receipts = (result && result.receipts) || [];
             if (posted.length === 0) {
               core.info('record-waiver: no new Bill binding to write');
               return;
+            }
+            if (receipts.length > 0) {
+              core.notice(
+                JSON.stringify({ marker: 'review-gate-waiver-receipt:v1', receipts }),
+                { title: 'review-gate-waiver-receipt' },
+              );
             }
             core.info(`recorded unforgeable waiver binding run ${context.runId} for #${posted.join(', #')}`);
 

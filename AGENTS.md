@@ -51,7 +51,12 @@
   never records a waiver. Evaluate accepts a cited run only when its
   event is `pull_request_target`, `schedule`, or `workflow_dispatch`,
   the path is this workflow file, and `record-waiver` finished with
-  `status: completed` and `conclusion: success`. A syntactically valid
+  `status: completed` and `conclusion: success`. `workflow_dispatch`
+  must use the default-branch revision (`run.head_branch`);
+  `gh workflow run --ref` of another branch is rejected. Schedule and
+  dispatch comments must match a `review-gate-waiver-receipt`
+  annotation emitted by that specific job — a bot comment in the
+  wall-clock window is not enough. A syntactically valid
   github-actions[bot] marker does not suppress a later genuine record.
   A later `committed` or force-push after the label invalidates a
   persisted binding even if the SHA returns (A→B→A).

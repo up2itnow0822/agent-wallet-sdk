@@ -37,9 +37,13 @@
  * this head's workflow-run / check-suite arrival and after the last
  * `committed` / force-push timeline event (order, not
  * `committed.created_at`, which does not exist). The comment is
- * written by that trusted run. `pull_request_target` stays a faster
- * path until GitHub blocks it by default. `issue_comment` never
- * records a waiver.
+ * written by that trusted run. `workflow_dispatch` is accepted only
+ * when `run.head_branch` is the repository default branch (`gh
+ * workflow run --ref` of a feature branch is rejected). Schedule and
+ * dispatch comments must appear in that job's waiver-receipt
+ * annotation (not merely in the run's wall-clock window).
+ * `pull_request_target` stays a faster path until GitHub blocks it by
+ * default. `issue_comment` never records a waiver.
  * The latest waiver-label timeline event must also be an allow-listed
  * `labeled` event for that same actor, and the persisted record must
  * belong to that labeling (comment at or after the event). Re-applying
@@ -82,6 +86,9 @@ export const WAIVER_MARKER = '<!-- review-gate-waiver:v1';
 export const WAIVER_RECORD_RE = /<!--\s*review-gate-waiver:v1\s+(\{.*?\})\s*-->/;
 export const REFRESH_WORKFLOW_PATH = '.github/workflows/review-gate.yml';
 export const WAIVER_RECORD_JOB = 'record-waiver';
+export const WAIVER_RECEIPT_TITLE = 'review-gate-waiver-receipt';
+export const WAIVER_RECEIPT_MARKER = 'review-gate-waiver-receipt:v1';
+export const MAX_PREFIX_RESOLVES = 20;
 export const TRUSTED_WAIVER_RECORD_EVENTS = new Set([
   'pull_request_target',
   'schedule',
@@ -367,17 +374,89 @@ export function isRefreshWorkflowPath(path) {
     normalized.endsWith('/review-gate.yml');
 }
 
+export function waiverRunIsDefaultBranchRevision(run, defaultBranch) {
+  const branch = typeof (run && run.head_branch) === 'string' ? run.head_branch : '';
+  const trusted = typeof defaultBranch === 'string' ? defaultBranch : '';
+  if ((run && run.event) === 'workflow_dispatch') {
+    return !!trusted && branch === trusted;
+  }
+  if ((run && run.event) === 'schedule' && branch) {
+    return !!trusted && branch === trusted;
+  }
+  return true;
+}
+
+export function checkRunIdFromJob(job) {
+  const url = job && job.check_run_url;
+  if (typeof url === 'string') {
+    const m = url.match(/\/check-runs\/(\d+)\s*$/);
+    if (m) return Number(m[1]);
+  }
+  const id = Number(job && job.id);
+  return Number.isFinite(id) && id > 0 ? id : null;
+}
+
+export function parseWaiverReceipts(annotations) {
+  const receipts = [];
+  for (const a of annotations || []) {
+    const title = (a && a.title) || '';
+    const message = (a && a.message) || '';
+    if (title !== WAIVER_RECEIPT_TITLE && !message.includes(WAIVER_RECEIPT_MARKER)) continue;
+    try {
+      const parsed = JSON.parse(message);
+      const list = Array.isArray(parsed && parsed.receipts)
+        ? parsed.receipts
+        : (parsed && parsed.commentId ? [parsed] : []);
+      for (const r of list) {
+        const commentId = Number(r && r.commentId);
+        const run = Number(r && r.run);
+        const sha = fullSha(r && r.sha);
+        const baseSha = fullSha(r && r.baseSha);
+        const pr = Number(r && r.pr);
+        if (!Number.isFinite(commentId) || commentId <= 0) continue;
+        if (!Number.isFinite(run) || run <= 0 || !sha || !baseSha) continue;
+        if (!Number.isFinite(pr) || pr <= 0) continue;
+        receipts.push({ commentId, run, sha, baseSha, pr });
+      }
+    } catch {
+      // ignore non-JSON notices
+    }
+  }
+  return receipts;
+}
+
+export function waiverReceiptAcceptsComment(receipts, comment, {
+  prNumber,
+  headSha,
+  baseSha,
+  runId,
+} = {}) {
+  const commentId = Number(comment && comment.id);
+  if (!Number.isFinite(commentId) || commentId <= 0) return false;
+  return (receipts || []).some(r =>
+    Number(r.commentId) === commentId &&
+    Number(r.run) === Number(runId) &&
+    (prNumber == null || Number(r.pr) === Number(prNumber)) &&
+    (!headSha || sameSha(r.sha, headSha)) &&
+    (!baseSha || sameSha(r.baseSha, baseSha)),
+  );
+}
+
 export function waiverRunProvenanceAccepts(run, jobs, {
   prNumber,
   headSha,
   baseRef,
   baseSha,
   commentCreatedMs,
+  defaultBranch,
+  receipts,
+  commentId,
 } = {}) {
   if (!run || !isRefreshWorkflowPath(run.path)) return false;
   if (!TRUSTED_WAIVER_RECORD_EVENTS.has(run.event)) return false;
   if (run.status && run.status !== 'completed') return false;
   if (run.conclusion && run.conclusion !== 'success') return false;
+  if (!waiverRunIsDefaultBranchRevision(run, defaultBranch)) return false;
   const job = (jobs || []).find(j => j.name === WAIVER_RECORD_JOB);
   if (!job || job.status !== 'completed' || job.conclusion !== 'success') return false;
   const prs = run.pull_requests || [];
@@ -392,6 +471,15 @@ export function waiverRunProvenanceAccepts(run, jobs, {
     if (baseSha && runBaseSha && !sameSha(runBaseSha, baseSha)) return false;
   } else if (run.event === 'pull_request_target') {
     return false;
+  } else if (run.event === 'schedule' || run.event === 'workflow_dispatch') {
+    if (!waiverReceiptAcceptsComment(receipts, { id: commentId }, {
+      prNumber,
+      headSha,
+      baseSha,
+      runId: run.id,
+    })) {
+      return false;
+    }
   }
   if (commentCreatedMs != null) {
     const start = Date.parse(run.created_at || 0);
@@ -468,6 +556,9 @@ export function waiverRecordAcceptsHead(comment, {
     baseRef,
     baseSha,
     commentCreatedMs: Date.parse((comment && comment.created_at) || 0),
+    defaultBranch: proven.defaultBranch,
+    receipts: proven.receipts,
+    commentId: comment && comment.id,
   });
 }
 
@@ -839,8 +930,9 @@ export async function recordTrustedWaivers({
   payload = {},
   runId,
 } = {}) {
-  if (!shouldRecordWaiverOnEvent(eventName, payload)) return { posted: [] };
+  if (!shouldRecordWaiverOnEvent(eventName, payload)) return { posted: [], receipts: [] };
   const posted = [];
+  const receipts = [];
   const numbers = [];
   if (eventName === 'pull_request_target' && payload.pull_request) {
     numbers.push(payload.pull_request.number);
@@ -914,7 +1006,7 @@ export async function recordTrustedWaivers({
     );
     if (already) continue;
 
-    await client.post(`/repos/${owner}/${repo}/issues/${n}/comments`, {
+    const created = await client.post(`/repos/${owner}/${repo}/issues/${n}/comments`, {
       body: formatWaiverComment({
         sha: headSha,
         base: baseRef,
@@ -924,9 +1016,19 @@ export async function recordTrustedWaivers({
         run,
       }),
     });
+    const commentId = Number(created && created.id);
     posted.push(n);
+    if (Number.isFinite(commentId) && commentId > 0) {
+      receipts.push({
+        pr: n,
+        sha: headSha,
+        baseSha,
+        commentId,
+        run,
+      });
+    }
   }
-  return { posted };
+  return { posted, receipts };
 }
 
 export function evaluatePr(input) {
@@ -1399,16 +1501,34 @@ export async function resolvePrefixToHead(client, owner, repo, prefix, headSha) 
   }
 }
 
-async function buildUniqueResolve(client, owner, repo, headSha, reviews, comments) {
-  const prefixes = new Set();
+export function collectResolvablePrefixes(reviews, comments, headSha) {
+  const prefixes = [];
+  const seen = new Set();
+  function add(value) {
+    const s = typeof value === 'string' ? value.toLowerCase() : '';
+    if (!s || seen.has(s) || !shaPrefixMatches(s, headSha)) return;
+    seen.add(s);
+    prefixes.push(s);
+  }
   for (const r of reviews || []) {
-    if (typeof r.commit_id === 'string' && /^[0-9a-f]{7,40}$/i.test(r.commit_id)) {
-      prefixes.add(r.commit_id.toLowerCase());
-    }
+    if (!isCodexUser(r && r.user)) continue;
+    if (typeof r.commit_id === 'string') add(r.commit_id);
+    for (const s of mentionedShas(r && r.body)) add(s);
+    if (prefixes.length >= MAX_PREFIX_RESOLVES) break;
   }
   for (const c of comments || []) {
-    for (const s of mentionedShas(c.body)) prefixes.add(s);
+    if (prefixes.length >= MAX_PREFIX_RESOLVES) break;
+    if (!isCodexUser(c && c.user)) continue;
+    for (const s of mentionedShas(c && c.body)) {
+      add(s);
+      if (prefixes.length >= MAX_PREFIX_RESOLVES) break;
+    }
   }
+  return prefixes.slice(0, MAX_PREFIX_RESOLVES);
+}
+
+async function buildUniqueResolve(client, owner, repo, headSha, reviews, comments) {
+  const prefixes = collectResolvablePrefixes(reviews, comments, headSha);
   const unique = new Set();
   for (const p of prefixes) {
     if (await resolvePrefixToHead(client, owner, repo, p, headSha)) unique.add(p);
@@ -1463,8 +1583,30 @@ async function loadSnapshot(client, owner, repo, prNumber, event) {
   return { pr, reviews, comments, timeline, event, headPushedMs, uniqueResolve, resolveWaiverRun };
 }
 
+async function loadRepoDefaultBranch(client, owner, repo) {
+  try {
+    const data = await client.get(`/repos/${owner}/${repo}`);
+    return typeof (data && data.default_branch) === 'string' ? data.default_branch : '';
+  } catch {
+    return '';
+  }
+}
+
+async function loadJobReceipts(client, owner, repo, job) {
+  const checkRunId = checkRunIdFromJob(job);
+  if (!checkRunId) return [];
+  try {
+    const data = await client.get(`/repos/${owner}/${repo}/check-runs/${checkRunId}/annotations`);
+    const list = Array.isArray(data) ? data : (data && data.annotations) || [];
+    return parseWaiverReceipts(list);
+  } catch {
+    return [];
+  }
+}
+
 async function buildWaiverResolver(client, owner, repo, comments) {
   const map = new Map();
+  const defaultBranch = await loadRepoDefaultBranch(client, owner, repo);
   for (const c of comments || []) {
     const rec = parseWaiverRecord(c && c.body);
     if (!rec || map.has(rec.run)) continue;
@@ -1474,7 +1616,9 @@ async function buildWaiverResolver(client, owner, repo, comments) {
         `/repos/${owner}/${repo}/actions/runs/${rec.run}/jobs`,
         'jobs',
       );
-      map.set(rec.run, { run, jobs });
+      const recordJob = (jobs || []).find(j => j.name === WAIVER_RECORD_JOB);
+      const receipts = await loadJobReceipts(client, owner, repo, recordJob);
+      map.set(rec.run, { run, jobs, receipts, defaultBranch });
     } catch {
       map.set(rec.run, null);
     }

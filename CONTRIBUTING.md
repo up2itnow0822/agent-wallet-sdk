@@ -74,9 +74,11 @@ that `run` and requires:
 
 - `path` is `.github/workflows/review-gate.yml`
 - `event` is `pull_request_target`, `schedule`, or `workflow_dispatch`
-  (GitHub always executes `main`'s copy for those events)
+- `workflow_dispatch` used the default-branch revision (`head_branch`)
 - the run has a successful `record-waiver` job (only that trusted workflow
   defines it)
+- for schedule/dispatch (empty `pull_requests[]`), the comment id is listed
+  in that job's `review-gate-waiver-receipt` annotation
 
 `record-waiver` does not depend on `pull_request_target` remaining allowed
 after 2 November 2026. Schedule (every 10 minutes) and `workflow_dispatch`

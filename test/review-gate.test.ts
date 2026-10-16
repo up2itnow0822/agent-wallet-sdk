@@ -12,6 +12,11 @@ import {
   CI_WORKFLOW_FILE,
   COMPLETED_ROW,
   MAX_RUN_ATTEMPTS,
+  MAX_PREFIX_RESOLVES,
+  collectResolvablePrefixes,
+  waiverRunIsDefaultBranchRevision,
+  waiverReceiptAcceptsComment,
+  parseWaiverReceipts,
   GITHUB_RERUN_CEILING,
   latestCodexHeadOutcome,
   dismissalMsByReviewId,
@@ -83,6 +88,7 @@ const BILL = 'up2itnow0822';
 const HEAD_PUSHED_MS = Date.parse('2026-10-15T21:20:00Z');
 const uniqueToHead = (shown: string) => shaPrefixMatches(shown, HEAD);
 const WAIVER_RUN_ID = 555001;
+const WAIVER_COMMENT_ID = 88001;
 const trustedWaiverProvenance = {
   run: {
     id: WAIVER_RUN_ID,
@@ -99,6 +105,10 @@ const trustedWaiverProvenance = {
     }],
   },
   jobs: [{ name: WAIVER_RECORD_JOB, status: 'completed', conclusion: 'success' }],
+  defaultBranch: 'main',
+  receipts: [{
+    commentId: WAIVER_COMMENT_ID, run: WAIVER_RUN_ID, sha: HEAD, baseSha: BASE_SHA, pr: 87,
+  }],
 };
 function resolveTrustedWaiver(runId: number) {
   return Number(runId) === WAIVER_RUN_ID ? trustedWaiverProvenance : null;
@@ -201,6 +211,7 @@ function waiverComment(
   extra: Record<string, unknown> = {},
 ) {
   return {
+    id: WAIVER_COMMENT_ID,
     user: GHA_BOT,
     body: formatWaiverComment({
       sha,
@@ -276,6 +287,29 @@ describe('head push time is GitHub event time, not committer date', () => {
     expect(headPushedMsFromEvidence({
       workflowRuns: [{ committer_date: '2020-01-01T00:00:00Z' }],
     })).toBeUndefined();
+  });
+});
+
+describe('prefix resolution stays Codex-only and bounded', () => {
+  it('ignores author comments and prefixes that cannot be this head', () => {
+    const flood = Array.from({ length: 80 }, (_, i) =>
+      '`' + i.toString(16).padStart(7, '0') + '`',
+    ).join(' ');
+    expect(collectResolvablePrefixes([], [{
+      user: { login: 'contributor', type: 'User' },
+      body: flood + ' `' + HEAD.slice(0, 7) + '`',
+    }], HEAD)).toEqual([]);
+    expect(collectResolvablePrefixes([], [{
+      user: CODEX_BOT,
+      body: 'saw `' + OLDER.slice(0, 7) + '` and `' + HEAD.slice(0, 7) + '`',
+    }], HEAD)).toEqual([HEAD.slice(0, 7)]);
+  });
+
+  it('caps the number of prefixes resolved from Codex evidence', () => {
+    expect(MAX_PREFIX_RESOLVES).toBeLessThanOrEqual(20);
+    const many = Array.from({ length: 30 }, (_, i) => '`' + HEAD.slice(0, 7 + i) + '`').join(' ');
+    const prefixes = collectResolvablePrefixes([], [{ user: CODEX_BOT, body: many }], HEAD);
+    expect(prefixes.length).toBeLessThanOrEqual(MAX_PREFIX_RESOLVES);
   });
 });
 
@@ -1102,26 +1136,40 @@ describe('evaluatePr — Bill-only waiver bound to exact head SHA', () => {
       id: WAIVER_RUN_ID,
       path: REFRESH_WORKFLOW_PATH,
       event: 'schedule',
+      head_branch: 'main',
+      status: 'completed',
+      conclusion: 'success',
       created_at: '2026-10-15T22:00:00Z',
       updated_at: '2026-10-15T22:00:30Z',
       pull_requests: [],
     };
     const jobs = [{ name: WAIVER_RECORD_JOB, status: 'completed', conclusion: 'success' }];
-    expect(waiverRunProvenanceAccepts(scheduleRun, jobs, {
+    const receipts = [{
+      commentId: WAIVER_COMMENT_ID, run: WAIVER_RUN_ID, sha: HEAD, baseSha: BASE_SHA, pr: 87,
+    }];
+    const bound = {
       prNumber: 87, headSha: HEAD, baseRef: 'main', baseSha: BASE_SHA,
       commentCreatedMs: Date.parse('2026-10-15T22:00:01Z'),
-    })).toBe(true);
+      defaultBranch: 'main',
+      receipts,
+      commentId: WAIVER_COMMENT_ID,
+    };
+    expect(waiverRunProvenanceAccepts(scheduleRun, jobs, bound)).toBe(true);
     expect(waiverRunProvenanceAccepts({
       ...scheduleRun, event: 'workflow_dispatch',
-    }, jobs, {
-      prNumber: 87, headSha: HEAD, baseRef: 'main', baseSha: BASE_SHA,
-      commentCreatedMs: Date.parse('2026-10-15T22:00:01Z'),
-    })).toBe(true);
+    }, jobs, bound)).toBe(true);
+    expect(waiverRunProvenanceAccepts(scheduleRun, jobs, {
+      ...bound, receipts: [],
+    })).toBe(false);
+    expect(waiverRunIsDefaultBranchRevision({
+      event: 'workflow_dispatch', head_branch: 'evil',
+    }, 'main')).toBe(false);
+    expect(waiverRunProvenanceAccepts({
+      ...scheduleRun, event: 'workflow_dispatch', head_branch: 'evil',
+    }, jobs, bound)).toBe(false);
     expect(waiverRunProvenanceAccepts({
       ...scheduleRun, event: 'pull_request_target',
-    }, jobs, {
-      prNumber: 87, headSha: HEAD, baseRef: 'main', baseSha: BASE_SHA,
-    })).toBe(false);
+    }, jobs, bound)).toBe(false);
     expect(waiverRunProvenanceAccepts({
       ...scheduleRun, event: 'issue_comment',
     }, jobs, { prNumber: 87 })).toBe(false);
@@ -1130,7 +1178,9 @@ describe('evaluatePr — Bill-only waiver bound to exact head SHA', () => {
       pr: pr({ labels: [{ name: WAIVE_LABEL }] }),
       comments: [waiverComment()],
       timeline: [labeled],
-      resolveWaiverRun: () => ({ run: scheduleRun, jobs }),
+      resolveWaiverRun: () => ({
+        run: scheduleRun, jobs, receipts, defaultBranch: 'main',
+      }),
     }));
     expect(verdict.conclusion).toBe('success');
     expect(verdict.title).toBe('Codex waived');
@@ -1343,7 +1393,30 @@ describe('evaluatePr — Bill-only waiver bound to exact head SHA', () => {
     ], {
       prNumber: 87, headSha: HEAD, baseRef: 'main', baseSha: BASE_SHA,
       commentCreatedMs: Date.parse('2026-10-15T22:00:01Z'),
+    })).toBe(false);
+    expect(waiverRunProvenanceAccepts(run, [
+      { name: WAIVER_RECORD_JOB, status: 'completed', conclusion: 'success' },
+    ], {
+      prNumber: 87, headSha: HEAD, baseRef: 'main', baseSha: BASE_SHA,
+      commentCreatedMs: Date.parse('2026-10-15T22:00:01Z'),
+      defaultBranch: 'main',
+      commentId: WAIVER_COMMENT_ID,
+      receipts: [{
+        commentId: WAIVER_COMMENT_ID, run: WAIVER_RUN_ID, sha: HEAD, baseSha: BASE_SHA, pr: 87,
+      }],
     })).toBe(true);
+    expect(waiverReceiptAcceptsComment([], waiverComment(), {
+      prNumber: 87, headSha: HEAD, baseSha: BASE_SHA, runId: WAIVER_RUN_ID,
+    })).toBe(false);
+    expect(parseWaiverReceipts([{
+      title: 'review-gate-waiver-receipt',
+      message: JSON.stringify({
+        marker: 'review-gate-waiver-receipt:v1',
+        receipts: [{
+          commentId: WAIVER_COMMENT_ID, run: WAIVER_RUN_ID, sha: HEAD, baseSha: BASE_SHA, pr: 87,
+        }],
+      }),
+    }])[0]?.commentId).toBe(WAIVER_COMMENT_ID);
   });
 });
 
@@ -1810,6 +1883,7 @@ describe('workflows pin the counted context and never orphan checks.create', () 
     expect(refresh).toContain('reRunJobForWorkflowRun');
     expect(refresh).toContain('actions: write');
     expect(refresh).toContain('issues: write');
+    expect(refresh).toContain('checks: read');
     expect(refreshExec).not.toContain('checks: write');
     expect(refreshExec).not.toContain('checks.create');
     expect(refreshExec).not.toContain('Evaluating Codex review');
@@ -1881,6 +1955,8 @@ describe('workflows pin the counted context and never orphan checks.create', () 
     expect(recordBlock).toContain('GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}');
     expect(recordBlock).toContain('github-token: ${{ secrets.GITHUB_TOKEN }}');
     expect(recordBlock).toContain('octokit: github');
+    expect(recordBlock).toContain('review-gate-waiver-receipt');
+    expect(recordBlock).toContain('core.notice');
     expect(recordBlock).not.toContain('issue_comment');
     expect(contributing).toContain('schedule');
     expect(contributing).toContain('workflow_dispatch');
