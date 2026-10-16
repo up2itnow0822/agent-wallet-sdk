@@ -2,13 +2,25 @@
  * review-gate evaluation and refresh.
  *
  * The required GitHub Actions check named `review-gate` is the CI job in
- * `.github/workflows/ci.yml`. This module is the only evaluator: it reads
- * pull-request evidence through the GitHub API and exits 0/1. The
- * pull_request_target / issue_comment / pull_request_review workflow reruns
- * that CI job; it never calls checks.create.
+ * `.github/workflows/ci.yml`. That job fetches THIS file from the PR's
+ * base SHA (main), not from the PR checkout, so a PR cannot rewrite the
+ * evaluator it is judged by. The job itself still lives in the PR's
+ * ci.yml — see CONTRIBUTING.md for that residual risk and the ruleset
+ * write-up for Bill.
  *
- * Evidence matchers for clean Codex comments match PR #88 (7+ hex prefix of
- * the current head only; never resolve a short SHA against another commit).
+ * The pull_request_target / issue_comment / schedule workflow reruns the
+ * CI job; it never calls checks.create. pull_request_review is omitted
+ * because GitHub would run the PR's copy of that workflow with
+ * actions: write.
+ *
+ * Short-SHA Codex comments stay valid (PR #88) only when the prefix
+ * uniquely resolves to the current 40-char head AND the comment's
+ * created/updated time is after GitHub's push/event time for that head
+ * (workflow-run / check-suite created_at — never the author-controlled
+ * committer date).
+ *
+ * `codex-waived` binds to an exact head SHA via a github-actions[bot]
+ * comment posted at label time. Timestamps are not used for waiver.
  */
 
 import fs from 'node:fs';
@@ -22,6 +34,10 @@ export const CODEX_LOGINS = new Set([
   'chatgpt-codex-connector',
   'chatgpt-codex-connector[bot]',
 ]);
+export const GITHUB_ACTIONS_LOGINS = new Set([
+  'github-actions[bot]',
+  'github-actions',
+]);
 
 export const SUMMARY_MARKER = '<!-- codex-pull-request-review-summary -->';
 export const COMPLETED_ROW =
@@ -30,6 +46,12 @@ export const MENTIONED_SHA =
   /`([0-9a-fA-F]{7,40})`|"commit_sha"\s*:\s*"([0-9a-fA-F]{7,40})"/g;
 export const NO_MAJOR_ISSUES = /didn't find any major issues/i;
 export const STATE_COMMENT = /<!--\s*codex-review-state:v1\s+(\{.*?\})\s*-->/;
+export const WAIVER_MARKER = '<!-- review-gate-waiver:v1';
+export const WAIVER_RECORD_RE = /<!--\s*review-gate-waiver:v1\s+(\{.*?\})\s*-->/;
+
+// Well under GitHub's 50-rerun-per-run cap. A new push opens a new run.
+export const MAX_RUN_ATTEMPTS = 8;
+export const SCHEDULE_INTERVAL_MS = 10 * 60 * 1000;
 
 export function isCodexLogin(login) {
   return !!login && CODEX_LOGINS.has(login);
@@ -37,6 +59,10 @@ export function isCodexLogin(login) {
 
 export function isCodexUser(user) {
   return !!user && user.type === 'Bot' && isCodexLogin(user.login);
+}
+
+export function isGithubActionsBot(user) {
+  return !!user && user.type === 'Bot' && GITHUB_ACTIONS_LOGINS.has(user.login);
 }
 
 export function fullSha(value) {
@@ -59,6 +85,20 @@ export function shaPrefixMatches(shown, headSha) {
     : '';
   const head = fullSha(headSha);
   return prefix !== '' && head !== '' && head.startsWith(prefix);
+}
+
+/**
+ * Short SHA is accepted only when it prefixes the current head AND the
+ * caller proved GitHub uniquely resolves that prefix to this head
+ * (GET /commits/{prefix} returns this SHA; 422 ambiguous → reject).
+ * A 40-char exact match is unique by identity and does not need the API.
+ */
+export function prefixUniquelyMatchesHead(shown, headSha, uniqueResolve) {
+  if (!shaPrefixMatches(shown, headSha)) return false;
+  const prefix = String(shown).toLowerCase();
+  if (prefix.length === 40) return true;
+  if (typeof uniqueResolve === 'function') return !!uniqueResolve(prefix, headSha);
+  return false;
 }
 
 export function mentionedShas(body) {
@@ -109,27 +149,119 @@ export function summaryMarksHeadCompleted(body, headSha) {
     summaryStateMarksHeadCompleted(text, headSha);
 }
 
+function summaryCompletedPrefixIsUnique(body, headSha, uniqueResolve) {
+  const row = new RegExp(COMPLETED_ROW.source, 'gm');
+  let m;
+  while ((m = row.exec(body || '')) !== null) {
+    if (prefixUniquelyMatchesHead(m[1], headSha, uniqueResolve)) return true;
+  }
+  const state = STATE_COMMENT.exec(body || '');
+  if (!state) return false;
+  try {
+    const cr = JSON.parse(state[1]).code_review;
+    if (!cr || String(cr.status).toLowerCase() !== 'completed') return false;
+    return prefixUniquelyMatchesHead(cr.commit_sha, headSha, uniqueResolve);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Earliest GitHub-recorded time this SHA appeared as a pull_request head.
+ * Uses workflow-run and check-suite created_at (platform event time after
+ * the push). Never uses commit.committer.date — authors control that.
+ */
+export function headPushedMsFromEvidence({ workflowRuns, checkSuites } = {}) {
+  const times = [];
+  for (const r of workflowRuns || []) {
+    if (r && r.created_at) times.push(Date.parse(r.created_at));
+  }
+  for (const s of checkSuites || []) {
+    if (s && s.created_at) times.push(Date.parse(s.created_at));
+  }
+  const valid = times.filter(Number.isFinite);
+  if (valid.length === 0) return undefined;
+  return Math.min(...valid);
+}
+
+export function evidenceAfterHeadPush(eventMs, headPushedMs, { fullExact = false } = {}) {
+  if (!Number.isFinite(eventMs)) return false;
+  if (headPushedMs == null || !Number.isFinite(Number(headPushedMs))) {
+    return !!fullExact;
+  }
+  return eventMs > Number(headPushedMs);
+}
+
 /**
  * A Codex issue comment or review-summary body counts as a clean head
  * review when it does not name any other SHA and either:
- *   - the summary marks Code Review Completed on a head-SHA prefix, or
- *   - the body is a "no major issues" receipt that names a head-SHA prefix.
- * SHA-less receipts never count, even if posted after the head was pushed.
+ *   - the summary marks Code Review Completed on a unique head-SHA prefix, or
+ *   - the body is a "no major issues" receipt that names a unique head-SHA prefix.
+ * The comment must be created/updated after GitHub's push/event time for
+ * this head. SHA-less receipts never count.
  */
 export function commentAcceptsCleanHead(comment, ctx) {
   const body = (comment && comment.body) || '';
   const updatedMs = Date.parse((comment && (comment.updated_at || comment.created_at)) || 0);
   const createdMs = Date.parse((comment && comment.created_at) || 0);
+  const eventMs = Math.max(
+    Number.isFinite(updatedMs) ? updatedMs : 0,
+    Number.isFinite(createdMs) ? createdMs : 0,
+  );
   const baseChangedMs = Number(ctx && ctx.baseChangedMs) || 0;
   const headSha = (ctx && ctx.headSha) || '';
+  const headPushedMs = ctx && ctx.headPushedMs;
+  const uniqueResolve = ctx && ctx.uniqueResolve;
 
-  if (!(updatedMs > baseChangedMs || createdMs > baseChangedMs)) return false;
+  if (!(eventMs > baseChangedMs)) return false;
+  if (!evidenceAfterHeadPush(eventMs, headPushedMs)) return false;
   if (mentionsNonHeadSha(body, headSha)) return false;
-  if (summaryMarksHeadCompleted(body, headSha)) return true;
+  if (summaryMarksHeadCompleted(body, headSha)) {
+    return summaryCompletedPrefixIsUnique(body, headSha, uniqueResolve);
+  }
   if (isCleanNoMajorIssuesBody(body)) {
-    return mentionedShas(body).some(s => shaPrefixMatches(s, headSha));
+    return mentionedShas(body).some(s => prefixUniquelyMatchesHead(s, headSha, uniqueResolve));
   }
   return false;
+}
+
+export function formatWaiverComment({ sha, actor, pr }) {
+  const rec = { sha: fullSha(sha), actor, pr: Number(pr) };
+  return `${WAIVER_MARKER} ${JSON.stringify(rec)} -->\n` +
+    `review-gate: \`${WAIVE_LABEL}\` bound to head \`${rec.sha}\` by \`${actor}\` on PR #${rec.pr}.`;
+}
+
+export function parseWaiverRecord(body) {
+  const m = WAIVER_RECORD_RE.exec(body || '');
+  if (!m) return null;
+  try {
+    const rec = JSON.parse(m[1]);
+    const sha = fullSha(rec && rec.sha);
+    if (!sha) return null;
+    return { sha, actor: rec.actor, pr: rec.pr };
+  } catch {
+    return null;
+  }
+}
+
+export function waiverRecordAcceptsHead(comment, { headSha, prNumber } = {}) {
+  if (!isGithubActionsBot(comment && comment.user)) return false;
+  const rec = parseWaiverRecord(comment && comment.body);
+  if (!rec) return false;
+  if (!sameSha(rec.sha, headSha)) return false;
+  if (prNumber != null && rec.pr != null && Number(rec.pr) !== Number(prNumber)) return false;
+  if (rec.actor && !WAIVER_ACTORS.has(rec.actor)) return false;
+  return true;
+}
+
+export function isWaiverBoundToCurrentHead({
+  labels,
+  comments,
+  headSha,
+  prNumber,
+}) {
+  if (!labels || !labels.includes(WAIVE_LABEL)) return false;
+  return (comments || []).some(c => waiverRecordAcceptsHead(c, { headSha, prNumber }));
 }
 
 export function isRetryableGithubStatus(status) {
@@ -177,25 +309,12 @@ export function timelineFacts(events) {
   return { baseChangedMs, lastWaiverEvent, lastHeadMoveMs };
 }
 
-export function isWaiverBoundToCurrentHead({
-  labels,
-  lastWaiverEvent,
-  baseChangedMs,
-  lastHeadMoveMs,
-  headCommitterMs,
-}) {
-  if (!labels || !labels.includes(WAIVE_LABEL)) return false;
-  if (!lastWaiverEvent || lastWaiverEvent.event !== 'labeled') return false;
-  if (!lastWaiverEvent.actor || !WAIVER_ACTORS.has(lastWaiverEvent.actor.login)) return false;
-  const labeledAt = Date.parse(lastWaiverEvent.created_at || 0);
-  if (!Number.isFinite(labeledAt) || labeledAt <= (baseChangedMs || 0)) return false;
-  if (labeledAt <= (lastHeadMoveMs || 0)) return false;
-  if (headCommitterMs != null && Number(headCommitterMs) > labeledAt) return false;
-  return true;
-}
-
-function reviewMatchesHead(review, headSha) {
-  return isCodexUser(review.user) && shaPrefixMatches(review.commit_id, headSha);
+function reviewMatchesHead(review, headSha, uniqueResolve, headPushedMs) {
+  if (!isCodexUser(review.user)) return false;
+  if (!prefixUniquelyMatchesHead(review.commit_id, headSha, uniqueResolve)) return false;
+  const submitted = Date.parse(review.submitted_at || 0);
+  const exact = fullSha(review.commit_id) !== '' && sameSha(review.commit_id, headSha);
+  return evidenceAfterHeadPush(submitted, headPushedMs, { fullExact: exact });
 }
 
 function isFreshBillWaiver(pr, headSha, event, facts) {
@@ -222,6 +341,13 @@ function isFreshBillWaiver(pr, headSha, event, facts) {
   );
 }
 
+export function shouldPostWaiverRecord(event, pr, headSha) {
+  return isFreshBillWaiver(pr, headSha, event, {
+    baseChangedMs: 0,
+    lastWaiverEvent: null,
+  });
+}
+
 export function evaluatePr(input) {
   const pr = input.pr || {};
   const prNumber = pr.number;
@@ -239,15 +365,17 @@ export function evaluatePr(input) {
   const labels = (pr.labels || []).map(l => l.name);
   const facts = timelineFacts(input.timeline || []);
   const event = input.event || {};
+  const comments = input.comments || [];
+  const uniqueResolve = input.uniqueResolve;
+  const headPushedMs = input.headPushedMs;
 
   if (labels.includes(WAIVE_LABEL)) {
     if (isFreshBillWaiver(pr, headSha, event, facts) ||
         isWaiverBoundToCurrentHead({
           labels,
-          lastWaiverEvent: facts.lastWaiverEvent,
-          baseChangedMs: facts.baseChangedMs,
-          lastHeadMoveMs: facts.lastHeadMoveMs,
-          headCommitterMs: input.headCommitterMs,
+          comments,
+          headSha,
+          prNumber,
         })) {
       return {
         prNumber,
@@ -272,10 +400,13 @@ export function evaluatePr(input) {
   }
 
   const reviews = input.reviews || [];
-  const comments = input.comments || [];
-  const codexReviewsOnHead = reviews.filter(r => reviewMatchesHead(r, headSha));
-  const dismissedOnHead = codexReviewsOnHead.some(r =>
-    String(r.state).toUpperCase() === 'DISMISSED'
+  const codexReviewsOnHead = reviews.filter(r =>
+    reviewMatchesHead(r, headSha, uniqueResolve, headPushedMs),
+  );
+  const dismissedOnHead = reviews.some(r =>
+    isCodexUser(r.user) &&
+    prefixUniquelyMatchesHead(r.commit_id, headSha, uniqueResolve) &&
+    String(r.state).toUpperCase() === 'DISMISSED',
   );
   const codexOnHead = codexReviewsOnHead.filter(r =>
     String(r.state).toUpperCase() !== 'DISMISSED' &&
@@ -289,7 +420,12 @@ export function evaluatePr(input) {
 
   const cleanPassOnHead = comments.some(c => {
     if (!isCodexUser(c.user)) return false;
-    return commentAcceptsCleanHead(c, { headSha, baseChangedMs: facts.baseChangedMs });
+    return commentAcceptsCleanHead(c, {
+      headSha,
+      baseChangedMs: facts.baseChangedMs,
+      headPushedMs,
+      uniqueResolve,
+    });
   });
   const acceptedCleanPass =
     cleanPassOnHead && codexReviewsOnHead.length === 0 && !dismissedOnHead;
@@ -359,14 +495,23 @@ export function sameNumberSet(left, right) {
   return true;
 }
 
-export function selectCiRun(runs) {
+export function runMatchesPr(run, prNumber) {
+  const n = Number(prNumber);
+  if (!Number.isFinite(n) || n <= 0) return false;
+  const prs = (run && run.pull_requests) || [];
+  return prs.some(p => Number(p.number) === n);
+}
+
+export function selectCiRun(runs, { prNumber } = {}) {
   const matches = (runs || []).filter(r => {
     const path = r.path || '';
     const isCi = path === `.github/workflows/${CI_WORKFLOW_FILE}` ||
       path.endsWith(`/${CI_WORKFLOW_FILE}`) ||
       path === CI_WORKFLOW_FILE ||
       r.name === 'CI';
-    return isCi && r.event === 'pull_request';
+    if (!(isCi && r.event === 'pull_request')) return false;
+    if (prNumber != null && !runMatchesPr(r, prNumber)) return false;
+    return true;
   });
   matches.sort((a, b) => {
     const byNumber = (b.run_number || 0) - (a.run_number || 0);
@@ -380,19 +525,42 @@ export function selectReviewGateJob(jobs) {
   return (jobs || []).find(j => j.name === CHECK_JOB_NAME) || null;
 }
 
+export function runAttemptCount(run) {
+  const n = Number(run && run.run_attempt);
+  return Number.isFinite(n) && n > 0 ? n : 1;
+}
+
+export function scheduleBackoffMs(attempt) {
+  const n = Number(attempt);
+  const safe = Number.isFinite(n) && n > 0 ? n : 1;
+  const exp = Math.min(Math.max(safe - 1, 0), 3);
+  return SCHEDULE_INTERVAL_MS * (2 ** exp);
+}
+
 export function shouldRerunOnSchedule(job) {
   if (!job) return true;
   if (job.status && job.status !== 'completed') return false;
-  return job.conclusion !== 'success';
+  return true;
 }
 
-export function rerunPlan(run, job, { eventName } = {}) {
+export function rerunPlan(run, job, { eventName, nowMs, lastJobCompletedMs } = {}) {
   if (!run) return 'missing-run';
+  if (runAttemptCount(run) >= MAX_RUN_ATTEMPTS) return 'capped';
   if (run.status && run.status !== 'completed') {
     return eventName === 'schedule' ? 'skip-in-progress' : 'wait-run';
   }
   if (!job) return 'missing-job';
-  if (eventName === 'schedule' && job.conclusion === 'success') return 'skip-green';
+  if (eventName === 'schedule') {
+    const completedMs = lastJobCompletedMs != null
+      ? Number(lastJobCompletedMs)
+      : Date.parse((job && job.completed_at) || run.updated_at || 0);
+    const wait = scheduleBackoffMs(runAttemptCount(run));
+    const now = nowMs == null ? Date.now() : Number(nowMs);
+    if (Number.isFinite(completedMs) && Number.isFinite(now) && now - completedMs < wait) {
+      return 'backoff';
+    }
+    return 'rerun';
+  }
   return 'rerun';
 }
 
@@ -401,7 +569,7 @@ export function createGithubClient({ token, fetchImpl, apiBase } = {}) {
   const base = apiBase || 'https://api.github.com';
   if (!token) throw new Error('GITHUB_TOKEN is required for review-gate API reads');
 
-  async function request(method, path) {
+  async function request(method, path, body) {
     return withRetry(async () => {
       const res = await fetchFn(`${base}${path}`, {
         method,
@@ -410,7 +578,9 @@ export function createGithubClient({ token, fetchImpl, apiBase } = {}) {
           Authorization: `Bearer ${token}`,
           'X-GitHub-Api-Version': '2022-11-28',
           'User-Agent': 'agent-wallet-sdk-review-gate',
+          ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
         },
+        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
       });
       const text = await res.text();
       let data = null;
@@ -448,7 +618,7 @@ export function createGithubClient({ token, fetchImpl, apiBase } = {}) {
     request,
     paginate,
     get: async path => (await request('GET', path)).data,
-    post: async path => (await request('POST', path)).data,
+    post: async (path, body) => (await request('POST', path, body)).data,
   };
 }
 
@@ -463,6 +633,54 @@ function repoParts(repository) {
   return { owner, repo };
 }
 
+export async function resolvePrefixToHead(client, owner, repo, prefix, headSha) {
+  if (!shaPrefixMatches(prefix, headSha)) return false;
+  if (String(prefix).length === 40) return true;
+  try {
+    const commit = await client.get(`/repos/${owner}/${repo}/commits/${prefix}`);
+    return sameSha(commit && commit.sha, headSha);
+  } catch {
+    return false;
+  }
+}
+
+async function buildUniqueResolve(client, owner, repo, headSha, reviews, comments) {
+  const prefixes = new Set();
+  for (const r of reviews || []) {
+    if (typeof r.commit_id === 'string' && /^[0-9a-f]{7,40}$/i.test(r.commit_id)) {
+      prefixes.add(r.commit_id.toLowerCase());
+    }
+  }
+  for (const c of comments || []) {
+    for (const s of mentionedShas(c.body)) prefixes.add(s);
+  }
+  const unique = new Set();
+  for (const p of prefixes) {
+    if (await resolvePrefixToHead(client, owner, repo, p, headSha)) unique.add(p);
+  }
+  return shown => {
+    const s = typeof shown === 'string' ? shown.toLowerCase() : '';
+    if (s.length === 40) return sameSha(s, headSha);
+    return unique.has(s);
+  };
+}
+
+async function loadHeadPushMs(client, owner, repo, headSha) {
+  const [runs, suiteData] = await Promise.all([
+    client.paginate(
+      `/repos/${owner}/${repo}/actions/runs?head_sha=${headSha}&event=pull_request`,
+      'workflow_runs',
+    ),
+    client.get(`/repos/${owner}/${repo}/commits/${headSha}/check-suites`).catch(() => ({
+      check_suites: [],
+    })),
+  ]);
+  return headPushedMsFromEvidence({
+    workflowRuns: runs,
+    checkSuites: (suiteData && suiteData.check_suites) || [],
+  });
+}
+
 async function loadSnapshot(client, owner, repo, prNumber, event) {
   const pr = await client.get(`/repos/${owner}/${repo}/pulls/${prNumber}`);
   const [reviews, comments, timeline] = await Promise.all([
@@ -471,15 +689,16 @@ async function loadSnapshot(client, owner, repo, prNumber, event) {
     client.paginate(`/repos/${owner}/${repo}/issues/${prNumber}/timeline`),
   ]);
   const headSha = fullSha(pr.head && pr.head.sha);
-  let headCommitterMs;
+  let headPushedMs;
+  let uniqueResolve = shown => {
+    const s = typeof shown === 'string' ? shown.toLowerCase() : '';
+    return s.length === 40 && sameSha(s, headSha);
+  };
   if (headSha) {
-    const commit = await client.get(`/repos/${owner}/${repo}/commits/${headSha}`);
-    headCommitterMs = Date.parse(
-      commit && commit.commit && commit.commit.committer && commit.commit.committer.date,
-    );
-    if (!Number.isFinite(headCommitterMs)) headCommitterMs = undefined;
+    headPushedMs = await loadHeadPushMs(client, owner, repo, headSha);
+    uniqueResolve = await buildUniqueResolve(client, owner, repo, headSha, reviews, comments);
   }
-  return { pr, reviews, comments, timeline, event, headCommitterMs };
+  return { pr, reviews, comments, timeline, event, headPushedMs, uniqueResolve };
 }
 
 export async function runEvaluate({ env, readFile, github } = {}) {
@@ -602,6 +821,19 @@ async function waitForRun(client, owner, repo, runId, opts = {}) {
   }
 }
 
+async function ensureWaiverComment(client, owner, repo, pr, headSha, event) {
+  if (!shouldPostWaiverRecord(event, pr, headSha)) return false;
+  const comments = await client.paginate(`/repos/${owner}/${repo}/issues/${pr.number}/comments`);
+  if (comments.some(c => waiverRecordAcceptsHead(c, { headSha, prNumber: pr.number }))) {
+    return false;
+  }
+  const actor = (event.sender && event.sender.login) || '';
+  await client.post(`/repos/${owner}/${repo}/issues/${pr.number}/comments`, {
+    body: formatWaiverComment({ sha: headSha, actor, pr: pr.number }),
+  });
+  return true;
+}
+
 export async function runRerun({ env, readFile, github } = {}) {
   const environment = env || process.env;
   const read = readFile || (path => fs.readFileSync(path, 'utf8'));
@@ -609,6 +841,13 @@ export async function runRerun({ env, readFile, github } = {}) {
   const { owner, repo } = repoParts(environment.GITHUB_REPOSITORY);
   const client = github || createGithubClient({ token: environment.GITHUB_TOKEN });
   const eventName = environment.GITHUB_EVENT_NAME;
+  const event = {
+    name: eventName,
+    action: payload.action,
+    sender: payload.sender,
+    label: payload.label,
+    pull_request: payload.pull_request,
+  };
   const numbers = await resolvePrNumbers({ eventName, payload, client, owner, repo });
   if (numbers.length === 0) {
     console.log('No pull requests to refresh.');
@@ -623,13 +862,23 @@ export async function runRerun({ env, readFile, github } = {}) {
       console.log(`#${n}: skip, head is not a 40-character SHA`);
       continue;
     }
+    try {
+      await ensureWaiverComment(client, owner, repo, pr, headSha, event);
+    } catch (err) {
+      const status = err && err.status;
+      if (status === 403 || status === 422) {
+        console.log(`#${n}: waiver comment skipped (${status} ${err.message})`);
+      } else {
+        throw err;
+      }
+    }
     const runs = await client.paginate(
       `/repos/${owner}/${repo}/actions/workflows/${CI_WORKFLOW_FILE}/runs?head_sha=${headSha}&event=pull_request`,
       'workflow_runs',
     );
-    const run = selectCiRun(runs);
+    const run = selectCiRun(runs, { prNumber: n });
     if (!run) {
-      console.log(`#${n} ${headSha.slice(0, 7)}: no pull_request CI run on this head yet`);
+      console.log(`#${n} ${headSha.slice(0, 7)}: no pull_request CI run for this PR on this head yet`);
       continue;
     }
     const jobs = await client.paginate(
@@ -637,9 +886,17 @@ export async function runRerun({ env, readFile, github } = {}) {
       'jobs',
     );
     let job = selectReviewGateJob(jobs);
-    const plan = rerunPlan(run, job, { eventName });
-    if (plan === 'skip-in-progress' || plan === 'skip-green') {
-      console.log(`#${n}: schedule skip (${(job && job.conclusion) || run.status})`);
+    const plan = rerunPlan(run, job, { eventName, nowMs: Date.now() });
+    if (plan === 'capped') {
+      console.log(`#${n}: capped (run ${run.id} attempt ${runAttemptCount(run)}/${MAX_RUN_ATTEMPTS})`);
+      continue;
+    }
+    if (plan === 'backoff') {
+      console.log(`#${n}: schedule backoff (attempt ${runAttemptCount(run)})`);
+      continue;
+    }
+    if (plan === 'skip-in-progress') {
+      console.log(`#${n}: schedule skip (${run.status})`);
       continue;
     }
     if (plan === 'missing-job') {
@@ -651,6 +908,10 @@ export async function runRerun({ env, readFile, github } = {}) {
       const finished = await waitForRun(client, owner, repo, run.id);
       if (finished.status !== 'completed') {
         console.log(`#${n}: CI run ${run.id} still ${finished.status}; schedule will retry`);
+        continue;
+      }
+      if (runAttemptCount(finished) >= MAX_RUN_ATTEMPTS) {
+        console.log(`#${n}: capped after wait (run ${run.id} attempt ${runAttemptCount(finished)})`);
         continue;
       }
       const freshJobs = await client.paginate(

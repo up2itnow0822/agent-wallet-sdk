@@ -11,33 +11,42 @@
 #   counted. A job named exactly `review-gate` in `.github/workflows/ci.yml`
 #   is recorded on the pull_request suite, which GitHub always counts.
 #
-#   Re-evaluation (Codex review/comment, waiver label, base edit) therefore
-#   reruns that CI job via the Actions API. This workflow never calls
-#   checks.create, so it cannot leave orphaned in_progress
+#   Re-evaluation (Codex comment created/edited/deleted, waiver label, base
+#   edit) therefore reruns that CI job via the Actions API. This workflow
+#   never calls checks.create, so it cannot leave orphaned in_progress
 #   "Evaluating Codex review" runs and cannot land a result in the wrong suite.
 #
 # Security:
-#   No checkout. The rerun lives in this workflow file, so pull_request_target
-#   / issue_comment / schedule execute the default-branch copy and never run
-#   PR JavaScript. No repo secrets are passed. pull_request_review uses the
-#   PR's workflow file (GitHub platform limit); that copy can only rerun the
-#   CI job named review-gate. Evaluation itself reads PR data only through
-#   the API with the CI job's read-only token.
+#   No checkout. The rerun lives in this workflow file. Triggers are only
+#   events GitHub runs from the default-branch copy (pull_request_target,
+#   issue_comment, schedule, workflow_dispatch). pull_request_review is
+#   omitted on purpose: GitHub would execute the PR's workflow file with
+#   actions: write. Codex reviews still arrive as issue comments or are
+#   picked up when the schedule rechecks a green gate.
+#   No repo secrets are passed. Evaluation reads PR data only through the
+#   API with the CI job's read-only token, using the evaluator fetched from
+#   the base SHA.
 #
 # Pass conditions stay the ones in scripts/review-gate.mjs (includes #88):
 #   1. A non-dismissed chatgpt-codex-connector[bot] review on the current
-#      head SHA or a 7+ hex prefix of it, after the last base change; or a
-#      clean Codex summary / "no major issues" comment that names such a
-#      prefix and does not mention any other SHA. A dismissed Codex review
-#      on this head blocks the clean-comment fallback.
-#   2. Bill-only (`up2itnow0822`) `codex-waived`, valid only while this head
-#      is current (label after last base change and last head move).
+#      head SHA or a 7+ hex prefix that uniquely resolves to that head,
+#      posted after GitHub's push/event time for the head; or a clean Codex
+#      summary / "no major issues" comment under the same rules. A dismissed
+#      Codex review on this head blocks the clean-comment fallback.
+#   2. Bill-only (`up2itnow0822`) `codex-waived`, bound to the exact head
+#      SHA by a github-actions[bot] `review-gate-waiver:v1` comment posted
+#      at label time (or the same-tick labeled webhook that carries that SHA).
 #   GitHub 5xx responses are retried with backoff.
 #
+# Rerun budget: each CI run is rerun at most MAX_RUN_ATTEMPTS (8) times,
+# well under GitHub's 50-rerun-per-run cap. Schedule uses exponential
+# backoff and rechecks green gates so an edited/deleted comment is noticed
+# without burning the cap every 10 minutes. A new push opens a new run.
+#
 # Residual risk (GitHub platform limit): any other pull_request workflow with
-# a job named `review-gate` can also produce the required context. Keep
-# repository default workflow permissions read-only and review changes under
-# .github/workflows/ with that in mind.
+# a job named `review-gate` can also produce the required context, and a PR
+# can edit its own ci.yml to skip the base-SHA fetch. See CONTRIBUTING.md.
+# Keep repository default workflow permissions read-only.
 
 name: review-gate-refresh
 
@@ -45,9 +54,7 @@ on:
   pull_request_target:
     types: [labeled, unlabeled, edited, ready_for_review, reopened]
   issue_comment:
-    types: [created]
-  pull_request_review:
-    types: [submitted, edited, dismissed]
+    types: [created, edited, deleted]
   schedule:
     - cron: "*/10 * * * *"
   workflow_dispatch:
@@ -59,7 +66,7 @@ on:
 permissions:
   contents: read
   actions: write
-  issues: read
+  issues: write
   pull-requests: read
 
 concurrency:
@@ -76,7 +83,6 @@ jobs:
   refresh:
     if: >
       github.event_name == 'pull_request_target' ||
-      github.event_name == 'pull_request_review' ||
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'schedule' ||
       (github.event_name == 'issue_comment' && github.event.issue.pull_request != null)
@@ -89,6 +95,11 @@ jobs:
           script: |
             const CI_WORKFLOW = 'ci.yml';
             const JOB_NAME = 'review-gate';
+            const WAIVE_LABEL = 'codex-waived';
+            const WAIVER_ACTORS = new Set(['up2itnow0822']);
+            const WAIVER_MARKER = '<!-- review-gate-waiver:v1';
+            const MAX_RUN_ATTEMPTS = 8;
+            const SCHEDULE_INTERVAL_MS = 10 * 60 * 1000;
 
             async function withRetry(fn, label) {
               const delays = [1000, 2000, 4000];
@@ -111,6 +122,61 @@ jobs:
               return typeof value === 'string' && /^[0-9a-f]{40}$/i.test(value)
                 ? value.toLowerCase()
                 : '';
+            }
+
+            function runMatchesPr(run, prNumber) {
+              return (run.pull_requests || []).some(p => Number(p.number) === Number(prNumber));
+            }
+
+            function runAttemptCount(run) {
+              const n = Number(run && run.run_attempt);
+              return Number.isFinite(n) && n > 0 ? n : 1;
+            }
+
+            function scheduleBackoffMs(attempt) {
+              const exp = Math.min(Math.max((Number(attempt) || 1) - 1, 0), 3);
+              return SCHEDULE_INTERVAL_MS * (2 ** exp);
+            }
+
+            function shouldPostWaiver(pr, headSha) {
+              if (context.eventName !== 'pull_request_target') return false;
+              if (context.payload.action !== 'labeled') return false;
+              const label = context.payload.label && context.payload.label.name;
+              const sender = context.payload.sender && context.payload.sender.login;
+              const payloadPr = context.payload.pull_request;
+              return label === WAIVE_LABEL &&
+                WAIVER_ACTORS.has(sender) &&
+                payloadPr && payloadPr.number === pr.number &&
+                fullSha(payloadPr.head && payloadPr.head.sha) === headSha &&
+                fullSha(pr.head && pr.head.sha) === headSha;
+            }
+
+            async function ensureWaiverRecord(n, pr, headSha) {
+              if (!shouldPostWaiver(pr, headSha)) return;
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: n,
+                per_page: 100,
+              });
+              const already = comments.some(c =>
+                c.user && c.user.login === 'github-actions[bot]' &&
+                c.body && c.body.includes(WAIVER_MARKER) && c.body.includes(headSha)
+              );
+              if (already) return;
+              const actor = context.payload.sender.login;
+              const body = `${WAIVER_MARKER} ${JSON.stringify({ sha: headSha, actor, pr: n })} -->\n` +
+                `review-gate: \`${WAIVE_LABEL}\` bound to head \`${headSha}\` by \`${actor}\` on PR #${n}.`;
+              await withRetry(
+                () => github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: n,
+                  body,
+                }),
+                `waiver comment ${n}`,
+              );
+              core.info(`#${n}: recorded waiver binding for ${headSha}`);
             }
 
             async function resolvePrNumbers() {
@@ -173,6 +239,17 @@ jobs:
                 continue;
               }
 
+              try {
+                await ensureWaiverRecord(n, pr, headSha);
+              } catch (err) {
+                const status = err && err.status;
+                if (status === 403 || status === 422) {
+                  core.info(`#${n}: waiver comment skipped (${status} ${err.message})`);
+                } else {
+                  throw err;
+                }
+              }
+
               const runs = await github.paginate(github.rest.actions.listWorkflowRuns, {
                 owner: context.repo.owner,
                 repo: context.repo.repo,
@@ -181,9 +258,17 @@ jobs:
                 event: 'pull_request',
                 per_page: 100,
               });
-              let run = runs.slice().sort((a, b) => (b.run_number || 0) - (a.run_number || 0))[0];
+              let run = runs
+                .filter(r => runMatchesPr(r, n))
+                .slice()
+                .sort((a, b) => (b.run_number || 0) - (a.run_number || 0))[0];
               if (!run) {
-                core.info(`#${n} ${headSha.slice(0, 7)}: no pull_request CI run on this head yet`);
+                core.info(`#${n} ${headSha.slice(0, 7)}: no pull_request CI run for this PR on this head yet`);
+                continue;
+              }
+
+              if (runAttemptCount(run) >= MAX_RUN_ATTEMPTS) {
+                core.info(`#${n}: capped (run ${run.id} attempt ${runAttemptCount(run)}/${MAX_RUN_ATTEMPTS})`);
                 continue;
               }
 
@@ -196,6 +281,10 @@ jobs:
                 run = await waitForRun(run.id);
                 if (run.status !== 'completed') {
                   core.info(`#${n}: CI run ${run.id} still ${run.status}; schedule will retry`);
+                  continue;
+                }
+                if (runAttemptCount(run) >= MAX_RUN_ATTEMPTS) {
+                  core.info(`#${n}: capped after wait (run ${run.id})`);
                   continue;
                 }
               }
@@ -211,9 +300,14 @@ jobs:
                 core.info(`#${n}: CI run ${run.id} has no ${JOB_NAME} job`);
                 continue;
               }
-              if (context.eventName === 'schedule' && job.conclusion === 'success') {
-                core.info(`#${n}: schedule skip (success)`);
-                continue;
+
+              if (context.eventName === 'schedule') {
+                const completedMs = Date.parse(job.completed_at || run.updated_at || 0);
+                const backoffMs = scheduleBackoffMs(runAttemptCount(run));
+                if (Number.isFinite(completedMs) && Date.now() - completedMs < backoffMs) {
+                  core.info(`#${n}: schedule backoff (${backoffMs}ms, attempt ${runAttemptCount(run)})`);
+                  continue;
+                }
               }
 
               try {
