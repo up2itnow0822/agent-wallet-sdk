@@ -94,16 +94,18 @@ Codex often cites a 7-character prefix. Those still count, but only when:
 
 - GitHub uniquely resolves the prefix to the current 40-character head
   (`GET /commits/{prefix}` → this SHA; HTTP 422 ambiguous is a reject), and
-- the comment's `created_at` / `updated_at` is after the earliest
-  `pull_request` workflow-run or check-suite `created_at` for that SHA
-  (platform push/event time, not `commit.committer.date`).
+- the Code Review row's own `datetime` (summaries) or the receipt's
+  `created_at` is after the earliest `pull_request` workflow-run or
+  check-suite `created_at` for that SHA (not the comment's overall
+  `updated_at`, which Codex rewrites for unrelated security-review activity).
 
 ### Refresh budget
 
-`review-gate-refresh` reruns the CI job at most 8 times per run (GitHub's
-cap is 50). The 10-minute schedule backs off exponentially (10 / 20 / 40 /
-80 minutes) and **does** recheck a green gate after backoff so an edited
-or deleted Codex comment is noticed. A new push opens a new CI run.
+`review-gate-refresh` caps **scheduled** reruns at 8 per CI run (GitHub's
+limit is 50). Codex comments, waiver labels, and manual dispatch still
+rerun after that so a late clean review is not stuck. The 10-minute
+schedule backs off exponentially (10 / 20 / 40 / 80 minutes) and rechecks
+green gates. A new push opens a new CI run.
 
 ## How to Contribute
 

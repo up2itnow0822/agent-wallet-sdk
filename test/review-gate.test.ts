@@ -35,6 +35,9 @@ import {
   mentionsNonHeadSha,
   parseWaiverRecord,
   prefixUniquelyMatchesHead,
+  codeReviewCompletedAtMs,
+  commentEvidenceMs,
+  isRefreshWorkflowPath,
   retryDelayMs,
   rerunPlan,
   runAttemptCount,
@@ -65,7 +68,13 @@ const trustedWaiverProvenance = {
     id: WAIVER_RUN_ID,
     path: REFRESH_WORKFLOW_PATH,
     event: 'pull_request_target',
-    pull_requests: [{ number: 87 }],
+    created_at: '2026-10-15T22:00:00Z',
+    updated_at: '2026-10-15T22:00:30Z',
+    pull_requests: [{
+      number: 87,
+      head: { sha: HEAD },
+      base: { ref: 'main', sha: BASE_SHA },
+    }],
   },
   jobs: [{ name: WAIVER_RECORD_JOB, status: 'completed', conclusion: 'success' }],
 };
@@ -282,10 +291,32 @@ describe('PR #87 Codex summary (the rejected case)', () => {
   });
 
   it('rejects a unique prefix comment posted before this head was pushed', () => {
-    expect(accept(PR87_SUMMARY, {
-      created_at: '2026-10-15T21:10:00Z',
-      updated_at: '2026-10-15T21:10:00Z',
-    })).toBe(false);
+    const early = PR87_SUMMARY.replace(
+      'datetime="2026-10-15T21:22:46.906149Z"',
+      'datetime="2026-10-15T21:10:00Z"',
+    );
+    expect(codeReviewCompletedAtMs(early, HEAD)).toBe(Date.parse('2026-10-15T21:10:00Z'));
+    expect(accept(early)).toBe(false);
+  });
+
+  it('uses the Code Review row time, not the summary comment updated_at', () => {
+    const staleRow = PR87_SUMMARY.replace(
+      'datetime="2026-10-15T21:22:46.906149Z"',
+      'datetime="2026-10-15T20:00:00Z"',
+    );
+    expect(commentEvidenceMs(
+      { body: staleRow, created_at: '2026-10-15T20:00:00Z', updated_at: '2026-10-16T03:00:00Z' },
+      { headSha: HEAD },
+    )).toBe(Date.parse('2026-10-15T20:00:00Z'));
+    expect(commentAcceptsCleanHead(
+      { body: staleRow, created_at: '2026-10-15T20:00:00Z', updated_at: '2026-10-16T03:00:00Z' },
+      {
+        headSha: HEAD,
+        baseChangedMs: Date.parse('2026-10-15T22:00:00Z'),
+        headPushedMs: HEAD_PUSHED_MS,
+        uniqueResolve: uniqueToHead,
+      },
+    )).toBe(false);
   });
 
   it('rejects a prefix that matches the head but is not unique on GitHub', () => {
@@ -455,6 +486,25 @@ describe('evaluatePr — Codex on head', () => {
     expect(verdict.conclusion).toBe('success');
   });
 
+  it('lets a later non-dismissed clean review supersede a dismissal on the same SHA', () => {
+    const verdict = evaluatePr(snapshot({
+      reviews: [{
+        user: CODEX_BOT,
+        commit_id: HEAD,
+        state: 'DISMISSED',
+        submitted_at: '2026-10-15T21:22:45Z',
+      }, {
+        user: CODEX_BOT,
+        commit_id: HEAD,
+        state: 'COMMENTED',
+        body: PR87_RECEIPT,
+        submitted_at: '2026-10-15T21:30:00Z',
+      }],
+    }));
+    expect(verdict.conclusion).toBe('success');
+    expect(verdict.summary).toMatch(/no findings/);
+  });
+
   it('blocks the clean-summary fallback when a dismissed Codex review sits on this head', () => {
     const verdict = evaluatePr(snapshot({
       reviews: [{
@@ -577,6 +627,49 @@ describe('evaluatePr — Bill-only waiver bound to exact head SHA', () => {
       }),
     }));
     expect(verdict.conclusion).toBe('failure');
+  });
+
+  it('rejects replaying a trusted waiver run against a new head', () => {
+    const replayed = waiverComment(HEAD, BILL, 87);
+    const verdict = evaluatePr(snapshot({
+      pr: pr({ labels: [{ name: WAIVE_LABEL }] }),
+      comments: [replayed],
+      resolveWaiverRun: () => ({
+        run: {
+          id: WAIVER_RUN_ID,
+          path: `${REFRESH_WORKFLOW_PATH}@main`,
+          event: 'pull_request_target',
+          created_at: '2026-10-15T22:00:00Z',
+          updated_at: '2026-10-15T22:00:30Z',
+          pull_requests: [{
+            number: 87,
+            head: { sha: OLDER },
+            base: { ref: 'main', sha: BASE_SHA },
+          }],
+        },
+        jobs: [{ name: WAIVER_RECORD_JOB, status: 'completed', conclusion: 'success' }],
+      }),
+    }));
+    expect(verdict.conclusion).toBe('failure');
+  });
+
+  it('rejects a waiver comment created after the cited run finished', () => {
+    const late = {
+      ...waiverComment(),
+      created_at: '2026-10-16T04:00:00Z',
+    };
+    const verdict = evaluatePr(snapshot({
+      pr: pr({ labels: [{ name: WAIVE_LABEL }] }),
+      comments: [late],
+    }));
+    expect(verdict.conclusion).toBe('failure');
+  });
+
+  it('accepts GitHub\'s ref-qualified workflow path', () => {
+    expect(isRefreshWorkflowPath('.github/workflows/review-gate.yml@main')).toBe(true);
+    expect(isRefreshWorkflowPath('.github/workflows/review-gate.yml@22ceb65c27016c74997c52e07c7da7109f13a633')).toBe(true);
+    expect(isRefreshWorkflowPath('.github/workflows/security-review.yml@main')).toBe(false);
+    expect(isRefreshWorkflowPath('.github/workflows/review-gate.yml@main/../../evil.yml')).toBe(false);
   });
 
   it('rejects a comment citing a refresh run that never ran record-waiver', () => {
@@ -886,7 +979,9 @@ describe('refresh selects the counted CI job for this PR', () => {
       nowMs: completed + scheduleBackoffMs(2) + 1,
       lastJobCompletedMs: completed,
     })).toBe('rerun');
-    expect(rerunPlan({ ...run, run_attempt: 8 }, red, { eventName: 'issue_comment' })).toBe('capped');
+    expect(rerunPlan({ ...run, run_attempt: 8 }, red, { eventName: 'issue_comment' })).toBe('rerun');
+    expect(rerunPlan({ ...run, run_attempt: 8 }, red, { eventName: 'pull_request_target' })).toBe('rerun');
+    expect(rerunPlan({ ...run, run_attempt: 8 }, red, { eventName: 'workflow_dispatch' })).toBe('rerun');
     expect(rerunPlan({ ...run, run_attempt: 8 }, green, { eventName: 'schedule' })).toBe('capped');
   });
 
@@ -970,6 +1065,7 @@ describe('workflows pin the counted context and never orphan checks.create', () 
     expect(refresh).toContain('runMatchesPr');
     expect(refresh).toContain('pull_requests');
     expect(refresh).toContain('MAX_RUN_ATTEMPTS');
+    expect(refresh).toContain("context.eventName === 'schedule' && runAttemptCount(run) >= MAX_RUN_ATTEMPTS");
     expect(refresh).toContain('scheduleBackoffMs');
     expect(refresh).toContain(WAIVER_MARKER);
     expect(refresh).toContain('createComment');

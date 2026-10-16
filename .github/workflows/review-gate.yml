@@ -43,10 +43,11 @@
 #   result, never merely because a review exists.
 #   GitHub 5xx responses are retried with backoff.
 #
-# Rerun budget: each CI run is rerun at most MAX_RUN_ATTEMPTS (8) times,
-# well under GitHub's 50-rerun-per-run cap. Schedule uses exponential
-# backoff and rechecks green gates so an edited/deleted comment is noticed
-# without burning the cap every 10 minutes. A new push opens a new run.
+# Rerun budget: schedule polling caps at MAX_RUN_ATTEMPTS (8), well under
+# GitHub's 50-rerun-per-run limit. Codex comments, waiver labels, and
+# manual dispatch still rerun after that so a late review is not stuck
+# red. Schedule also backs off (10 / 20 / 40 / 80 min) and rechecks green
+# gates. A new push opens a new run.
 #
 # Residual risk (GitHub platform limit): any other pull_request workflow with
 # a job named `review-gate` can also produce the required context, and a PR
@@ -302,8 +303,8 @@ jobs:
                 continue;
               }
 
-              if (runAttemptCount(run) >= MAX_RUN_ATTEMPTS) {
-                core.info(`#${n}: capped (run ${run.id} attempt ${runAttemptCount(run)}/${MAX_RUN_ATTEMPTS})`);
+              if (context.eventName === 'schedule' && runAttemptCount(run) >= MAX_RUN_ATTEMPTS) {
+                core.info(`#${n}: schedule capped (run ${run.id} attempt ${runAttemptCount(run)}/${MAX_RUN_ATTEMPTS})`);
                 continue;
               }
 
@@ -318,8 +319,8 @@ jobs:
                   core.info(`#${n}: CI run ${run.id} still ${run.status}; schedule will retry`);
                   continue;
                 }
-                if (runAttemptCount(run) >= MAX_RUN_ATTEMPTS) {
-                  core.info(`#${n}: capped after wait (run ${run.id})`);
+                if (context.eventName === 'schedule' && runAttemptCount(run) >= MAX_RUN_ATTEMPTS) {
+                  core.info(`#${n}: schedule capped after wait (run ${run.id})`);
                   continue;
                 }
               }

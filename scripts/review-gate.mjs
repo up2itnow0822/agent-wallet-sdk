@@ -210,14 +210,37 @@ export function evidenceAfterHeadPush(eventMs, headPushedMs, { fullExact = false
  * The comment must be created/updated after GitHub's push/event time for
  * this head. SHA-less receipts never count.
  */
+/**
+ * Code Review row timestamp from the summary table, not the comment's
+ * overall updated_at (Codex bumps that when a later security review
+ * rewrites the same summary).
+ */
+export function codeReviewCompletedAtMs(body, headSha) {
+  const re = /^\|[^|\n]*\bCode Review\b[^|\n]*\|[^|\n]*\bCompleted\b[^|\n]*datetime="([^"]+)"[^|\n]*\|\s*`([0-9a-fA-F]{7,40})`\s*\|/gm;
+  let latest;
+  let m;
+  while ((m = re.exec(body || '')) !== null) {
+    if (!shaPrefixMatches(m[2], headSha)) continue;
+    const t = Date.parse(m[1]);
+    if (!Number.isFinite(t)) continue;
+    latest = latest == null ? t : Math.max(latest, t);
+  }
+  return latest;
+}
+
+export function commentEvidenceMs(comment, ctx) {
+  const body = (comment && comment.body) || '';
+  const headSha = (ctx && ctx.headSha) || '';
+  if (body.includes(SUMMARY_MARKER)) {
+    const rowMs = codeReviewCompletedAtMs(body, headSha);
+    return rowMs == null ? NaN : rowMs;
+  }
+  return Date.parse((comment && comment.created_at) || 0);
+}
+
 export function commentAcceptsCleanHead(comment, ctx) {
   const body = (comment && comment.body) || '';
-  const updatedMs = Date.parse((comment && (comment.updated_at || comment.created_at)) || 0);
-  const createdMs = Date.parse((comment && comment.created_at) || 0);
-  const eventMs = Math.max(
-    Number.isFinite(updatedMs) ? updatedMs : 0,
-    Number.isFinite(createdMs) ? createdMs : 0,
-  );
+  const eventMs = commentEvidenceMs(comment, ctx);
   const baseChangedMs = Number(ctx && ctx.baseChangedMs) || 0;
   const headSha = (ctx && ctx.headSha) || '';
   const headPushedMs = ctx && ctx.headPushedMs;
@@ -258,13 +281,34 @@ export function summaryMarksCleanHeadCompleted(body, headSha) {
   return String(cr.status).toLowerCase() === 'completed';
 }
 
-export function isRefreshWorkflowPath(path) {
-  return path === REFRESH_WORKFLOW_PATH ||
-    path === 'review-gate.yml' ||
-    (typeof path === 'string' && path.endsWith('/review-gate.yml'));
+/**
+ * GitHub may return `path` as `.github/workflows/review-gate.yml@main`.
+ * Only strip a trailing `@ref` after `.yml` / `.yaml`.
+ */
+export function workflowPathWithoutRef(path) {
+  const raw = typeof path === 'string' ? path.trim() : '';
+  if (!raw) return '';
+  const m = raw.match(/^(.*\.ya?ml)@([A-Za-z0-9._/-]+)$/);
+  if (!m) return raw;
+  const ref = m[2];
+  if (!ref || ref.includes('..') || ref.startsWith('/') || ref.endsWith('/')) return raw;
+  return m[1];
 }
 
-export function waiverRunProvenanceAccepts(run, jobs, { prNumber } = {}) {
+export function isRefreshWorkflowPath(path) {
+  const normalized = workflowPathWithoutRef(path);
+  return normalized === REFRESH_WORKFLOW_PATH ||
+    normalized === 'review-gate.yml' ||
+    normalized.endsWith('/review-gate.yml');
+}
+
+export function waiverRunProvenanceAccepts(run, jobs, {
+  prNumber,
+  headSha,
+  baseRef,
+  baseSha,
+  commentCreatedMs,
+} = {}) {
   if (!run || !isRefreshWorkflowPath(run.path)) return false;
   if (run.event !== 'pull_request_target') return false;
   const job = (jobs || []).find(j => j.name === WAIVER_RECORD_JOB);
@@ -272,7 +316,21 @@ export function waiverRunProvenanceAccepts(run, jobs, { prNumber } = {}) {
   if (job.status && job.status !== 'completed' && job.status !== 'in_progress') return false;
   if (job.status === 'completed' && job.conclusion && job.conclusion !== 'success') return false;
   const prs = run.pull_requests || [];
-  if (prNumber != null && prs.length > 0 && !runMatchesPr(run, prNumber)) return false;
+  const match = prs.find(p => prNumber == null || Number(p.number) === Number(prNumber));
+  if (!match) return false;
+  const runHead = fullSha(match.head && match.head.sha);
+  const runBaseRef = match.base && match.base.ref;
+  const runBaseSha = fullSha(match.base && match.base.sha);
+  if (headSha && (!runHead || !sameSha(runHead, headSha))) return false;
+  if (baseRef && runBaseRef && runBaseRef !== baseRef) return false;
+  if (baseSha && runBaseSha && !sameSha(runBaseSha, baseSha)) return false;
+  if (commentCreatedMs != null) {
+    const start = Date.parse(run.created_at || 0);
+    const end = Date.parse(run.updated_at || run.created_at || 0);
+    if (!Number.isFinite(commentCreatedMs) || !Number.isFinite(start)) return false;
+    const late = Number.isFinite(end) ? end + 60 * 1000 : start + 10 * 60 * 1000;
+    if (commentCreatedMs < start || commentCreatedMs > late) return false;
+  }
   return true;
 }
 
@@ -335,7 +393,13 @@ export function waiverRecordAcceptsHead(comment, {
   const proven = resolveWaiverRun(rec.run);
   if (!proven || !proven.run) return false;
   if (Number(proven.run.id) !== Number(rec.run)) return false;
-  return waiverRunProvenanceAccepts(proven.run, proven.jobs, { prNumber });
+  return waiverRunProvenanceAccepts(proven.run, proven.jobs, {
+    prNumber,
+    headSha,
+    baseRef,
+    baseSha,
+    commentCreatedMs: Date.parse((comment && comment.created_at) || 0),
+  });
 }
 
 export function isWaiverBoundToCurrentHead({
@@ -547,7 +611,7 @@ export function evaluatePr(input) {
     });
   });
   const acceptedCleanPass =
-    (cleanCommentOnHead || cleanReviewOnHead) && !dismissedOnHead;
+    cleanReviewOnHead || (cleanCommentOnHead && !dismissedOnHead);
 
   if (acceptedCleanPass) {
     return {
@@ -674,7 +738,7 @@ export function shouldRerunOnSchedule(job) {
 
 export function rerunPlan(run, job, { eventName, nowMs, lastJobCompletedMs } = {}) {
   if (!run) return 'missing-run';
-  if (runAttemptCount(run) >= MAX_RUN_ATTEMPTS) return 'capped';
+  if (eventName === 'schedule' && runAttemptCount(run) >= MAX_RUN_ATTEMPTS) return 'capped';
   if (run.status && run.status !== 'completed') {
     return eventName === 'schedule' ? 'skip-in-progress' : 'wait-run';
   }
@@ -1056,7 +1120,7 @@ export async function runRerun({ env, readFile, github } = {}) {
     let job = selectReviewGateJob(jobs);
     const plan = rerunPlan(run, job, { eventName, nowMs: Date.now() });
     if (plan === 'capped') {
-      console.log(`#${n}: capped (run ${run.id} attempt ${runAttemptCount(run)}/${MAX_RUN_ATTEMPTS})`);
+      console.log(`#${n}: schedule capped (run ${run.id} attempt ${runAttemptCount(run)}/${MAX_RUN_ATTEMPTS})`);
       continue;
     }
     if (plan === 'backoff') {
@@ -1078,8 +1142,8 @@ export async function runRerun({ env, readFile, github } = {}) {
         console.log(`#${n}: CI run ${run.id} still ${finished.status}; schedule will retry`);
         continue;
       }
-      if (runAttemptCount(finished) >= MAX_RUN_ATTEMPTS) {
-        console.log(`#${n}: capped after wait (run ${run.id} attempt ${runAttemptCount(finished)})`);
+      if (eventName === 'schedule' && runAttemptCount(finished) >= MAX_RUN_ATTEMPTS) {
+        console.log(`#${n}: schedule capped after wait (run ${run.id} attempt ${runAttemptCount(finished)})`);
         continue;
       }
       const freshJobs = await client.paginate(
