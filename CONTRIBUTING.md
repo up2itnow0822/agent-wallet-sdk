@@ -10,11 +10,12 @@ Merges to `main` require the GitHub Actions jobs `build`, `verify`, and
 on using `pull_request_target` as a required status.
 
 `review-gate` is a job on the `pull_request` CI workflow. It stays red until
-`chatgpt-codex-connector[bot]` reviews the current head commit (full SHA, or
-a 7+ hex prefix that uniquely resolves to that head and was posted after
-GitHub recorded the push) or Bill applies `codex-waived` on that exact head.
-Label, comment (created / edited / deleted), and schedule events re-run that
-same CI job; they do not post a separate check.
+`chatgpt-codex-connector[bot]` posts a **clean** no-findings review of the
+current head (a "Didn't find any major issues" receipt or a summary whose
+state has `has_any_findings: false`) — never merely because a Codex review
+exists — or Bill applies `codex-waived` on that exact head and base.
+Label, comment (created / edited / deleted), retarget (`edited`), and
+schedule events re-run that same CI job; they do not post a separate check.
 
 ### Trusted evaluator
 
@@ -64,10 +65,28 @@ this branch does not edit rulesets.
 
 `codex-waived` is honored only when the label is present **and** a
 `github-actions[bot]` comment records
-`<!-- review-gate-waiver:v1 {"sha","actor","pr"} -->` for the **current**
-40-character head, or when the same-tick `labeled` webhook from Bill
-carries that exact SHA. A later push needs a new waiver comment. Human
-comments that copy the marker do not count.
+`<!-- review-gate-waiver:v1 {"sha","base","baseSha","actor","pr","run","workflow"} -->`
+for the **current** head SHA, base ref, and base SHA. Evaluate then fetches
+that `run` and requires:
+
+- `path` is `.github/workflows/review-gate.yml`
+- `event` is `pull_request_target` (GitHub always executes `main`'s copy)
+- the run has a successful `record-waiver` job (only that trusted workflow
+  defines it, and only on Bill's `labeled` event)
+
+A later push or retarget needs a new waiver. Human comments and comments
+posted by other workflows (including a PR-edited `security-review.yml`)
+do not count: they can impersonate the bot login but cannot mint a
+`pull_request_target` run of `review-gate.yml` that contains `record-waiver`.
+Check runs / commit statuses were not used because any PR workflow that
+adds `checks: write` or `statuses: write` can also mint those as the
+GitHub Actions app.
+
+### Clean Codex reviews
+
+A Codex `COMMENTED` / `APPROVED` review is not enough. The 3a31911 review
+had P1s and still produced a review object; the old gate treated that as
+"Codex reviewed head". The evaluator now requires a no-findings result.
 
 ### Short-SHA Codex comments
 

@@ -16,8 +16,10 @@ import {
   NO_MAJOR_ISSUES,
   SCHEDULE_INTERVAL_MS,
   SUMMARY_MARKER,
+  REFRESH_WORKFLOW_PATH,
   WAIVE_LABEL,
   WAIVER_MARKER,
+  WAIVER_RECORD_JOB,
   commentAcceptsCleanHead,
   combineHeadVerdicts,
   evaluatePr,
@@ -43,16 +45,33 @@ import {
   shaPrefixMatches,
   shouldPostWaiverRecord,
   shouldRerunOnSchedule,
+  summaryMarksCleanHeadCompleted,
   summaryMarksHeadCompleted,
   waiverRecordAcceptsHead,
+  waiverRunProvenanceAccepts,
   withRetry,
 } from '../scripts/review-gate.mjs';
 
 const HEAD = '982551f44942104308231bb10d5b56513c9c7050';
 const OLDER = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+const BASE_SHA = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+const OTHER_BASE = 'cccccccccccccccccccccccccccccccccccccccc';
 const BILL = 'up2itnow0822';
 const HEAD_PUSHED_MS = Date.parse('2026-10-15T21:20:00Z');
 const uniqueToHead = (shown: string) => shaPrefixMatches(shown, HEAD);
+const WAIVER_RUN_ID = 555001;
+const trustedWaiverProvenance = {
+  run: {
+    id: WAIVER_RUN_ID,
+    path: REFRESH_WORKFLOW_PATH,
+    event: 'pull_request_target',
+    pull_requests: [{ number: 87 }],
+  },
+  jobs: [{ name: WAIVER_RECORD_JOB, status: 'completed', conclusion: 'success' }],
+};
+function resolveTrustedWaiver(runId: number) {
+  return Number(runId) === WAIVER_RUN_ID ? trustedWaiverProvenance : null;
+}
 
 const PR87_SUMMARY = `<!-- codex-pull-request-review-summary -->
 <!-- codex-review-state:v1 {"code_review":{"commit_sha":"982551f44942104308231bb10d5b56513c9c7050","has_any_findings":false,"has_unresolved_findings":false,"status":"completed"},"security_review":{"commit_sha":null,"has_any_findings":null,"has_unresolved_findings":null,"status":null}} -->
@@ -69,6 +88,19 @@ This comment shows the latest Codex review activity on this pull request.
 const PR87_RECEIPT = `<!-- codex-review-receipt:v1 -->
 
 Codex Review: Didn't find any major issues. More of your lovely PRs please.
+
+**Reviewed commit:** \`982551f449\`
+`;
+
+const FINDINGS_SUMMARY = PR87_SUMMARY
+  .replace('"has_any_findings":false', '"has_any_findings":true')
+  .replace('"has_unresolved_findings":false', '"has_unresolved_findings":true');
+
+const CODEX_FINDINGS_REVIEW = `<!-- codex-review-receipt:v1 -->
+
+### 💡 Codex Review
+
+Here are some automated review suggestions for this pull request.
 
 **Reviewed commit:** \`982551f449\`
 `;
@@ -104,7 +136,7 @@ function pr(over: Record<string, unknown> = {}) {
     number: 87,
     draft: false,
     head: { sha: HEAD },
-    base: { ref: 'main' },
+    base: { ref: 'main', sha: BASE_SHA },
     labels: [],
     ...over,
   };
@@ -118,14 +150,28 @@ function snapshot(over: Record<string, unknown> = {}) {
     timeline: [],
     headPushedMs: HEAD_PUSHED_MS,
     uniqueResolve: uniqueToHead,
+    resolveWaiverRun: resolveTrustedWaiver,
     ...over,
   };
 }
 
-function waiverComment(sha = HEAD, actor = BILL, number = 87) {
+function waiverComment(
+  sha = HEAD,
+  actor = BILL,
+  number = 87,
+  extra: Record<string, unknown> = {},
+) {
   return {
     user: GHA_BOT,
-    body: formatWaiverComment({ sha, actor, pr: number }),
+    body: formatWaiverComment({
+      sha,
+      actor,
+      pr: number,
+      base: 'main',
+      baseSha: BASE_SHA,
+      run: WAIVER_RUN_ID,
+      ...extra,
+    }),
     created_at: '2026-10-15T22:00:01Z',
   };
 }
@@ -302,30 +348,48 @@ describe('Codex actor rules', () => {
 });
 
 describe('evaluatePr — Codex on head', () => {
-  it('passes on a non-dismissed Codex review of the current head', () => {
+  it('rejects a Codex review that exists but has findings (3a31911-style)', () => {
     const verdict = evaluatePr(snapshot({
       reviews: [{
         user: CODEX_BOT,
         commit_id: HEAD,
         state: 'COMMENTED',
+        body: CODEX_FINDINGS_REVIEW,
         submitted_at: '2026-10-15T21:22:45Z',
       }],
     }));
-    expect(verdict.conclusion).toBe('success');
-    expect(verdict.title).toBe('Codex reviewed head');
+    expect(verdict.conclusion).toBe('failure');
+    expect(verdict.title).toBe('Codex found issues on head');
     expect(verdict.headSha).toBe(HEAD);
   });
 
-  it('accepts a review commit_id that uniquely prefixes the head after push', () => {
+  it('does not treat a findings summary comment as a clean pass', () => {
+    expect(summaryMarksHeadCompleted(FINDINGS_SUMMARY, HEAD)).toBe(true);
+    expect(summaryMarksCleanHeadCompleted(FINDINGS_SUMMARY, HEAD)).toBe(false);
+    expect(accept(FINDINGS_SUMMARY)).toBe(false);
+    const verdict = evaluatePr(snapshot({
+      comments: [{
+        user: CODEX_BOT,
+        body: FINDINGS_SUMMARY,
+        created_at: '2026-10-15T21:22:45Z',
+        updated_at: '2026-10-15T21:22:47Z',
+      }],
+    }));
+    expect(verdict.conclusion).toBe('failure');
+  });
+
+  it('accepts a Codex review whose body is a no-major-issues receipt', () => {
     const verdict = evaluatePr(snapshot({
       reviews: [{
         user: CODEX_BOT,
         commit_id: '982551f',
-        state: 'APPROVED',
+        state: 'COMMENTED',
+        body: PR87_RECEIPT,
         submitted_at: '2026-10-15T21:22:45Z',
       }],
     }));
     expect(verdict.conclusion).toBe('success');
+    expect(verdict.summary).toMatch(/no findings/);
   });
 
   it('rejects a short review commit_id that is not unique to this head', () => {
@@ -456,7 +520,7 @@ describe('evaluatePr — Bill-only waiver bound to exact head SHA', () => {
     created_at: '2026-10-15T22:00:00Z',
   };
 
-  it('passes when a github-actions waiver record binds the exact head SHA', () => {
+  it('passes when a github-actions waiver record binds head, base, and a trusted run', () => {
     const verdict = evaluatePr(snapshot({
       pr: pr({ labels: [{ name: WAIVE_LABEL }] }),
       comments: [waiverComment()],
@@ -469,7 +533,90 @@ describe('evaluatePr — Bill-only waiver bound to exact head SHA', () => {
       comments: [waiverComment()],
       headSha: HEAD,
       prNumber: 87,
+      baseRef: 'main',
+      baseSha: BASE_SHA,
+      resolveWaiverRun: resolveTrustedWaiver,
     })).toBe(true);
+  });
+
+  it('rejects a bot comment that only impersonates github-actions without run provenance', () => {
+    const forged = {
+      user: GHA_BOT,
+      body: '<!-- review-gate-waiver:v1 {"sha":"' + HEAD + '","actor":"' + BILL + '","pr":87} -->',
+    };
+    expect(parseWaiverRecord(forged.body)).toBeNull();
+    const verdict = evaluatePr(snapshot({
+      pr: pr({ labels: [{ name: WAIVE_LABEL }] }),
+      comments: [forged],
+    }));
+    expect(verdict.conclusion).toBe('failure');
+  });
+
+  it('rejects a bot comment citing a PR-controlled security-review run', () => {
+    const rec = formatWaiverComment({
+      sha: HEAD, base: 'main', baseSha: BASE_SHA, actor: BILL, pr: 87, run: 42,
+      workflow: '.github/workflows/security-review.yml',
+    });
+    expect(waiverRunProvenanceAccepts({
+      id: 42,
+      path: '.github/workflows/security-review.yml',
+      event: 'pull_request',
+      pull_requests: [{ number: 87 }],
+    }, [{ name: 'security-review', status: 'completed', conclusion: 'success' }], { prNumber: 87 })).toBe(false);
+    const verdict = evaluatePr(snapshot({
+      pr: pr({ labels: [{ name: WAIVE_LABEL }] }),
+      comments: [{ user: GHA_BOT, body: rec }],
+      resolveWaiverRun: () => ({
+        run: {
+          id: 42,
+          path: '.github/workflows/security-review.yml',
+          event: 'pull_request',
+          pull_requests: [{ number: 87 }],
+        },
+        jobs: [{ name: 'security-review', status: 'completed', conclusion: 'success' }],
+      }),
+    }));
+    expect(verdict.conclusion).toBe('failure');
+  });
+
+  it('rejects a comment citing a refresh run that never ran record-waiver', () => {
+    const verdict = evaluatePr(snapshot({
+      pr: pr({ labels: [{ name: WAIVE_LABEL }] }),
+      comments: [waiverComment()],
+      resolveWaiverRun: () => ({
+        run: {
+          id: WAIVER_RUN_ID,
+          path: REFRESH_WORKFLOW_PATH,
+          event: 'pull_request_target',
+          pull_requests: [{ number: 87 }],
+        },
+        jobs: [{ name: 'refresh', status: 'completed', conclusion: 'success' }],
+      }),
+    }));
+    expect(verdict.conclusion).toBe('failure');
+  });
+
+  it('rejects a waiver after the PR is retargeted to a new base', () => {
+    const verdict = evaluatePr(snapshot({
+      pr: pr({
+        labels: [{ name: WAIVE_LABEL }],
+        base: { ref: 'release', sha: OTHER_BASE },
+      }),
+      comments: [waiverComment()],
+    }));
+    expect(verdict.conclusion).toBe('failure');
+    expect(verdict.title).not.toBe('Codex waived');
+  });
+
+  it('rejects a waiver when main moved and the recorded base SHA is stale', () => {
+    const verdict = evaluatePr(snapshot({
+      pr: pr({
+        labels: [{ name: WAIVE_LABEL }],
+        base: { ref: 'main', sha: OTHER_BASE },
+      }),
+      comments: [waiverComment()],
+    }));
+    expect(verdict.conclusion).toBe('failure');
   });
 
   it('rejects a timestamp-only waiver that never recorded the head SHA', () => {
@@ -504,13 +651,23 @@ describe('evaluatePr — Bill-only waiver bound to exact head SHA', () => {
     expect(isGithubActionsBot({ login: BILL, type: 'User' })).toBe(false);
     expect(waiverRecordAcceptsHead({
       user: { login: BILL, type: 'User' },
-      body: formatWaiverComment({ sha: HEAD, actor: BILL, pr: 87 }),
-    }, { headSha: HEAD, prNumber: 87 })).toBe(false);
+      body: formatWaiverComment({
+        sha: HEAD, actor: BILL, pr: 87, base: 'main', baseSha: BASE_SHA, run: WAIVER_RUN_ID,
+      }),
+    }, {
+      headSha: HEAD,
+      prNumber: 87,
+      baseRef: 'main',
+      baseSha: BASE_SHA,
+      resolveWaiverRun: resolveTrustedWaiver,
+    })).toBe(false);
     const verdict = evaluatePr(snapshot({
       pr: pr({ labels: [{ name: WAIVE_LABEL }] }),
       comments: [{
         user: { login: BILL, type: 'User' },
-        body: formatWaiverComment({ sha: HEAD, actor: BILL, pr: 87 }),
+        body: formatWaiverComment({
+          sha: HEAD, actor: BILL, pr: 87, base: 'main', baseSha: BASE_SHA, run: WAIVER_RUN_ID,
+        }),
       }],
     }));
     expect(verdict.conclusion).toBe('failure');
@@ -544,7 +701,7 @@ describe('evaluatePr — Bill-only waiver bound to exact head SHA', () => {
       action: 'labeled',
       sender: { login: BILL },
       label: { name: WAIVE_LABEL },
-      pull_request: { number: 87, head: { sha: HEAD }, base: { ref: 'main' } },
+      pull_request: { number: 87, head: { sha: HEAD }, base: { ref: 'main', sha: BASE_SHA } },
     };
     const verdict = evaluatePr(snapshot({
       pr: pr({ labels: [{ name: WAIVE_LABEL }] }),
@@ -555,10 +712,20 @@ describe('evaluatePr — Bill-only waiver bound to exact head SHA', () => {
     expect(shouldPostWaiverRecord(event, pr({ labels: [{ name: WAIVE_LABEL }] }), HEAD)).toBe(true);
   });
 
-  it('round-trips the waiver marker to the exact SHA', () => {
-    const body = formatWaiverComment({ sha: HEAD, actor: BILL, pr: 87 });
+  it('round-trips the waiver marker to the exact SHA, base, and run', () => {
+    const body = formatWaiverComment({
+      sha: HEAD, actor: BILL, pr: 87, base: 'main', baseSha: BASE_SHA, run: WAIVER_RUN_ID,
+    });
     expect(body).toContain(WAIVER_MARKER);
-    expect(parseWaiverRecord(body)).toEqual({ sha: HEAD, actor: BILL, pr: 87 });
+    expect(parseWaiverRecord(body)).toEqual({
+      sha: HEAD,
+      actor: BILL,
+      pr: 87,
+      base: 'main',
+      baseSha: BASE_SHA,
+      run: WAIVER_RUN_ID,
+      workflow: REFRESH_WORKFLOW_PATH,
+    });
   });
 });
 
@@ -760,6 +927,7 @@ describe('workflows pin the counted context and never orphan checks.create', () 
     expect(ci).toMatch(/^ {2}review-gate:/m);
     expect(ci).toMatch(/name:\s*review-gate/);
     expect(ci).toContain('pull_request:');
+    expect(ci).toMatch(/types:\s*\[opened, synchronize, reopened, edited, ready_for_review\]/);
     expect(ciExec).not.toContain('pull_request_target');
     expect(ciExec).not.toContain('checks.create');
     expect(ciExec).not.toContain('Evaluating Codex review');
@@ -774,6 +942,8 @@ describe('workflows pin the counted context and never orphan checks.create', () 
     expect(job).not.toContain('node scripts/review-gate.mjs');
     expect(job).toContain('pull-requests: read');
     expect(job).toContain('issues: read');
+    expect(job).toContain('actions: read');
+    expect(job).toContain('checks: read');
     expect(job).not.toContain('npm ci');
     expect(job).not.toContain('npm install');
     expect(job).not.toContain('npm test');
@@ -796,13 +966,17 @@ describe('workflows pin the counted context and never orphan checks.create', () 
     expect(refresh).not.toMatch(/^ {2}review-gate:/m);
   });
 
-  it('matches the CI run to the PR number, caps reruns, and records a SHA-bound waiver', () => {
+  it('matches the CI run to the PR number, caps reruns, and records an unforgeable waiver', () => {
     expect(refresh).toContain('runMatchesPr');
     expect(refresh).toContain('pull_requests');
     expect(refresh).toContain('MAX_RUN_ATTEMPTS');
     expect(refresh).toContain('scheduleBackoffMs');
     expect(refresh).toContain(WAIVER_MARKER);
     expect(refresh).toContain('createComment');
+    expect(refresh).toMatch(/^ {2}record-waiver:/m);
+    expect(refresh).toContain(WAIVER_RECORD_JOB);
+    expect(refresh).toContain('context.runId');
+    expect(refresh).toContain('baseSha');
     expect(refreshExec).not.toMatch(/schedule skip \(success\)/);
   });
 

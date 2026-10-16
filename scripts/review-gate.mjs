@@ -19,8 +19,16 @@
  * (workflow-run / check-suite created_at — never the author-controlled
  * committer date).
  *
- * `codex-waived` binds to an exact head SHA via a github-actions[bot]
- * comment posted at label time. Timestamps are not used for waiver.
+ * `codex-waived` binds to head SHA + base ref + base SHA + PR via a
+ * github-actions[bot] comment that cites the review-gate-refresh
+ * workflow run which wrote it. Evaluate fetches that run and requires
+ * path `.github/workflows/review-gate.yml`, event `pull_request_target`
+ * (always main's copy), and a successful `record-waiver` job — a job
+ * only that trusted workflow defines, and only on Bill's labeled event.
+ * A PR-controlled workflow (including security-review.yml) can post as
+ * the same bot but cannot mint that run identity. Timestamps are not
+ * used. A Codex review counts only when it is a clean no-findings
+ * result, never merely because a review exists.
  */
 
 import fs from 'node:fs';
@@ -48,6 +56,8 @@ export const NO_MAJOR_ISSUES = /didn't find any major issues/i;
 export const STATE_COMMENT = /<!--\s*codex-review-state:v1\s+(\{.*?\})\s*-->/;
 export const WAIVER_MARKER = '<!-- review-gate-waiver:v1';
 export const WAIVER_RECORD_RE = /<!--\s*review-gate-waiver:v1\s+(\{.*?\})\s*-->/;
+export const REFRESH_WORKFLOW_PATH = '.github/workflows/review-gate.yml';
+export const WAIVER_RECORD_JOB = 'record-waiver';
 
 // Well under GitHub's 50-rerun-per-run cap. A new push opens a new run.
 export const MAX_RUN_ATTEMPTS = 8;
@@ -216,7 +226,7 @@ export function commentAcceptsCleanHead(comment, ctx) {
   if (!(eventMs > baseChangedMs)) return false;
   if (!evidenceAfterHeadPush(eventMs, headPushedMs)) return false;
   if (mentionsNonHeadSha(body, headSha)) return false;
-  if (summaryMarksHeadCompleted(body, headSha)) {
+  if (summaryMarksCleanHeadCompleted(body, headSha)) {
     return summaryCompletedPrefixIsUnique(body, headSha, uniqueResolve);
   }
   if (isCleanNoMajorIssuesBody(body)) {
@@ -225,10 +235,60 @@ export function commentAcceptsCleanHead(comment, ctx) {
   return false;
 }
 
-export function formatWaiverComment({ sha, actor, pr }) {
-  const rec = { sha: fullSha(sha), actor, pr: Number(pr) };
+export function codeReviewState(body) {
+  const m = STATE_COMMENT.exec(body || '');
+  if (!m) return null;
+  try {
+    return JSON.parse(m[1]).code_review || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Completed-on-head is not enough: Codex marks the table Completed even
+ * when it filed P1s. Require the state to say no findings.
+ */
+export function summaryMarksCleanHeadCompleted(body, headSha) {
+  if (!summaryMarksHeadCompleted(body, headSha)) return false;
+  const cr = codeReviewState(body);
+  if (!cr) return false;
+  if (cr.has_any_findings === true || cr.has_unresolved_findings === true) return false;
+  if (cr.has_any_findings !== false) return false;
+  return String(cr.status).toLowerCase() === 'completed';
+}
+
+export function isRefreshWorkflowPath(path) {
+  return path === REFRESH_WORKFLOW_PATH ||
+    path === 'review-gate.yml' ||
+    (typeof path === 'string' && path.endsWith('/review-gate.yml'));
+}
+
+export function waiverRunProvenanceAccepts(run, jobs, { prNumber } = {}) {
+  if (!run || !isRefreshWorkflowPath(run.path)) return false;
+  if (run.event !== 'pull_request_target') return false;
+  const job = (jobs || []).find(j => j.name === WAIVER_RECORD_JOB);
+  if (!job) return false;
+  if (job.status && job.status !== 'completed' && job.status !== 'in_progress') return false;
+  if (job.status === 'completed' && job.conclusion && job.conclusion !== 'success') return false;
+  const prs = run.pull_requests || [];
+  if (prNumber != null && prs.length > 0 && !runMatchesPr(run, prNumber)) return false;
+  return true;
+}
+
+export function formatWaiverComment({ sha, base, baseSha, actor, pr, run, workflow }) {
+  const rec = {
+    sha: fullSha(sha),
+    base,
+    baseSha: fullSha(baseSha),
+    actor,
+    pr: Number(pr),
+    run: Number(run),
+    workflow: workflow || REFRESH_WORKFLOW_PATH,
+  };
   return `${WAIVER_MARKER} ${JSON.stringify(rec)} -->\n` +
-    `review-gate: \`${WAIVE_LABEL}\` bound to head \`${rec.sha}\` by \`${actor}\` on PR #${rec.pr}.`;
+    `review-gate: \`${WAIVE_LABEL}\` bound to head \`${rec.sha}\` base \`${rec.base}\` ` +
+    `(\`${rec.baseSha}\`) by \`${actor}\` on PR #${rec.pr} via run ${rec.run}.`;
 }
 
 export function parseWaiverRecord(body) {
@@ -237,21 +297,45 @@ export function parseWaiverRecord(body) {
   try {
     const rec = JSON.parse(m[1]);
     const sha = fullSha(rec && rec.sha);
-    if (!sha) return null;
-    return { sha, actor: rec.actor, pr: rec.pr };
+    const baseSha = fullSha(rec && rec.baseSha);
+    const run = Number(rec && rec.run);
+    const base = typeof (rec && rec.base) === 'string' ? rec.base : '';
+    if (!sha || !baseSha || !base || !Number.isFinite(run) || run <= 0) return null;
+    return {
+      sha,
+      base,
+      baseSha,
+      actor: rec.actor,
+      pr: rec.pr,
+      run,
+      workflow: rec.workflow,
+    };
   } catch {
     return null;
   }
 }
 
-export function waiverRecordAcceptsHead(comment, { headSha, prNumber } = {}) {
+export function waiverRecordAcceptsHead(comment, {
+  headSha,
+  prNumber,
+  baseRef,
+  baseSha,
+  resolveWaiverRun,
+} = {}) {
   if (!isGithubActionsBot(comment && comment.user)) return false;
   const rec = parseWaiverRecord(comment && comment.body);
   if (!rec) return false;
   if (!sameSha(rec.sha, headSha)) return false;
+  if (!rec.base || rec.base !== baseRef) return false;
+  if (baseSha && !sameSha(rec.baseSha, baseSha)) return false;
   if (prNumber != null && rec.pr != null && Number(rec.pr) !== Number(prNumber)) return false;
   if (rec.actor && !WAIVER_ACTORS.has(rec.actor)) return false;
-  return true;
+  if (rec.workflow && !isRefreshWorkflowPath(rec.workflow)) return false;
+  if (typeof resolveWaiverRun !== 'function') return false;
+  const proven = resolveWaiverRun(rec.run);
+  if (!proven || !proven.run) return false;
+  if (Number(proven.run.id) !== Number(rec.run)) return false;
+  return waiverRunProvenanceAccepts(proven.run, proven.jobs, { prNumber });
 }
 
 export function isWaiverBoundToCurrentHead({
@@ -259,9 +343,18 @@ export function isWaiverBoundToCurrentHead({
   comments,
   headSha,
   prNumber,
+  baseRef,
+  baseSha,
+  resolveWaiverRun,
 }) {
   if (!labels || !labels.includes(WAIVE_LABEL)) return false;
-  return (comments || []).some(c => waiverRecordAcceptsHead(c, { headSha, prNumber }));
+  return (comments || []).some(c => waiverRecordAcceptsHead(c, {
+    headSha,
+    prNumber,
+    baseRef,
+    baseSha,
+    resolveWaiverRun,
+  }));
 }
 
 export function isRetryableGithubStatus(status) {
@@ -317,12 +410,28 @@ function reviewMatchesHead(review, headSha, uniqueResolve, headPushedMs) {
   return evidenceAfterHeadPush(submitted, headPushedMs, { fullExact: exact });
 }
 
+function reviewBodyIsClean(review, headSha, uniqueResolve) {
+  const body = (review && review.body) || '';
+  if (isCleanNoMajorIssuesBody(body)) {
+    const named = mentionedShas(body);
+    if (named.length === 0) {
+      return prefixUniquelyMatchesHead(review.commit_id, headSha, uniqueResolve);
+    }
+    return named.some(s => prefixUniquelyMatchesHead(s, headSha, uniqueResolve));
+  }
+  if (summaryMarksCleanHeadCompleted(body, headSha)) {
+    return summaryCompletedPrefixIsUnique(body, headSha, uniqueResolve);
+  }
+  return false;
+}
+
 function isFreshBillWaiver(pr, headSha, event, facts) {
   if (!event) return false;
   const sender = (event.sender && event.sender.login) || '';
   const payloadPr = event.pull_request;
   const payloadHead = payloadPr && payloadPr.head && payloadPr.head.sha;
   const payloadBase = payloadPr && payloadPr.base && payloadPr.base.ref;
+  const payloadBaseSha = payloadPr && payloadPr.base && payloadPr.base.sha;
   const name = event.name || '';
   const afterBase = facts.baseChangedMs === 0 || (
     facts.lastWaiverEvent &&
@@ -336,6 +445,7 @@ function isFreshBillWaiver(pr, headSha, event, facts) {
     payloadPr && payloadPr.number === pr.number &&
     sameSha(payloadHead, headSha) &&
     payloadBase === (pr.base && pr.base.ref) &&
+    (!pr.base || !pr.base.sha || !payloadBaseSha || sameSha(payloadBaseSha, pr.base.sha)) &&
     WAIVER_ACTORS.has(sender) &&
     afterBase
   );
@@ -368,6 +478,9 @@ export function evaluatePr(input) {
   const comments = input.comments || [];
   const uniqueResolve = input.uniqueResolve;
   const headPushedMs = input.headPushedMs;
+  const resolveWaiverRun = input.resolveWaiverRun;
+  const baseRef = pr.base && pr.base.ref;
+  const baseSha = pr.base && pr.base.sha;
 
   if (labels.includes(WAIVE_LABEL)) {
     if (isFreshBillWaiver(pr, headSha, event, facts) ||
@@ -376,6 +489,9 @@ export function evaluatePr(input) {
           comments,
           headSha,
           prNumber,
+          baseRef,
+          baseSha,
+          resolveWaiverRun,
         })) {
       return {
         prNumber,
@@ -383,7 +499,7 @@ export function evaluatePr(input) {
         conclusion: 'success',
         title: 'Codex waived',
         summary: `Label \`${WAIVE_LABEL}\` applied by an allow-listed actor on head \`${headSha}\` ` +
-          `for base \`${pr.base && pr.base.ref}\`. The waiver covers this SHA and base only; ` +
+          `for base \`${baseRef}\`. The waiver covers this SHA and base only; ` +
           'any new push or retarget needs a new review or waiver.',
       };
     }
@@ -412,13 +528,16 @@ export function evaluatePr(input) {
     String(r.state).toUpperCase() !== 'DISMISSED' &&
     Date.parse(r.submitted_at || 0) > facts.baseChangedMs
   );
+  const cleanReviewOnHead = codexOnHead.some(r =>
+    reviewBodyIsClean(r, headSha, uniqueResolve),
+  );
 
   const usageLimited = comments.some(c => {
     const body = c.body || '';
     return isCodexUser(c.user) && /usage limits?/i.test(body);
   });
 
-  const cleanPassOnHead = comments.some(c => {
+  const cleanCommentOnHead = comments.some(c => {
     if (!isCodexUser(c.user)) return false;
     return commentAcceptsCleanHead(c, {
       headSha,
@@ -428,17 +547,27 @@ export function evaluatePr(input) {
     });
   });
   const acceptedCleanPass =
-    cleanPassOnHead && codexReviewsOnHead.length === 0 && !dismissedOnHead;
+    (cleanCommentOnHead || cleanReviewOnHead) && !dismissedOnHead;
 
-  if (codexOnHead.length > 0 || acceptedCleanPass) {
+  if (acceptedCleanPass) {
     return {
       prNumber,
       headSha,
       conclusion: 'success',
       title: 'Codex reviewed head',
-      summary: codexOnHead.length > 0
-        ? `chatgpt-codex-connector reviewed \`${headSha}\` (${codexOnHead.length} review(s)).`
-        : `chatgpt-codex-connector completed a clean review of \`${headSha}\` (no findings).`,
+      summary: `chatgpt-codex-connector completed a clean review of \`${headSha}\` (no findings).`,
+    };
+  }
+
+  if (codexOnHead.length > 0) {
+    return {
+      prNumber,
+      headSha,
+      conclusion: 'failure',
+      title: 'Codex found issues on head',
+      summary: `chatgpt-codex-connector reviewed \`${headSha}\` but the result is not a clean ` +
+        '"no major issues" / no-findings review. Gate stays red until Codex posts a clean ' +
+        `result or \`${WAIVE_LABEL}\` is applied.`,
     };
   }
 
@@ -694,11 +823,32 @@ async function loadSnapshot(client, owner, repo, prNumber, event) {
     const s = typeof shown === 'string' ? shown.toLowerCase() : '';
     return s.length === 40 && sameSha(s, headSha);
   };
+  let resolveWaiverRun = () => null;
   if (headSha) {
     headPushedMs = await loadHeadPushMs(client, owner, repo, headSha);
     uniqueResolve = await buildUniqueResolve(client, owner, repo, headSha, reviews, comments);
+    resolveWaiverRun = await buildWaiverResolver(client, owner, repo, comments);
   }
-  return { pr, reviews, comments, timeline, event, headPushedMs, uniqueResolve };
+  return { pr, reviews, comments, timeline, event, headPushedMs, uniqueResolve, resolveWaiverRun };
+}
+
+async function buildWaiverResolver(client, owner, repo, comments) {
+  const map = new Map();
+  for (const c of comments || []) {
+    const rec = parseWaiverRecord(c && c.body);
+    if (!rec || map.has(rec.run)) continue;
+    try {
+      const run = await client.get(`/repos/${owner}/${repo}/actions/runs/${rec.run}`);
+      const jobs = await client.paginate(
+        `/repos/${owner}/${repo}/actions/runs/${rec.run}/jobs`,
+        'jobs',
+      );
+      map.set(rec.run, { run, jobs });
+    } catch {
+      map.set(rec.run, null);
+    }
+  }
+  return runId => map.get(Number(runId)) || null;
 }
 
 export async function runEvaluate({ env, readFile, github } = {}) {
@@ -823,13 +973,31 @@ async function waitForRun(client, owner, repo, runId, opts = {}) {
 
 async function ensureWaiverComment(client, owner, repo, pr, headSha, event) {
   if (!shouldPostWaiverRecord(event, pr, headSha)) return false;
+  const base = pr.base && pr.base.ref;
+  const baseSha = fullSha(pr.base && pr.base.sha);
+  const runId = Number((event && event.runId) || process.env.GITHUB_RUN_ID);
+  if (!base || !baseSha || !Number.isFinite(runId) || runId <= 0) return false;
   const comments = await client.paginate(`/repos/${owner}/${repo}/issues/${pr.number}/comments`);
-  if (comments.some(c => waiverRecordAcceptsHead(c, { headSha, prNumber: pr.number }))) {
+  const resolveWaiverRun = await buildWaiverResolver(client, owner, repo, comments);
+  if (comments.some(c => waiverRecordAcceptsHead(c, {
+    headSha,
+    prNumber: pr.number,
+    baseRef: base,
+    baseSha,
+    resolveWaiverRun,
+  }))) {
     return false;
   }
   const actor = (event.sender && event.sender.login) || '';
   await client.post(`/repos/${owner}/${repo}/issues/${pr.number}/comments`, {
-    body: formatWaiverComment({ sha: headSha, actor, pr: pr.number }),
+    body: formatWaiverComment({
+      sha: headSha,
+      base,
+      baseSha,
+      actor,
+      pr: pr.number,
+      run: runId,
+    }),
   });
   return true;
 }

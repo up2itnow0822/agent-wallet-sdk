@@ -33,9 +33,14 @@
 #      posted after GitHub's push/event time for the head; or a clean Codex
 #      summary / "no major issues" comment under the same rules. A dismissed
 #      Codex review on this head blocks the clean-comment fallback.
-#   2. Bill-only (`up2itnow0822`) `codex-waived`, bound to the exact head
-#      SHA by a github-actions[bot] `review-gate-waiver:v1` comment posted
-#      at label time (or the same-tick labeled webhook that carries that SHA).
+#   2. Bill-only (`up2itnow0822`) `codex-waived`, bound to head SHA + base
+#      ref + base SHA + PR by a github-actions[bot] comment that cites the
+#      review-gate-refresh run which wrote it. Evaluate requires that run's
+#      path to be this file, event pull_request_target (main's copy), and a
+#      successful record-waiver job. A PR-controlled workflow posting as
+#      the same bot cannot mint that provenance.
+#   A Codex review counts only as a clean no-findings / "no major issues"
+#   result, never merely because a review exists.
 #   GitHub 5xx responses are retried with backoff.
 #
 # Rerun budget: each CI run is rerun at most MAX_RUN_ATTEMPTS (8) times,
@@ -77,9 +82,94 @@ concurrency:
       github.event.inputs.pr_number ||
       format('run-{0}', github.run_id)
     }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event.action != 'labeled' }}
 
 jobs:
+  record-waiver:
+    if: >
+      github.event_name == 'pull_request_target' &&
+      github.event.action == 'labeled' &&
+      github.event.label.name == 'codex-waived' &&
+      github.event.sender.login == 'up2itnow0822'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Bind waiver to head, base, PR, and this trusted run
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const WAIVE_LABEL = 'codex-waived';
+            const WAIVER_MARKER = '<!-- review-gate-waiver:v1';
+            const WORKFLOW_PATH = '.github/workflows/review-gate.yml';
+
+            function fullSha(value) {
+              return typeof value === 'string' && /^[0-9a-f]{40}$/i.test(value)
+                ? value.toLowerCase()
+                : '';
+            }
+
+            const pr = context.payload.pull_request;
+            const n = pr && pr.number;
+            const headSha = fullSha(pr && pr.head && pr.head.sha);
+            const base = pr && pr.base && pr.base.ref;
+            const baseSha = fullSha(pr && pr.base && pr.base.sha);
+            const actor = context.payload.sender && context.payload.sender.login;
+            if (!n || !headSha || !base || !baseSha || !actor) {
+              core.setFailed('waiver payload missing head/base SHA or actor');
+              return;
+            }
+
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: n,
+              per_page: 100,
+            });
+            const rec = {
+              sha: headSha,
+              base,
+              baseSha,
+              actor,
+              pr: n,
+              run: context.runId,
+              workflow: WORKFLOW_PATH,
+            };
+            const already = comments.some(c =>
+              c.user && c.user.login === 'github-actions[bot]' &&
+              c.body && c.body.includes(WAIVER_MARKER) &&
+              c.body.includes(`"sha":"${headSha}"`) &&
+              c.body.includes(`"baseSha":"${baseSha}"`) &&
+              c.body.includes(`"run":${context.runId}`)
+            );
+            if (already) {
+              core.info(`#${n}: waiver record already bound for this run`);
+              return;
+            }
+            const body = `${WAIVER_MARKER} ${JSON.stringify(rec)} -->\n` +
+              `review-gate: \`${WAIVE_LABEL}\` bound to head \`${headSha}\` base \`${base}\` ` +
+              `(\`${baseSha}\`) by \`${actor}\` on PR #${n} via run ${context.runId}.`;
+            const delays = [1000, 2000, 4000];
+            let last;
+            for (let i = 0; i <= delays.length; i++) {
+              try {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: n,
+                  body,
+                });
+                last = null;
+                break;
+              } catch (err) {
+                last = err;
+                const status = err && err.status;
+                if (!(status >= 500 && status <= 599) || i === delays.length) throw err;
+                await new Promise(r => setTimeout(r, delays[i]));
+              }
+            }
+            if (last) throw last;
+            core.info(`#${n}: recorded unforgeable waiver binding run ${context.runId}`);
+
   refresh:
     if: >
       github.event_name == 'pull_request_target' ||
@@ -95,9 +185,6 @@ jobs:
           script: |
             const CI_WORKFLOW = 'ci.yml';
             const JOB_NAME = 'review-gate';
-            const WAIVE_LABEL = 'codex-waived';
-            const WAIVER_ACTORS = new Set(['up2itnow0822']);
-            const WAIVER_MARKER = '<!-- review-gate-waiver:v1';
             const MAX_RUN_ATTEMPTS = 8;
             const SCHEDULE_INTERVAL_MS = 10 * 60 * 1000;
 
@@ -136,47 +223,6 @@ jobs:
             function scheduleBackoffMs(attempt) {
               const exp = Math.min(Math.max((Number(attempt) || 1) - 1, 0), 3);
               return SCHEDULE_INTERVAL_MS * (2 ** exp);
-            }
-
-            function shouldPostWaiver(pr, headSha) {
-              if (context.eventName !== 'pull_request_target') return false;
-              if (context.payload.action !== 'labeled') return false;
-              const label = context.payload.label && context.payload.label.name;
-              const sender = context.payload.sender && context.payload.sender.login;
-              const payloadPr = context.payload.pull_request;
-              return label === WAIVE_LABEL &&
-                WAIVER_ACTORS.has(sender) &&
-                payloadPr && payloadPr.number === pr.number &&
-                fullSha(payloadPr.head && payloadPr.head.sha) === headSha &&
-                fullSha(pr.head && pr.head.sha) === headSha;
-            }
-
-            async function ensureWaiverRecord(n, pr, headSha) {
-              if (!shouldPostWaiver(pr, headSha)) return;
-              const comments = await github.paginate(github.rest.issues.listComments, {
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: n,
-                per_page: 100,
-              });
-              const already = comments.some(c =>
-                c.user && c.user.login === 'github-actions[bot]' &&
-                c.body && c.body.includes(WAIVER_MARKER) && c.body.includes(headSha)
-              );
-              if (already) return;
-              const actor = context.payload.sender.login;
-              const body = `${WAIVER_MARKER} ${JSON.stringify({ sha: headSha, actor, pr: n })} -->\n` +
-                `review-gate: \`${WAIVE_LABEL}\` bound to head \`${headSha}\` by \`${actor}\` on PR #${n}.`;
-              await withRetry(
-                () => github.rest.issues.createComment({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: n,
-                  body,
-                }),
-                `waiver comment ${n}`,
-              );
-              core.info(`#${n}: recorded waiver binding for ${headSha}`);
             }
 
             async function resolvePrNumbers() {
@@ -237,17 +283,6 @@ jobs:
               if (!headSha) {
                 core.info(`#${n}: skip, head is not a 40-character SHA`);
                 continue;
-              }
-
-              try {
-                await ensureWaiverRecord(n, pr, headSha);
-              } catch (err) {
-                const status = err && err.status;
-                if (status === 403 || status === 422) {
-                  core.info(`#${n}: waiver comment skipped (${status} ${err.message})`);
-                } else {
-                  throw err;
-                }
               }
 
               const runs = await github.paginate(github.rest.actions.listWorkflowRuns, {
