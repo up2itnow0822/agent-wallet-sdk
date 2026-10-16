@@ -234,7 +234,9 @@ export class BridgeModule {
       const source = parseCctpMessage(burnResult.messageBytes);
       assertMessageFields(source, { destinationDomain: CCTP_DOMAIN_IDS[toChain] });
       const attested = await pollForAttestation(burnResult.burnTxHash, burnResult.messageBytes, options.attestationApiUrl ?? CIRCLE_ATTESTATION_API);
-      const mintTxHash = await this.receiveMessage(attested.message, attested.attestation, toChain, options.destinationRpcUrl, burnResult);
+      const mintTxHash = await this.receiveMessage(
+        attested.message, attested.attestation, toChain, options.destinationRpcUrl, burnResult, options.mintTxHash,
+      );
       return {
         burnTxHash: burnResult.burnTxHash, mintTxHash, amount: source.amount, fromChain: this.fromChain, toChain,
         recipient: evmMintRecipient(parseCctpMessage(attested.message)), nonce: attested.nonce, elapsedMs: Date.now() - startMs,
@@ -244,7 +246,14 @@ export class BridgeModule {
     }
   }
 
-  private async receiveMessage(messageBytes: Hex, attestation: Hex, toChain: EVMBridgeChain, destinationRpcUrl?: string, recovery?: BridgeRecovery): Promise<Hash> {
+  private async receiveMessage(
+    messageBytes: Hex,
+    attestation: Hex,
+    toChain: EVMBridgeChain,
+    destinationRpcUrl?: string,
+    recovery?: BridgeRecovery,
+    existingMintTxHash?: Hash,
+  ): Promise<Hash> {
     const message = parseCctpMessage(messageBytes);
     assertMessageFields(message, { destinationDomain: CCTP_DOMAIN_IDS[toChain], recipient: pad(TOKEN_MESSENGER_V2[toChain], { size: 32 }) }, 'MINT_FAILED');
     assertAttestedMessage(message, attestation, 'MINT_FAILED');
@@ -253,6 +262,16 @@ export class BridgeModule {
     const transmitterAddress = MESSAGE_TRANSMITTER_V2[toChain];
     const destChain = VIEM_CHAINS[toChain];
     const destPublicClient = createPublicClient({ chain: destChain, transport: http(destinationRpcUrl) }) as PublicClient;
+
+    if (existingMintTxHash) {
+      try {
+        const existingReceipt = await destPublicClient.waitForTransactionReceipt({ hash: existingMintTxHash });
+        if (existingReceipt.status === 'success') return existingMintTxHash;
+      } catch (error) {
+        if (recovery) throw withBridgeRecovery(error, { ...recovery, mintTxHash: existingMintTxHash }, 'MINT_FAILED');
+        throw new BridgeError('MINT_FAILED', `Could not confirm mint transaction ${existingMintTxHash}: ${error instanceof Error ? error.message : String(error)}.`);
+      }
+    }
 
     const transmitter = getContract({
       address: transmitterAddress,

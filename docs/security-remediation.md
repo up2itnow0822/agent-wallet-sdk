@@ -41,12 +41,14 @@ executes; do not reuse its queued error as execution evidence.
 
 ### x402 retries and lost submission responses
 
-A repeated identical unkeyed request reuses its protected settlement during
-its retry window. A confirmed payment whose HTTP delivery fails remains
-protected until successful delivery. A distinct intended purchase needs its
-own explicit payment intent. Unknown submissions never expire into permission
-to pay again; protected cache limits reject new intents instead of evicting
-unresolved payments.
+A repeated identical unkeyed request reuses its protected settlement while
+the transfer is in flight or proof delivery has not succeeded. After the
+proof is delivered, a later identical request is a new purchase. A confirmed
+payment whose HTTP delivery fails remains protected until successful
+delivery. A distinct intended purchase with an explicit payment intent still
+replays during its retry window. Unknown submissions never expire into
+permission to pay again; protected cache limits reject new intents instead
+of evicting unresolved payments.
 Reissued challenges can extend that window; a later shorter challenge never
 reduces the protection of an existing payment.
 

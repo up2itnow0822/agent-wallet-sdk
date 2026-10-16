@@ -691,10 +691,30 @@ export class X402Client {
       if (entry) {
         entry.pendingDeliveries = Math.max(0, (entry.pendingDeliveries ?? 1) - 1);
         if (!entry.deliveryFailed && !entry.pendingDeliveries) {
-          entry.expiresAt = Date.now() + entry.retryWindowMs;
+          if (entry.unkeyed) {
+            // Delivered unkeyed proof completed this purchase. A later identical
+            // request is a new pay-per-call, not a retry of the same intent.
+            this.forgetSettlement(paymentKey, entry);
+          } else {
+            entry.expiresAt = Date.now() + entry.retryWindowMs;
+          }
         }
       }
     }
+  }
+
+  private unkeyedProofDelivered(entry: CachedSettlement): boolean {
+    return entry.unkeyed === true
+      && entry.status === 'confirmed'
+      && (entry.pendingDeliveries ?? 0) === 0
+      && entry.deliveryFailed === false;
+  }
+
+  private forgetSettlement(key: string, entry: CachedSettlement): void {
+    if (this.paymentSettlements.get(key) === entry) {
+      this.paymentSettlements.delete(key);
+    }
+    this.feePhases.delete(key);
   }
 
   /**
@@ -1089,12 +1109,13 @@ export class X402Client {
   }
 
   /**
-   * A 402 without an explicit intent id shares a replayable request settlement.
+   * A 402 without an explicit intent id shares an in-flight request settlement.
    * Install the in-flight slot before authorize/execute
    * so concurrent retries of the same request identity share one transfer.
    * Distinct POST bodies do not join. After a hash is broadcast, keep that hash
    * and its reservation under this request's unkeyed key until the receipt
-   * resolves so a later retry of that same request cannot pay again.
+   * resolves and proof is delivered so a later retry cannot pay again.
+   * Once proof delivery succeeds, a later identical request is a new purchase.
    */
   private async executeUnkeyedPayment(
     key: string,
@@ -1111,7 +1132,11 @@ export class X402Client {
         key, existingFee.termsFingerprint, termsFingerprint,
       ));
     }
-    const existing = this.paymentSettlements.get(key);
+    let existing = this.paymentSettlements.get(key);
+    if (existing && this.unkeyedProofDelivered(existing)) {
+      this.forgetSettlement(key, existing);
+      existing = undefined;
+    }
     if (existing) {
       if (existing.termsFingerprint !== termsFingerprint) {
         throw this.withConfirmedFeeEvidence(key, new X402IntentTermsConflictError(

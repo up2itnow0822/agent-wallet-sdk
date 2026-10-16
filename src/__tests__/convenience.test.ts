@@ -32,6 +32,16 @@ describe('resolveWalletChain', () => {
     expect(resolveWalletChain(1).walletChain).toBe('ethereum');
   });
 
+  it('maps Eliza-supported L2s onto createWallet keys', () => {
+    expect(resolveWalletChain('optimism').walletChain).toBe('optimism');
+    expect(resolveWalletChain(10).walletChain).toBe('optimism');
+    expect(resolveWalletChain('avalanche').walletChain).toBe('avalanche');
+    expect(resolveWalletChain('unichain').walletChain).toBe('unichain');
+    expect(resolveWalletChain('linea').walletChain).toBe('linea');
+    expect(resolveWalletChain('sonic').walletChain).toBe('sonic');
+    expect(resolveWalletChain('worldchain').walletChain).toBe('worldchain');
+  });
+
   it('keeps the documented unknown-id fallback on Base', () => {
     const resolved = resolveWalletChain(99999);
     expect(resolved.chain.id).toBe(8453);

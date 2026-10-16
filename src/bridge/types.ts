@@ -144,6 +144,8 @@ export interface BridgeOptions {
   destinationAddress?: Address;
   destinationRpcUrl?: string;
   attestationApiUrl?: string;
+  /** Existing destination mint, if a prior receiveMessage hash was retained. */
+  mintTxHash?: Hash;
 }
 
 /** Result of a bridge.burn() operation */

@@ -285,6 +285,8 @@ export interface SolanaToEVMOptions {
   attestationApiUrl?: string;
   /** Solana RPC URL override */
   solanaRpcUrl?: string;
+  /** Existing destination mint, if a prior receiveMessage hash was retained. */
+  mintTxHash?: Hash;
 }
 
 export interface SolanaToEVMBurnParams {
@@ -360,6 +362,16 @@ export async function receiveFromSolanaOnEVM(
     const account = walletClient.account;
     const destChain = VIEM_CHAINS[toChain];
     const destPublicClient = createPublicClient({ chain: destChain, transport: http(evmRpcUrl) }) as PublicClient;
+    if (options.mintTxHash) {
+      recovery = { ...recovery, mintTxHash: options.mintTxHash };
+      const existingReceipt = await destPublicClient.waitForTransactionReceipt({ hash: options.mintTxHash });
+      if (existingReceipt.status === 'success') {
+        return {
+          mintTxHash: options.mintTxHash, amount: decoded.amount - decoded.feeExecuted, toChain,
+          recipient: evmMintRecipient(decoded), elapsedMs: Date.now() - startMs,
+        };
+      }
+    }
     const transmitter = getContract({ address: MESSAGE_TRANSMITTER_V2_MAP[toChain], abi: MessageTransmitterV2Abi, client: { public: destPublicClient, wallet: walletClient } });
     const mintTxHash = await transmitter.write.receiveMessage([attested.message, attested.attestation], { account, chain: destChain });
     recovery = { ...recovery, mintTxHash };

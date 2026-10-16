@@ -38,6 +38,8 @@
   separate verified execution evidence can settle the pending transfer.
 - Reissued challenges extend the protected retry window monotonically; a later
   shorter timeout never reduces it or permits another fee/payee transfer.
+  Unkeyed settlements stay protected until proof delivery succeeds; a later
+  identical request is then a new purchase.
 - The environment and Eliza helpers use wallet-chain USDC only. Runtime
   refreshes retain client budget and unresolved holds; different runtimes never
   share a signer. Configuration changes must not silently reset these controls.
@@ -48,8 +50,10 @@
   explicitly own destination, DNS, redirect and connection security. Bound
   inline data and accepted resolver output, and confirm ownership at one block.
 - Bridge recovery uses a known burn transaction and the Circle V2 `messages`
-  response. Mint only the returned attested message after matching immutable
-  burn terms. Recovery never creates a second burn.
+  response. Bind Circle entries to that burn before treating `error` status.
+  Mint only the returned attested message after matching immutable burn terms.
+  Recovery never creates a second burn. A retained destination mint hash is
+  reconciled before another `receiveMessage` submission.
 
 ## Work Guidance
 

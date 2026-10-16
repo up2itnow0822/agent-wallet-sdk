@@ -295,6 +295,60 @@ describe('CCTP V2 EVM flow', () => {
     expect(chain.mintCalls).toEqual([[signedMessage, SIGNATURE]]);
   });
 
+  it('reconciles a retained mint hash on resume instead of submitting again', async () => {
+    const signedMessage = message({ nonce: NONCE, finalityThresholdExecuted: 1000 });
+    stubFetch(circleResponse(signedMessage));
+    chain.receipts.delete(MINT_TX);
+    const error = await finish(new BridgeModule(wallet).bridge(1_000_000n, 'ethereum', { destinationAddress: RECIPIENT })).catch(err => err);
+    expect(error).toMatchObject({ recovery: { mintTxHash: MINT_TX } });
+    expect(chain.mintCalls).toHaveLength(1);
+
+    chain.receipts.set(MINT_TX, { transactionHash: MINT_TX, status: 'success', logs: [] });
+    stubFetch(circleResponse(signedMessage));
+    const result = await finish(new BridgeModule(wallet).resume(BURN_TX, 'ethereum', { mintTxHash: MINT_TX }));
+    expect(result).toMatchObject({ burnTxHash: BURN_TX, mintTxHash: MINT_TX, recipient: RECIPIENT });
+    expect(chain.mintCalls).toHaveLength(1);
+  });
+
+  it('does not resubmit mint when the retained mint receipt is still unknown', async () => {
+    const signedMessage = message({ nonce: NONCE, finalityThresholdExecuted: 1000 });
+    stubFetch(circleResponse(signedMessage));
+    chain.receipts.delete(MINT_TX);
+    await expect(finish(new BridgeModule(wallet).resume(BURN_TX, 'ethereum', { mintTxHash: MINT_TX }))).rejects.toMatchObject({
+      code: 'MINT_FAILED', recovery: { burnTxHash: BURN_TX, mintTxHash: MINT_TX },
+    });
+    expect(chain.mintCalls).toHaveLength(0);
+  });
+
+  it('still fails closed when the matching Circle entry is in error', async () => {
+    const signedMessage = message({ nonce: NONCE, finalityThresholdExecuted: 1000 });
+    stubFetch({
+      sourceTxHash: BURN_TX,
+      messages: [
+        { status: 'error', cctpVersion: 2, message: signedMessage, attestation: null },
+      ],
+    });
+    await expect(finish(new BridgeModule(wallet).resume(BURN_TX, 'ethereum'))).rejects.toMatchObject({
+      code: 'ATTESTATION_ERROR',
+    });
+    expect(chain.mintCalls).toHaveLength(0);
+  });
+
+  it('selects a matching completed attestation when another Circle entry is in error', async () => {
+    const signedMessage = message({ nonce: NONCE, finalityThresholdExecuted: 1000 });
+    const unrelated = message({ mintRecipient: pad(OTHER_RECIPIENT, { size: 32 }), nonce: NONCE, finalityThresholdExecuted: 1000 });
+    stubFetch({
+      sourceTxHash: BURN_TX,
+      messages: [
+        { status: 'error', cctpVersion: 2, message: unrelated, attestation: null },
+        { status: 'complete', cctpVersion: 2, message: signedMessage, attestation: SIGNATURE },
+      ],
+    });
+    const result = await finish(new BridgeModule(wallet).resume(BURN_TX, 'ethereum'));
+    expect(result).toMatchObject({ burnTxHash: BURN_TX, mintTxHash: MINT_TX, recipient: RECIPIENT });
+    expect(chain.mintCalls).toEqual([[signedMessage, SIGNATURE]]);
+  });
+
   it.each([
     { sourceDomain: 3 }, { destinationDomain: 3 }, { mintRecipient: pad(OTHER_RECIPIENT, { size: 32 }) },
     { amount: 2_000_000n }, { burnToken: pad(OTHER_RECIPIENT, { size: 32 }) },
@@ -467,6 +521,30 @@ describe('CCTP V2 Solana flows', () => {
     expect(chain.mintCalls).toEqual([[signedMessage, SIGNATURE]]);
     expect(chain.burnCalls).toHaveLength(0);
     expect(chain.approveCalls).toHaveLength(0);
+  });
+
+  it('does not resubmit Solana-to-EVM mint when the retained mint receipt is still unknown', async () => {
+    const emitted = message(fromSolanaFields);
+    const signedMessage = message({ ...fromSolanaFields, nonce: NONCE, finalityThresholdExecuted: 2000 });
+    stubFetch(circleResponse(signedMessage, SOLANA_TX));
+    chain.receipts.delete(MINT_TX);
+    await expect(finish(receiveFromSolanaOnEVM(wallet, {
+      burnTxHash: SOLANA_TX, messageBytes: emitted, messageHash: keccak256(emitted), sourceDomain: 5,
+    }, { toChain: 'base', mintTxHash: MINT_TX }))).rejects.toMatchObject({
+      code: 'MINT_FAILED', recovery: { burnTxHash: SOLANA_TX, mintTxHash: MINT_TX },
+    });
+    expect(chain.mintCalls).toHaveLength(0);
+  });
+
+  it('reconciles a retained Solana-to-EVM mint hash instead of submitting again', async () => {
+    const emitted = message(fromSolanaFields);
+    const signedMessage = message({ ...fromSolanaFields, nonce: NONCE, finalityThresholdExecuted: 2000 });
+    stubFetch(circleResponse(signedMessage, SOLANA_TX));
+    const result = await finish(receiveFromSolanaOnEVM(wallet, {
+      burnTxHash: SOLANA_TX, messageBytes: emitted, messageHash: keccak256(emitted), sourceDomain: 5,
+    }, { toChain: 'base', mintTxHash: MINT_TX }));
+    expect(result).toMatchObject({ mintTxHash: MINT_TX, recipient: RECIPIENT });
+    expect(chain.mintCalls).toHaveLength(0);
   });
 
   it('rejects a caller-provided EVM recipient that differs from the burned recipient', async () => {

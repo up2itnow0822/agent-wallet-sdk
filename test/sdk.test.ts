@@ -76,7 +76,10 @@ describe('createWallet', () => {
   });
 
   it('supports all valid chains', () => {
-    for (const chain of ['base', 'base-sepolia', 'ethereum', 'arbitrum', 'polygon'] as const) {
+    for (const chain of [
+      'base', 'base-sepolia', 'ethereum', 'arbitrum', 'polygon',
+      'optimism', 'avalanche', 'unichain', 'linea', 'sonic', 'worldchain',
+    ] as const) {
       expect(createWallet({ accountAddress: ACCOUNT, chain, walletClient: {} as any }).address).toBe(ACCOUNT);
     }
   });

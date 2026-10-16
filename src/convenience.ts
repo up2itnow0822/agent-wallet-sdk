@@ -40,7 +40,10 @@ import {
 import { createWalletClient, http, isAddress } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { toRaw } from './tokens/decimals.js';
-import { base, mainnet, arbitrum, optimism, polygon, baseSepolia } from 'viem/chains';
+import {
+  base, mainnet, arbitrum, optimism, polygon, baseSepolia, avalanche,
+  unichain, linea, sonic, worldchain,
+} from 'viem/chains';
 import type { Address, Hex } from 'viem';
 import type { AgentWalletConfig } from './types.js';
 import type { X402PaymentRequirements } from './x402/types.js';
@@ -64,6 +67,11 @@ const CHAIN_MAP: Record<string, any> = {
   op: optimism,
   polygon,
   matic: polygon,
+  avalanche,
+  unichain,
+  linea,
+  sonic,
+  worldchain,
 };
 
 /** Fallback RPC endpoints for chains that have no public default in viem. */
@@ -75,6 +83,11 @@ const DEFAULT_RPC: Record<string, string> = {
   arbitrum: 'https://arb1.arbitrum.io/rpc',
   optimism: 'https://mainnet.optimism.io',
   polygon: 'https://polygon-rpc.com',
+  avalanche: 'https://api.avax.network/ext/bc/C/rpc',
+  unichain: 'https://mainnet.unichain.org',
+  linea: 'https://rpc.linea.build',
+  sonic: 'https://rpc.soniclabs.com',
+  worldchain: 'https://worldchain-mainnet.g.alchemy.com/public',
 };
 
 /**
@@ -90,6 +103,12 @@ const CREATE_WALLET_KEY_BY_ID: Record<number, AgentWalletConfig['chain']> = {
   1: 'ethereum',
   42161: 'arbitrum',
   137: 'polygon',
+  10: 'optimism',
+  43114: 'avalanche',
+  130: 'unichain',
+  59144: 'linea',
+  146: 'sonic',
+  480: 'worldchain',
 };
 
 /** Resolve a viem chain from a documented name or numeric id. Unknown ids use Base. */

@@ -12,7 +12,10 @@ import {
   type Chain,
   zeroAddress,
 } from 'viem';
-import { base, baseSepolia, mainnet, arbitrum, polygon } from 'viem/chains';
+import {
+  base, baseSepolia, mainnet, arbitrum, polygon, optimism, avalanche,
+  unichain, linea, sonic, worldchain,
+} from 'viem/chains';
 import { AgentAccountV2Abi, AgentAccountFactoryV2Abi } from './abi.js';
 import type {
   AgentWalletConfig,
@@ -75,6 +78,12 @@ const CHAINS: Record<string, Chain> = {
   ethereum: mainnet,
   arbitrum,
   polygon,
+  optimism,
+  avalanche,
+  unichain,
+  linea,
+  sonic,
+  worldchain,
 };
 
 /** Native ETH token address (zero address) */

@@ -141,8 +141,9 @@ consume gas.
   manifest.
 - `deployWallet()` requires a factory address, token contract, token ID, RPC,
   and caller-controlled wallet client.
-- `createWallet()` currently maps Base, Base Sepolia, Ethereum, Arbitrum, and
-  Polygon runtime clients in [`src/index.ts`](src/index.ts).
+- `createWallet()` currently maps Base, Base Sepolia, Ethereum, Arbitrum,
+  Polygon, Optimism, Avalanche, Unichain, Linea, Sonic, and World Chain
+  runtime clients in [`src/index.ts`](src/index.ts).
 - `walletFromEnv()` maps `CHAIN_NAME` / `CHAIN_ID` onto those keys. It does not
   pass viem display names such as `"arbitrum one"` into `createWallet()`.
 - `setPolicyFromEnv()` copies a single configured spend limit onto the omitted

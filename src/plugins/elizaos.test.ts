@@ -89,6 +89,13 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe('ElizaOS wallet configuration isolation', () => {
+  it.each([
+    'optimism', 'avalanche', 'unichain', 'linea', 'sonic', 'worldchain',
+  ] as const)('forwards Eliza chain %s to createWallet', (chain) => {
+    getAgentWallet(config({ chain }));
+    expect(createWalletMock).toHaveBeenCalledWith(expect.objectContaining({ chain }));
+  });
+
   it('keeps separate config objects and non-custodial signers in separate wallets', () => {
     const first = getAgentWallet(config());
     const second = getAgentWallet(config({ privateKey: KEY_B, accountAddress: ADDRESS_B, chain: 'arbitrum' }));

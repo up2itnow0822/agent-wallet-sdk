@@ -1540,7 +1540,7 @@ describe('X402Client retry idempotency', () => {
 
   it('expires a successful settlement after the retry window',
     async () => {
-      vi.useFakeTimers();
+      vi.useFakeTimers({ now: Date.UTC(2026, 9, 15, 12) });
       const executeSpy = vi.spyOn(X402Client.prototype as any, 'executePayment')
         .mockResolvedValue({ txHash });
       mock402ThenPaid();
@@ -1560,7 +1560,7 @@ describe('X402Client retry idempotency', () => {
   );
 
   it('rechecks policy when an expired settlement is removed before reuse', async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ now: Date.UTC(2026, 9, 15, 12) });
     const executeSpy = vi.spyOn(X402Client.prototype as any, 'executePayment')
       .mockResolvedValue({ txHash });
     const approvals: string[] = [];
@@ -2681,7 +2681,34 @@ describe('X402Client retry idempotency', () => {
       .not.toBe(buildX402PaymentIdempotencyKey('POST', url, colliding));
   });
 
-  it('replays unkeyed challenges on runtimes without crypto.randomUUID', async () => {
+  it('pays a later identical unkeyed request after the first proof is delivered', async () => {
+    const executeSpy = vi.spyOn(X402Client.prototype as any, 'executePayment')
+      .mockResolvedValue({ txHash });
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+      const headers = new Headers(init?.headers);
+      if (headers.get('X-PAYMENT')) {
+        return new Response('paid', { status: 200 });
+      }
+      const unkeyed = paymentRequired();
+      delete (unkeyed.accepts[0] as { extra?: unknown }).extra;
+      return new Response(null, {
+        status: 402,
+        headers: { 'payment-required': btoa(JSON.stringify(unkeyed)) },
+      });
+    });
+    const client = new X402Client(mockWallet, { globalDailyLimit: 2_015_400n });
+
+    expect((await client.fetch(url, { method: 'POST' })).status).toBe(200);
+    expect((await client.fetch(url, { method: 'POST' })).status).toBe(200);
+    expect(executeSpy).toHaveBeenCalledTimes(2);
+    const logs = client.getTransactionLog();
+    expect(logs).toHaveLength(2);
+    expect(logs[0].replayed).toBe(false);
+    expect(logs[1].replayed).toBe(false);
+    expect(client.getDailySpendSummary().global).toBe(2_015_400n);
+  });
+
+  it('pays later unkeyed requests on runtimes without crypto.randomUUID', async () => {
     const originalCrypto = Object.getOwnPropertyDescriptor(globalThis, 'crypto');
     Object.defineProperty(globalThis, 'crypto', { value: undefined, configurable: true });
     try {
@@ -2699,15 +2726,14 @@ describe('X402Client retry idempotency', () => {
           headers: { 'payment-required': btoa(JSON.stringify(unkeyed)) },
         });
       });
-      const client = new X402Client(mockWallet);
+      const client = new X402Client(mockWallet, { globalDailyLimit: 2_015_400n });
 
       expect((await client.fetch(url, { method: 'POST' })).status).toBe(200);
       expect((await client.fetch(url, { method: 'POST' })).status).toBe(200);
-      expect(executeSpy).toHaveBeenCalledTimes(1);
+      expect(executeSpy).toHaveBeenCalledTimes(2);
       const logs = client.getTransactionLog();
       expect(logs).toHaveLength(2);
-      expect(logs[0].idempotencyKey).toBe(logs[1].idempotencyKey);
-      expect(logs[1].replayed).toBe(true);
+      expect(logs.every((log) => log.replayed === false)).toBe(true);
     } finally {
       if (originalCrypto) {
         Object.defineProperty(globalThis, 'crypto', originalCrypto);

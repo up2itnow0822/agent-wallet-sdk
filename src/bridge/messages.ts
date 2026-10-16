@@ -128,13 +128,27 @@ export async function pollForAttestation(burnTxHash: string, sourceMessage: Hex,
             throw new BridgeError('ATTESTATION_ERROR', 'Malformed Circle message entry.');
           }
           if (entry.cctpVersion === 1) continue;
-          if (entry.status === 'error') throw new BridgeError('ATTESTATION_ERROR', 'Circle could not attest the source burn.');
+          if (entry.status === 'pending_confirmations' && (!entry.message || entry.message === '0x')) {
+            pending = true;
+            continue;
+          }
+          if (!entry.message || entry.message === '0x') {
+            // Terminal errors and unknown statuses cannot be bound without bytes.
+            continue;
+          }
+          let decoded: CctpMessage;
+          try {
+            decoded = parseCctpMessage(entry.message);
+          } catch {
+            continue;
+          }
+          if (!sameBurn(sourceMessage, entry.message)) continue;
+          if (entry.status === 'error') {
+            throw new BridgeError('ATTESTATION_ERROR', 'Circle could not attest the source burn.');
+          }
           if (entry.status !== 'complete' && entry.status !== 'pending_confirmations') {
             throw new BridgeError('ATTESTATION_ERROR', 'Unrecognized Circle attestation status.');
           }
-          if (entry.status === 'pending_confirmations' && (!entry.message || entry.message === '0x')) { pending = true; continue; }
-          const decoded = parseCctpMessage(entry.message);
-          if (!sameBurn(sourceMessage, entry.message)) continue;
           matching.push({ message: entry.message, attestation: entry.attestation, status: entry.status, decoded });
         }
         if (matching.length > 1) throw new BridgeError('ATTESTATION_ERROR', 'Ambiguous Circle response: multiple messages match the source burn.');

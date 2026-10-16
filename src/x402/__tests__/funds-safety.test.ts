@@ -83,7 +83,7 @@ afterEach(() => {
 describe('x402 funds-safety regressions', () => {
   it('sends UTF-8 proof for Unicode merchant metadata without a second charge', async () => {
     const { wallet, debits } = setup();
-    const required = challenge();
+    const required = challenge(false);
     required.resource.description = '€ — 東京 🛒';
     const { proofs } = merchant(required);
     const client = new X402Client(wallet);
@@ -213,7 +213,7 @@ describe('x402 funds-safety regressions', () => {
       name: 'X402PaidRequestError', txHash: PAYEE_HASH, txHashes: [PAYEE_HASH, FEE_HASH],
       receipt: { status: 'success', transactionHash: PAYEE_HASH }, retrySafe: false,
     });
-    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + X402_SETTLEMENT_RETRY_WINDOW_MS + 1);
+    vi.spyOn(Date, 'now').mockReturnValue(Date.UTC(2026, 9, 15, 12) + X402_SETTLEMENT_RETRY_WINDOW_MS + 1);
     await expect(client.fetch(URL)).rejects.toMatchObject({ name: 'X402PaidRequestError' });
     expect(debits).toHaveLength(2);
     expect(client.getDailySpendSummary().global).toBe(1007700n);
@@ -288,7 +288,7 @@ describe('x402 funds-safety regressions', () => {
 
   it('bounds confirmed request cache by refusing new intents without evicting live proofs', async () => {
     const { wallet, debits } = setup();
-    merchant(challenge());
+    merchant(challenge(false));
     const client = new X402Client(wallet);
     await client.fetch(URL);
     const entries = (client as any).paymentSettlements as Map<string, unknown>;
@@ -405,7 +405,7 @@ describe('x402 funds-safety regressions', () => {
     expect(debits).toHaveLength(phase === 'fee' ? 1 : 2);
   });
 
-  it.each(['confirmed', 'unknown', 'fee-only'] as const)('rejects changed terms for the same unkeyed request after %s payment', async state => {
+  it.each(['unknown', 'fee-only'] as const)('rejects changed terms for the same unkeyed request after %s payment', async state => {
     const { wallet, debits } = setup();
     const required = challenge();
     merchant(required);
@@ -415,21 +415,20 @@ describe('x402 funds-safety regressions', () => {
         await send(...args);
         throw new Error('RPC response lost');
       });
-    } else if (state === 'fee-only') {
+    } else {
       wallet.publicClient.waitForTransactionReceipt.mockImplementation(async ({ hash }: any) => ({
         status: hash === PAYEE_HASH ? 'reverted' : 'success',
       }));
     }
     const client = new X402Client(wallet);
-    if (state === 'confirmed') expect((await client.fetch(URL)).status).toBe(200);
-    else await expect(client.fetch(URL)).rejects.toThrow();
+    await expect(client.fetch(URL)).rejects.toThrow();
     const debitCount = debits.length;
     required.accepts[0].amount = '2000000';
     await expect(client.fetch(URL)).rejects.toMatchObject({ name: 'X402IntentTermsConflictError' });
     expect(debits).toHaveLength(debitCount);
   });
 
-  it.each(['confirmed', 'pending-fee'] as const)('extends a %s unkeyed payment window when the reissued challenge becomes longer', async state => {
+  it('extends an unresolved unkeyed payment window when the reissued challenge becomes longer', async () => {
     const { wallet, debits } = setup();
     const required = challenge();
     const { proofs } = merchant(required);
@@ -437,31 +436,21 @@ describe('x402 funds-safety regressions', () => {
     let elapsedMs = 0;
     vi.spyOn(Date, 'now').mockImplementation(() => epoch + elapsedMs);
     const client = new X402Client(wallet);
-    if (state === 'pending-fee') {
-      wallet.publicClient.waitForTransactionReceipt.mockRejectedValueOnce(new Error('receipt timeout'));
-      await expect(client.fetch(URL)).rejects.toBeInstanceOf(X402SettlementUnknownError);
-    } else {
-      expect((await client.fetch(URL)).status).toBe(200);
-    }
+    wallet.publicClient.waitForTransactionReceipt.mockRejectedValueOnce(new Error('receipt timeout'));
+    await expect(client.fetch(URL)).rejects.toBeInstanceOf(X402SettlementUnknownError);
 
     elapsedMs = 60_000;
     required.accepts[0].maxTimeoutSeconds = 300;
     expect((await client.fetch(URL)).status).toBe(200);
+    expect(debits.map(debit => debit.amount)).toEqual([7700n, 1000000n]);
+    expect(proofs[proofs.length - 1].payload.replayed).toBe(false);
+
+    // After proof delivery, a later identical unkeyed request is a new purchase.
     elapsedMs = 181_000;
     required.accepts[0].maxTimeoutSeconds = 30;
     expect((await client.fetch(URL)).status).toBe(200);
-    expect(debits.map(debit => debit.amount)).toEqual([7700n, 1000000n]);
-    expect(proofs[proofs.length - 1].payload.replayed).toBe(true);
-
-    // A shorter reissue cannot erase the previously advertised 300s window.
-    elapsedMs = 302_000;
-    expect((await client.fetch(URL)).status).toBe(200);
-    expect(debits.map(debit => debit.amount)).toEqual([7700n, 1000000n]);
-
-    // The last successful replay at t=302 protects the purchase through t=602.
-    elapsedMs = 602_001;
-    expect((await client.fetch(URL)).status).toBe(200);
     expect(debits.map(debit => debit.amount)).toEqual([7700n, 1000000n, 7700n, 1000000n]);
+    expect(proofs[proofs.length - 1].payload.replayed).toBe(false);
   });
 
   it.each([
