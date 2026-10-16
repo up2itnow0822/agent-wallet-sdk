@@ -39,6 +39,9 @@ import {
   scheduleCapsWaitingGate,
   mentionedShas,
   mentionsNonHeadSha,
+  evidenceMentionsNonHeadSha,
+  codeReviewMentionedShas,
+  timelineFacts,
   parseWaiverRecord,
   prefixUniquelyMatchesHead,
   codeReviewCompletedAtMs,
@@ -108,6 +111,14 @@ This comment shows the latest Codex review activity on this pull request.
 | --- | --- | --- | --- |
 | 📝 **Code Review** | ✅ **Completed** <relative-time datetime="2026-10-15T21:22:46.906149Z">2026-10-15T21:22:46.906149Z</relative-time> | \`982551f\` | Manual request |
 `;
+
+const STALE_SECURITY_SUMMARY = PR87_SUMMARY
+  .replace(
+    '"security_review":{"commit_sha":null,"has_any_findings":null,"has_unresolved_findings":null,"status":null}',
+    `"security_review":{"commit_sha":"${OLDER}","has_any_findings":false,"has_unresolved_findings":false,"status":"completed"}`,
+  )
+  + '\n| 🔒 **Security Review** | ✅ **Completed** <relative-time datetime="2026-10-15T20:00:00Z">2026-10-15T20:00:00Z</relative-time> | `'
+  + OLDER.slice(0, 7) + '` | Manual request |\n';
 
 const PR87_RECEIPT = `<!-- codex-review-receipt:v1 -->
 
@@ -341,6 +352,25 @@ describe('PR #87 Codex summary (the rejected case)', () => {
 
   it('fails closed when push/event time is missing (no committer-date fallback)', () => {
     expect(accept(PR87_SUMMARY, {}, { headPushedMs: undefined })).toBe(false);
+  });
+
+  it('ignores a stale Security Review SHA when Code Review is clean on this head', () => {
+    expect(mentionsNonHeadSha(STALE_SECURITY_SUMMARY, HEAD)).toBe(true);
+    expect(codeReviewMentionedShas(STALE_SECURITY_SUMMARY).every(
+      s => shaPrefixMatches(s, HEAD),
+    )).toBe(true);
+    expect(evidenceMentionsNonHeadSha(STALE_SECURITY_SUMMARY, HEAD)).toBe(false);
+    expect(accept(STALE_SECURITY_SUMMARY)).toBe(true);
+    const verdict = evaluatePr(snapshot({
+      comments: [{
+        user: CODEX_BOT,
+        body: STALE_SECURITY_SUMMARY,
+        created_at: '2026-10-15T21:22:45Z',
+        updated_at: '2026-10-15T21:22:47Z',
+      }],
+    }));
+    expect(verdict.conclusion).toBe('success');
+    expect(verdict.summary).toMatch(/no findings/);
   });
 });
 
@@ -1123,7 +1153,8 @@ describe('evaluatePr — Bill-only waiver bound to exact head SHA', () => {
     const scan = {
       labels: [WAIVE_LABEL],
       lastWaiverEvent: labeled,
-      lastHeadMoveMs: Date.parse('2026-10-15T21:00:00Z'),
+      headMovedAfterWaiver: false,
+      headPushedMs: Date.parse('2026-10-15T21:00:00Z'),
       baseChangedMs: 0,
       comments: [],
       headSha: HEAD,
@@ -1147,7 +1178,11 @@ describe('evaluatePr — Bill-only waiver bound to exact head SHA', () => {
     })).toBe(false);
     expect(shouldScanRecordWaiver({
       ...scan,
-      lastHeadMoveMs: Date.parse('2026-10-15T22:10:00Z'),
+      headPushedMs: Date.parse('2026-10-15T22:10:00Z'),
+    })).toBe(false);
+    expect(shouldScanRecordWaiver({
+      ...scan,
+      headPushedMs: undefined,
     })).toBe(false);
     expect(shouldScanRecordWaiver({
       ...scan,
@@ -1157,6 +1192,47 @@ describe('evaluatePr — Bill-only waiver bound to exact head SHA', () => {
       headSha: HEAD, baseRef: 'main', baseSha: BASE_SHA, prNumber: 87,
       actor: BILL, labeledMs: Date.parse(labeled.created_at),
     })).toBe(true);
+  });
+
+  it('does not bind a schedule waiver to a new head after an ordinary push', () => {
+    const labeledOnA = {
+      event: 'labeled',
+      label: { name: WAIVE_LABEL },
+      actor: { login: BILL },
+      created_at: '2026-10-15T22:00:00Z',
+    };
+    const committedAfterLabel = { event: 'committed', sha: HEAD };
+    const facts = timelineFacts([
+      { event: 'committed', sha: OLDER },
+      labeledOnA,
+      committedAfterLabel,
+    ]);
+    expect(facts.headMovedAfterWaiver).toBe(true);
+    expect(committedAfterLabel).not.toHaveProperty('created_at');
+    expect(shouldScanRecordWaiver({
+      labels: [WAIVE_LABEL],
+      lastWaiverEvent: facts.lastWaiverEvent,
+      headMovedAfterWaiver: facts.headMovedAfterWaiver,
+      headPushedMs: Date.parse('2026-10-15T22:10:00Z'),
+      baseChangedMs: 0,
+      comments: [],
+      headSha: HEAD,
+      baseRef: 'main',
+      baseSha: BASE_SHA,
+      prNumber: 87,
+    })).toBe(false);
+    expect(shouldScanRecordWaiver({
+      labels: [WAIVE_LABEL],
+      lastWaiverEvent: labeledOnA,
+      headMovedAfterWaiver: false,
+      headPushedMs: Date.parse('2026-10-15T22:10:00Z'),
+      baseChangedMs: 0,
+      comments: [],
+      headSha: HEAD,
+      baseRef: 'main',
+      baseSha: BASE_SHA,
+      prNumber: 87,
+    })).toBe(false);
   });
 });
 
@@ -1673,8 +1749,14 @@ describe('workflows pin the counted context and never orphan checks.create', () 
     expect(recordBlock).not.toContain('issue_comment');
     expect(contributing).toContain('schedule');
     expect(contributing).toContain('workflow_dispatch');
-    expect(readFileSync(resolve(process.cwd(), 'AGENTS.md'), 'utf8'))
-      .toMatch(/2 November 2026/);
+    expect(contributing).toContain('committed.created_at');
+    const agents = readFileSync(resolve(process.cwd(), 'AGENTS.md'), 'utf8');
+    expect(agents).toMatch(/2 November 2026/);
+    expect(agents).toContain('committed.created_at');
+    const gate = readFileSync(resolve(process.cwd(), 'scripts/review-gate.mjs'), 'utf8');
+    expect(gate).not.toMatch(/event === 'committed'[\s\S]{0,80}&& e\.created_at/);
+    expect(gate).toContain('headMovedAfterWaiver');
+    expect(gate).toContain('evidenceMentionsNonHeadSha');
   });
 
   it('keeps the #88 matcher constants and documents residual ci.yml risk', () => {

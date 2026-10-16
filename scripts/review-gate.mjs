@@ -34,9 +34,12 @@
  * allowed after 2 November 2026: schedule (every 10 minutes) and
  * workflow_dispatch scan the label timeline from the default-branch
  * copy. Bill must be the latest `codex-waived` `labeled` actor after
- * the last head move and base retarget; the comment is written by that
- * trusted run. `pull_request_target` stays a faster path until GitHub
- * blocks it by default. `issue_comment` never records a waiver.
+ * this head's workflow-run / check-suite arrival and after the last
+ * `committed` / force-push timeline event (order, not
+ * `committed.created_at`, which does not exist). The comment is
+ * written by that trusted run. `pull_request_target` stays a faster
+ * path until GitHub blocks it by default. `issue_comment` never
+ * records a waiver.
  * The latest waiver-label timeline event must also be an allow-listed
  * `labeled` event for that same actor, and the persisted record must
  * belong to that labeling (comment at or after the event). Re-applying
@@ -155,6 +158,38 @@ export function mentionsNonHeadSha(body, headSha) {
   return mentionedShas(body).some(s => !shaPrefixMatches(s, headSha));
 }
 
+export function isCodexSummaryBody(body) {
+  return typeof body === 'string' && body.includes(SUMMARY_MARKER);
+}
+
+/**
+ * SHAs that belong to the Code Review being evaluated. Shared Codex
+ * summaries also carry `security_review.commit_sha` and a Security
+ * Review table row that update independently; those must not
+ * disqualify a clean current-head Code Review.
+ */
+export function codeReviewMentionedShas(body) {
+  const found = [];
+  const cr = codeReviewState(body);
+  if (cr && typeof cr.commit_sha === 'string' && /^[0-9a-f]{7,40}$/i.test(cr.commit_sha)) {
+    found.push(cr.commit_sha.toLowerCase());
+  }
+  for (const line of String(body || '').split('\n')) {
+    if (!/\bCode Review\b/.test(line) || /\bSecurity Review\b/.test(line)) continue;
+    const re = /`([0-9a-fA-F]{7,40})`/g;
+    let m;
+    while ((m = re.exec(line)) !== null) found.push(m[1].toLowerCase());
+  }
+  return found;
+}
+
+export function evidenceMentionsNonHeadSha(body, headSha) {
+  if (isCodexSummaryBody(body)) {
+    return codeReviewMentionedShas(body).some(s => !shaPrefixMatches(s, headSha));
+  }
+  return mentionsNonHeadSha(body, headSha);
+}
+
 export function isCleanNoMajorIssuesBody(body) {
   return NO_MAJOR_ISSUES.test(body || '');
 }
@@ -233,7 +268,8 @@ export function evidenceAfterHeadPush(eventMs, headPushedMs, { fullExact = false
 
 /**
  * A Codex issue comment or review-summary body counts as a clean head
- * review when it does not name any other SHA and either:
+ * review when the Code Review evidence (not a leftover Security Review
+ * SHA in the same summary) names this head and either:
  *   - the summary marks Code Review Completed on a unique head-SHA prefix, or
  *   - the body is a "no major issues" receipt that names a unique head-SHA prefix.
  * The comment must be created/updated after GitHub's push/event time for
@@ -277,7 +313,7 @@ export function commentAcceptsCleanHead(comment, ctx) {
 
   if (!(eventMs > baseChangedMs)) return false;
   if (!evidenceAfterHeadPush(eventMs, headPushedMs)) return false;
-  if (mentionsNonHeadSha(body, headSha)) return false;
+  if (evidenceMentionsNonHeadSha(body, headSha)) return false;
   if (summaryMarksCleanHeadCompleted(body, headSha)) {
     return summaryCompletedPrefixIsUnique(body, headSha, uniqueResolve);
   }
@@ -509,23 +545,42 @@ export async function withRetry(fn, opts = {}) {
   throw lastErr;
 }
 
+function isHeadMoveTimelineEvent(event) {
+  return !!event && (event.event === 'committed' || event.event === 'head_ref_force_pushed');
+}
+
+/**
+ * GitHub `committed` timeline events have no top-level `created_at`
+ * (https://docs.github.com/en/rest/using-the-rest-api/issue-event-types#committed).
+ * Do not derive head-move time from that field. Ordinary pushes are
+ * detected by timeline order (`headMovedAfterWaiver`) and by
+ * workflow-run / check-suite `created_at` for the current head.
+ */
 export function timelineFacts(events) {
   let baseChangedMs = 0;
   let lastWaiverEvent = null;
-  let lastHeadMoveMs = 0;
-  for (const e of events || []) {
+  let lastWaiverIndex = -1;
+  let lastHeadMoveIndex = -1;
+  const list = events || [];
+  for (let i = 0; i < list.length; i++) {
+    const e = list[i];
     if (e.event === 'base_ref_changed' && e.created_at) {
       baseChangedMs = Math.max(baseChangedMs, Date.parse(e.created_at));
     }
     if ((e.event === 'labeled' || e.event === 'unlabeled') &&
         e.label && e.label.name === WAIVE_LABEL) {
       lastWaiverEvent = e;
+      lastWaiverIndex = i;
     }
-    if ((e.event === 'committed' || e.event === 'head_ref_force_pushed') && e.created_at) {
-      lastHeadMoveMs = Math.max(lastHeadMoveMs, Date.parse(e.created_at));
+    if (isHeadMoveTimelineEvent(e)) {
+      lastHeadMoveIndex = i;
     }
   }
-  return { baseChangedMs, lastWaiverEvent, lastHeadMoveMs };
+  return {
+    baseChangedMs,
+    lastWaiverEvent,
+    headMovedAfterWaiver: lastHeadMoveIndex > lastWaiverIndex,
+  };
 }
 
 function reviewBodyIsClean(review, headSha, uniqueResolve) {
@@ -605,7 +660,7 @@ export function commentCompletedHeadOutcome(comment, ctx) {
   if (!Number.isFinite(eventMs)) return null;
   if (!(eventMs > (Number(ctx && ctx.baseChangedMs) || 0))) return null;
   if (!evidenceAfterHeadPush(eventMs, ctx && ctx.headPushedMs)) return null;
-  if (mentionsNonHeadSha(body, headSha)) return null;
+  if (evidenceMentionsNonHeadSha(body, headSha)) return null;
   if (commentAcceptsCleanHead(comment, ctx)) {
     return { ms: eventMs, clean: true, dismissed: false, source: 'comment' };
   }
@@ -726,14 +781,17 @@ export function existingWaiverRecordForHead(comments, {
 
 /**
  * Schedule / dispatch may post a waiver only when Bill's latest
- * `codex-waived` event is `labeled` after the last head move and base
- * retarget, and no binding comment yet exists for this sha/base/PR.
- * A leftover label after a new push does not mint a new waiver.
+ * `codex-waived` event is `labeled` after this head's trusted arrival
+ * (workflow-run / check-suite `created_at`) and after any later
+ * `committed` / `head_ref_force_pushed` timeline event. Do not use
+ * `committed.created_at` — that field does not exist. A leftover
+ * label after a new push does not mint a new waiver.
  */
 export function shouldScanRecordWaiver({
   labels,
   lastWaiverEvent,
-  lastHeadMoveMs,
+  headMovedAfterWaiver,
+  headPushedMs,
   baseChangedMs,
   comments,
   headSha,
@@ -747,8 +805,11 @@ export function shouldScanRecordWaiver({
   if (!WAIVER_ACTORS.has(actor)) return false;
   const eventMs = Date.parse(lastWaiverEvent.created_at || 0);
   if (!Number.isFinite(eventMs)) return false;
+  if (headMovedAfterWaiver) return false;
+  const pushed = Number(headPushedMs);
+  if (!Number.isFinite(pushed)) return false;
+  if (!(eventMs > pushed)) return false;
   if (baseChangedMs && eventMs <= baseChangedMs) return false;
-  if (lastHeadMoveMs && eventMs <= lastHeadMoveMs) return false;
   if (!fullSha(headSha) || !baseRef || !fullSha(baseSha)) return false;
   return !existingWaiverRecordForHead(comments, {
     headSha,
@@ -810,10 +871,12 @@ export async function recordTrustedWaivers({
       ]);
       const facts = timelineFacts(timeline);
       const labels = (pr.labels || []).map(l => l.name);
+      const headPushedMs = await loadHeadPushMs(client, owner, repo, headSha);
       if (!shouldScanRecordWaiver({
         labels,
         lastWaiverEvent: facts.lastWaiverEvent,
-        lastHeadMoveMs: facts.lastHeadMoveMs,
+        headMovedAfterWaiver: facts.headMovedAfterWaiver,
+        headPushedMs,
         baseChangedMs: facts.baseChangedMs,
         comments,
         headSha,

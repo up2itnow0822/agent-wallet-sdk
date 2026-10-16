@@ -41,13 +41,16 @@
   runs on `schedule` (every 10 minutes) and `workflow_dispatch` from the
   default-branch copy of `.github/workflows/review-gate.yml`. Those
   events read the label timeline: Bill (`up2itnow0822`) must be the
-  latest `codex-waived` `labeled` actor after the last head move and
-  base retarget, and the binding comment is written by that trusted run
-  (head SHA + base ref + base SHA + PR). `pull_request_target` stays a
-  faster path while GitHub still allows it. `issue_comment` never
-  records a waiver. Evaluate accepts a cited run only when its event is
-  `pull_request_target`, `schedule`, or `workflow_dispatch`, the path is
-  this workflow file, and `record-waiver` succeeded.
+  latest `codex-waived` `labeled` actor after this head's trusted
+  arrival (pull_request workflow-run / check-suite `created_at`) and
+  after any later `committed` or `head_ref_force_pushed` timeline
+  event. Do not use `committed.created_at` — that field does not exist
+  on GitHub's committed timeline events. A leftover label after a new
+  push does not mint a binding for the new SHA. `pull_request_target`
+  stays a faster path while GitHub still allows it. `issue_comment`
+  never records a waiver. Evaluate accepts a cited run only when its
+  event is `pull_request_target`, `schedule`, or `workflow_dispatch`,
+  the path is this workflow file, and `record-waiver` succeeded.
 
 ## Verification
 

@@ -81,9 +81,11 @@ that `run` and requires:
 `record-waiver` does not depend on `pull_request_target` remaining allowed
 after 2 November 2026. Schedule (every 10 minutes) and `workflow_dispatch`
 scan open PRs from the default-branch copy and post a binding comment only
-when Bill's latest `codex-waived` timeline event is `labeled` after the
-last head move and base retarget. `pull_request_target` stays a faster
-path while GitHub still allows it. `issue_comment` never records a waiver.
+when Bill's latest `codex-waived` timeline event is `labeled` after this
+head's workflow-run / check-suite arrival (not `committed.created_at`,
+which GitHub does not set) and after any later `committed` or force-push
+timeline event. `pull_request_target` stays a faster path while GitHub
+still allows it. `issue_comment` never records a waiver.
 
 The latest waiver-label timeline event must be an allow-listed `labeled`
 event (Bill) whose actor matches the persisted record, and the record
