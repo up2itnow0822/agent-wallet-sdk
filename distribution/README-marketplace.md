@@ -1,3 +1,6 @@
+> [!WARNING]
+> **Paused for security maintenance. Do not use in production.**
+
 # 🔐 AgentWallet SDK — Non-Custodial Wallets for AI Agents
 
 [![npm version](https://img.shields.io/npm/v/agentwallet-sdk.svg)](https://www.npmjs.com/package/agentwallet-sdk)

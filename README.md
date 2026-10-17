@@ -1,3 +1,6 @@
+> [!WARNING]
+> **Paused for security maintenance. Do not use in production.**
+
 # AgentWallet SDK
 
 [![npm](https://img.shields.io/npm/v/agentwallet-sdk?style=flat-square)](https://www.npmjs.com/package/agentwallet-sdk)
