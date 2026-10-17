@@ -84,6 +84,15 @@ npm install @solana/web3.js @solana/spl-token
 `@solana/web3.js` supports native SOL operations. Install
 `@solana/spl-token` as well when using SPL-token balance or transfer helpers.
 
+### Optional: check x402 terms before paying
+
+`withSpotCheck` wraps an x402 client config with an opt-in check from [x402-spotcheck](https://github.com/withgrokbot/x402-spotcheck) (optional peer, `npm i github:withgrokbot/x402-spotcheck#v1.3.0`). Before paying, it declines terms that don't match (e.g. a price or payTo other than listed). After paying (`afterPay: true`), it asks whether a failed transfer landed. If the peer is missing or errors, payments proceed unchanged.
+
+```ts
+import { createX402Fetch, withSpotCheck } from 'agentwallet-sdk';
+const x402Fetch = createX402Fetch(wallet, withSpotCheck({ globalDailyLimit: 10_000_000n }, { afterPay: true }));
+```
+
 ## Connect to an existing smart wallet
 
 The SDK requires a viem wallet client. This budget-reading example also

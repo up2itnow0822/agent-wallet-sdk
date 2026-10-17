@@ -19,6 +19,8 @@ export {
   x402DebitAmount,
 } from './fee.js';
 export { createX402Client, createX402Fetch, wrapWithX402 } from './middleware.js';
+export { withSpotCheck } from './spotcheck.js';
+export type { SpotCheckOptions, SpotCheckDecision } from './spotcheck.js';
 export type {
   X402PaymentRequired,
   X402PaymentRequirements,

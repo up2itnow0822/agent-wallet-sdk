@@ -46,6 +46,7 @@ export {
   createX402Client,
   createX402Fetch,
   wrapWithX402,
+  withSpotCheck,
   USDC_ADDRESSES,
   DEFAULT_SUPPORTED_NETWORKS,
   X402_PROTOCOL_FEE_BPS,
