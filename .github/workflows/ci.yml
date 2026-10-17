@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, edited, ready_for_review]
   workflow_dispatch:
 
 permissions:
@@ -29,3 +30,49 @@ jobs:
         run: npm test
       - name: Lint source
         run: npm run lint
+
+  # Required check name. GitHub Actions records this job on the pull_request
+  # check suite — the suite ruleset 23222371 actually counts. Do not replace
+  # this with checks.create (that API attaches to the oldest Actions suite,
+  # which is often pull_request_target and then merge returns 405).
+  #
+  # The evaluator is fetched from the PR *base* SHA (main tip at
+  # open/sync), never from the PR checkout. A PR can still edit these
+  # steps in its own ci.yml (residual risk; see CONTRIBUTING.md).
+  review-gate:
+    name: review-gate
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+      actions: read
+      checks: read
+    steps:
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Fetch trusted evaluator from the base SHA
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          if ! echo "$BASE_SHA" | grep -Eq '^[0-9a-fA-F]{40}$'; then
+            echo "Invalid base SHA; fail-closed."
+            exit 1
+          fi
+          curl -fsSL \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github.raw" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/scripts/review-gate.mjs?ref=${BASE_SHA}" \
+            -o "${RUNNER_TEMP}/review-gate.mjs"
+          test -s "${RUNNER_TEMP}/review-gate.mjs"
+      - name: Evaluate Codex review on head
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node "${RUNNER_TEMP}/review-gate.mjs" evaluate
