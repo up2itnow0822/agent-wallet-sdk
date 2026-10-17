@@ -122,12 +122,12 @@ export const MESSAGE_TRANSMITTER_V2: Record<EVMBridgeChain, Address> = {
 
 /**
  * CCTP V2 minFinalityThreshold values.
- * - FAST (0): ~12 seconds. Circle fast attestation.
- * - FINALIZED (1000): Full on-chain finality.
+ * - FAST (1000): Confirmed source-chain blocks.
+ * - FINALIZED (2000): Full source-chain finality (Standard Transfer).
  */
 export const FINALITY_THRESHOLD = {
-  FAST: 0,
-  FINALIZED: 1000,
+  FAST: 1000,
+  FINALIZED: 2000,
 } as const;
 
 /** Circle IRIS attestation API base URL */
@@ -144,11 +144,14 @@ export interface BridgeOptions {
   destinationAddress?: Address;
   destinationRpcUrl?: string;
   attestationApiUrl?: string;
+  /** Existing destination mint, if a prior receiveMessage hash was retained. */
+  mintTxHash?: Hash;
 }
 
 /** Result of a bridge.burn() operation */
 export interface BurnResult {
   burnTxHash: Hash;
+  /** Provisional source nonce. V2 assigns the final nonce during attestation. */
   nonce: bigint;
   messageHash: Hex;
   messageBytes: Hex;
@@ -156,14 +159,41 @@ export interface BurnResult {
   destinationDomain: number;
 }
 
+/** Details retained after a burn submission so it can be resumed without burning again. */
+export interface BridgeRecovery {
+  /** EVM transaction hash or Solana transaction signature. */
+  burnTxHash: string;
+  sourceDomain: number;
+  destinationDomain?: number;
+  /** Original source-event message, when the burn receipt was available. */
+  messageBytes?: Hex;
+  messageHash?: Hex;
+  /** Destination submission, if receipt retrieval failed after mint broadcast. */
+  mintTxHash?: Hash;
+}
+
 /** Circle attestation status */
 export type AttestationStatus = 'pending_confirmations' | 'complete' | 'error';
 
-/** Circle IRIS API response for an attestation */
+/** Circle IRIS V2 API response. Always validate untrusted JSON before using it. */
 export interface AttestationResponse {
-  status: AttestationStatus;
-  attestation: Hex | null;
-  error?: string;
+  sourceTxHash: string;
+  messages: Array<{
+    status: AttestationStatus;
+    cctpVersion: number;
+    message: Hex;
+    attestation: Hex | 'PENDING' | null;
+    error?: string;
+  }>;
+}
+
+/** Signed V2 message and attestation; submit this message instead of source-event bytes. */
+export interface AttestedMessage {
+  burnTxHash: string;
+  message: Hex;
+  messageHash: Hex;
+  attestation: Hex;
+  nonce: bigint;
 }
 
 /** Result of the full EVM↔EVM bridge() operation */
@@ -188,4 +218,5 @@ export type BridgeErrorCode =
   | 'ATTESTATION_ERROR'
   | 'MINT_FAILED'
   | 'INVALID_AMOUNT'
+  | 'INVALID_RECIPIENT'
   | 'NO_WALLET_CLIENT';

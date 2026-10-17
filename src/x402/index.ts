@@ -6,10 +6,13 @@ export {
   X402SettlementRevertedError,
   X402SettlementQueuedError,
   X402SettlementUnknownError,
+  X402PaidRequestError,
   X402SettlementBacklogError,
   X402IntentTermsConflictError,
   x402SettlementReceiptIsQueued,
   X402_TRANSACTION_QUEUED_TOPIC,
+  encodeX402PaymentHeader,
+  decodeX402PaymentHeader,
 } from './client.js';
 export { X402BudgetTracker } from './budget.js';
 export {
@@ -19,6 +22,7 @@ export {
   x402DebitAmount,
 } from './fee.js';
 export { createX402Client, createX402Fetch, wrapWithX402 } from './middleware.js';
+export type { X402Fetch } from './middleware.js';
 export type {
   X402PaymentRequired,
   X402PaymentRequirements,

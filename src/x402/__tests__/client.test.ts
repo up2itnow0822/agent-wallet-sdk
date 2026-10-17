@@ -261,8 +261,8 @@ describe('X402Client', () => {
     it('selects Base USDC exact scheme when base is in supported networks', () => {
       const client = new X402Client(mockWallet, { supportedNetworks: ['base:8453'] });
       const accepts: X402PaymentRequirements[] = [
-        { scheme: 'exact', network: 'ethereum:1', asset: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48', amount: '1000000', payTo: '0x1', maxTimeoutSeconds: 30, extra: {} },
-        { scheme: 'exact', network: 'base:8453', asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', amount: '1000000', payTo: '0x1', maxTimeoutSeconds: 30, extra: {} },
+        { scheme: 'exact', network: 'ethereum:1', asset: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48', amount: '1000000', payTo: '0x1111111111111111111111111111111111111111', maxTimeoutSeconds: 30, extra: {} },
+        { scheme: 'exact', network: 'base:8453', asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', amount: '1000000', payTo: '0x1111111111111111111111111111111111111111', maxTimeoutSeconds: 30, extra: {} },
       ];
 
       const selected = client.selectPaymentOption(accepts);
@@ -273,8 +273,8 @@ describe('X402Client', () => {
     it('selects Arbitrum USDC when the wallet is on Arbitrum', () => {
       const client = new X402Client(walletOnChain(42161), { supportedNetworks: ['arbitrum:42161'] });
       const accepts: X402PaymentRequirements[] = [
-        { scheme: 'exact', network: 'base:8453', asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', amount: '1000000', payTo: '0x1', maxTimeoutSeconds: 30, extra: {} },
-        { scheme: 'exact', network: 'arbitrum:42161', asset: '0xaf88d065e77c8cC2239327C5EDb3A432268e5831', amount: '1000000', payTo: '0x1', maxTimeoutSeconds: 30, extra: {} },
+        { scheme: 'exact', network: 'base:8453', asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', amount: '1000000', payTo: '0x1111111111111111111111111111111111111111', maxTimeoutSeconds: 30, extra: {} },
+        { scheme: 'exact', network: 'arbitrum:42161', asset: '0xaf88d065e77c8cC2239327C5EDb3A432268e5831', amount: '1000000', payTo: '0x1111111111111111111111111111111111111111', maxTimeoutSeconds: 30, extra: {} },
       ];
 
       const selected = client.selectPaymentOption(accepts);
@@ -285,7 +285,7 @@ describe('X402Client', () => {
     it('selects Optimism USDC when the wallet is on Optimism', () => {
       const client = new X402Client(walletOnChain(10), { supportedNetworks: ['optimism:10'] });
       const accepts: X402PaymentRequirements[] = [
-        { scheme: 'exact', network: 'optimism:10', asset: '0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85', amount: '2000000', payTo: '0x1', maxTimeoutSeconds: 30, extra: {} },
+        { scheme: 'exact', network: 'optimism:10', asset: '0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85', amount: '2000000', payTo: '0x1111111111111111111111111111111111111111', maxTimeoutSeconds: 30, extra: {} },
       ];
 
       const selected = client.selectPaymentOption(accepts);
@@ -296,7 +296,7 @@ describe('X402Client', () => {
     it('selects Polygon USDC when the wallet is on Polygon', () => {
       const client = new X402Client(walletOnChain(137), { supportedNetworks: ['polygon:137'] });
       const accepts: X402PaymentRequirements[] = [
-        { scheme: 'exact', network: 'polygon:137', asset: '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359', amount: '500000', payTo: '0x1', maxTimeoutSeconds: 30, extra: {} },
+        { scheme: 'exact', network: 'polygon:137', asset: '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359', amount: '500000', payTo: '0x1111111111111111111111111111111111111111', maxTimeoutSeconds: 30, extra: {} },
       ];
 
       const selected = client.selectPaymentOption(accepts);
@@ -309,7 +309,7 @@ describe('X402Client', () => {
         supportedNetworks: ['base:8453', 'ethereum:1', 'arbitrum:42161'],
       });
       const accepts: X402PaymentRequirements[] = [
-        { scheme: 'exact', network: 'arbitrum:42161', asset: '0xaf88d065e77c8cC2239327C5EDb3A432268e5831', amount: '1000000', payTo: '0x1', maxTimeoutSeconds: 30, extra: {} },
+        { scheme: 'exact', network: 'arbitrum:42161', asset: '0xaf88d065e77c8cC2239327C5EDb3A432268e5831', amount: '1000000', payTo: '0x1111111111111111111111111111111111111111', maxTimeoutSeconds: 30, extra: {} },
       ];
 
       expect(client.selectPaymentOption(accepts)).toBeNull();
@@ -339,7 +339,7 @@ describe('X402Client', () => {
     it('returns null when the wallet has no chain id', () => {
       const client = new X402Client({} as any, { supportedNetworks: ['base:8453'] });
       const accepts: X402PaymentRequirements[] = [
-        { scheme: 'exact', network: 'base:8453', asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', amount: '1000000', payTo: '0x1', maxTimeoutSeconds: 30, extra: {} },
+        { scheme: 'exact', network: 'base:8453', asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', amount: '1000000', payTo: '0x1111111111111111111111111111111111111111', maxTimeoutSeconds: 30, extra: {} },
       ];
 
       expect(client.selectPaymentOption(accepts)).toBeNull();
@@ -348,8 +348,8 @@ describe('X402Client', () => {
     it('prefers lowest amount among compatible options', () => {
       const client = new X402Client(mockWallet, { supportedNetworks: ['base:8453'] });
       const accepts: X402PaymentRequirements[] = [
-        { scheme: 'exact', network: 'base:8453', asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', amount: '5000000', payTo: '0x1', maxTimeoutSeconds: 30, extra: {} },
-        { scheme: 'exact', network: 'base:8453', asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', amount: '1000000', payTo: '0x1', maxTimeoutSeconds: 30, extra: {} },
+        { scheme: 'exact', network: 'base:8453', asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', amount: '5000000', payTo: '0x1111111111111111111111111111111111111111', maxTimeoutSeconds: 30, extra: {} },
+        { scheme: 'exact', network: 'base:8453', asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', amount: '1000000', payTo: '0x1111111111111111111111111111111111111111', maxTimeoutSeconds: 30, extra: {} },
       ];
 
       const selected = client.selectPaymentOption(accepts);
@@ -368,7 +368,7 @@ describe('X402Client', () => {
     it('returns null when network matches but asset is not supported USDC', () => {
       const client = new X402Client(mockWallet, { supportedNetworks: ['base:8453'] });
       const accepts: X402PaymentRequirements[] = [
-        { scheme: 'exact', network: 'base:8453', asset: '0xDeAdBeEfDeAdBeEfDeAdBeEfDeAdBeEfDeAdBeEf', amount: '1000000', payTo: '0x1', maxTimeoutSeconds: 30, extra: {} },
+        { scheme: 'exact', network: 'base:8453', asset: '0xDeAdBeEfDeAdBeEfDeAdBeEfDeAdBeEfDeAdBeEf', amount: '1000000', payTo: '0x1111111111111111111111111111111111111111', maxTimeoutSeconds: 30, extra: {} },
       ];
 
       // Asset is not the known USDC address — should be rejected
@@ -378,8 +378,8 @@ describe('X402Client', () => {
     it('prefers exact scheme over others', () => {
       const client = new X402Client(mockWallet, { supportedNetworks: ['base:8453'] });
       const accepts: X402PaymentRequirements[] = [
-        { scheme: 'upto', network: 'base:8453', asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', amount: '500000', payTo: '0x1', maxTimeoutSeconds: 30, extra: {} },
-        { scheme: 'exact', network: 'base:8453', asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', amount: '1000000', payTo: '0x1', maxTimeoutSeconds: 30, extra: {} },
+        { scheme: 'upto', network: 'base:8453', asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', amount: '500000', payTo: '0x1111111111111111111111111111111111111111', maxTimeoutSeconds: 30, extra: {} },
+        { scheme: 'exact', network: 'base:8453', asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', amount: '1000000', payTo: '0x1111111111111111111111111111111111111111', maxTimeoutSeconds: 30, extra: {} },
       ];
 
       const selected = client.selectPaymentOption(accepts);
@@ -389,7 +389,7 @@ describe('X402Client', () => {
     it('refuses upto-only offers instead of transferring the authorization cap', () => {
       const client = new X402Client(mockWallet, { supportedNetworks: ['base:8453'] });
       const accepts: X402PaymentRequirements[] = [
-        { scheme: 'upto', network: 'base:8453', asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', amount: '10000000', payTo: '0x1', maxTimeoutSeconds: 30, extra: {} },
+        { scheme: 'upto', network: 'base:8453', asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', amount: '10000000', payTo: '0x1111111111111111111111111111111111111111', maxTimeoutSeconds: 30, extra: {} },
       ];
 
       expect(client.selectPaymentOption(accepts)).toBeNull();
@@ -780,6 +780,67 @@ describe('X402Client retry idempotency', () => {
     expect(logs[0].idempotencyKey).toBe(logs[1].idempotencyKey);
     expect(client.getDailySpendSummary().global).toBe(1_007_700n);
   });
+
+  it.each(['status', 'throw'] as const)(
+    'does not let a late proof-delivery %s overwrite a recorded success',
+    async (failureMode) => {
+      let release: (value: { txHash: `0x${string}` }) => void = () => {};
+      const gate = new Promise<{ txHash: `0x${string}` }>((resolve) => {
+        release = resolve;
+      });
+      vi.spyOn(X402Client.prototype as any, 'executePayment').mockReturnValue(gate);
+
+      const proofs: Array<(result: 'ok' | 'fail') => void> = [];
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+        const headers = new Headers(init?.headers);
+        if (headers.get('X-PAYMENT')) {
+          const outcome = new Promise<'ok' | 'fail'>((resolve) => {
+            proofs.push(resolve);
+          });
+          if ((await outcome) === 'ok') {
+            return new Response('paid', { status: 200 });
+          }
+          if (failureMode === 'throw') {
+            throw new TypeError('proof delivery reset');
+          }
+          return new Response('unavailable', { status: 503 });
+        }
+        return new Response(null, {
+          status: 402,
+          headers: { 'payment-required': btoa(JSON.stringify(paymentRequired())) },
+        });
+      });
+      const client = new X402Client(mockWallet);
+
+      const pending = Promise.allSettled([
+        client.fetch(url, { method: 'POST' }),
+        client.fetch(url, { method: 'POST' }),
+      ]);
+      release({ txHash });
+      await vi.waitFor(() => {
+        expect(proofs).toHaveLength(2);
+      });
+      proofs[0]('ok');
+      await vi.waitFor(() => {
+        const entry = [...(client as any).paymentSettlements.values()][0];
+        expect(entry?.deliveryFailed).toBe(false);
+        expect(entry?.pendingDeliveries).toBe(1);
+      });
+      proofs[1]('fail');
+      await pending;
+
+      const entries = [...(client as any).paymentSettlements.values()];
+      expect(entries).toHaveLength(1);
+      expect(entries[0].status).toBe('confirmed');
+      expect(entries[0].deliveryFailed).toBe(false);
+      expect(entries[0].pendingDeliveries).toBe(0);
+      expect(entries[0].expiresAt).toBeGreaterThan(Date.now());
+
+      vi.spyOn(Date, 'now').mockReturnValue(Date.now() + X402_SETTLEMENT_RETRY_WINDOW_MS + 1);
+      (client as any).pruneSettlements();
+      expect((client as any).paymentSettlements.size).toBe(0);
+    },
+  );
 
   it('single-flights onBeforePayment and execute for concurrent same-intent retries', async () => {
     let releasePolicy: (value: boolean) => void = () => {};
@@ -1479,7 +1540,7 @@ describe('X402Client retry idempotency', () => {
 
   it('expires a successful settlement after the retry window',
     async () => {
-      vi.useFakeTimers();
+      vi.useFakeTimers({ now: Date.UTC(2026, 9, 15, 12) });
       const executeSpy = vi.spyOn(X402Client.prototype as any, 'executePayment')
         .mockResolvedValue({ txHash });
       mock402ThenPaid();
@@ -1499,7 +1560,7 @@ describe('X402Client retry idempotency', () => {
   );
 
   it('rechecks policy when an expired settlement is removed before reuse', async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ now: Date.UTC(2026, 9, 15, 12) });
     const executeSpy = vi.spyOn(X402Client.prototype as any, 'executePayment')
       .mockResolvedValue({ txHash });
     const approvals: string[] = [];
@@ -2569,14 +2630,14 @@ describe('X402Client retry idempotency', () => {
     expect(client.getDailySpendSummary().global).toBe(1_007_700n);
   });
 
-  it('releases the reservation when execution throws before a hash is returned', async () => {
+  it('releases the reservation for an explicit pre-submission payment failure', async () => {
     const executeSpy = vi.spyOn(X402Client.prototype as any, 'executePayment')
-      .mockRejectedValueOnce(new Error('rpc down'))
+      .mockRejectedValueOnce(new X402PaymentError('budget read failed before submission', paymentRequired().accepts[0]))
       .mockResolvedValue({ txHash });
     mock402ThenPaid();
     const client = new X402Client(mockWallet, { globalDailyLimit: 1_007_700n });
 
-    await expect(client.fetch(url, { method: 'POST' })).rejects.toThrow(/rpc down/);
+    await expect(client.fetch(url, { method: 'POST' })).rejects.toThrow(/before submission/);
     expect(client.getDailySpendSummary().global).toBe(0n);
     expect(client.budgetTracker.getReservedSummary().global).toBe(0n);
 
@@ -2620,7 +2681,34 @@ describe('X402Client retry idempotency', () => {
       .not.toBe(buildX402PaymentIdempotencyKey('POST', url, colliding));
   });
 
-  it('pays unkeyed challenges on runtimes without crypto.randomUUID', async () => {
+  it('pays a later identical unkeyed request after the first proof is delivered', async () => {
+    const executeSpy = vi.spyOn(X402Client.prototype as any, 'executePayment')
+      .mockResolvedValue({ txHash });
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+      const headers = new Headers(init?.headers);
+      if (headers.get('X-PAYMENT')) {
+        return new Response('paid', { status: 200 });
+      }
+      const unkeyed = paymentRequired();
+      delete (unkeyed.accepts[0] as { extra?: unknown }).extra;
+      return new Response(null, {
+        status: 402,
+        headers: { 'payment-required': btoa(JSON.stringify(unkeyed)) },
+      });
+    });
+    const client = new X402Client(mockWallet, { globalDailyLimit: 2_015_400n });
+
+    expect((await client.fetch(url, { method: 'POST' })).status).toBe(200);
+    expect((await client.fetch(url, { method: 'POST' })).status).toBe(200);
+    expect(executeSpy).toHaveBeenCalledTimes(2);
+    const logs = client.getTransactionLog();
+    expect(logs).toHaveLength(2);
+    expect(logs[0].replayed).toBe(false);
+    expect(logs[1].replayed).toBe(false);
+    expect(client.getDailySpendSummary().global).toBe(2_015_400n);
+  });
+
+  it('pays later unkeyed requests on runtimes without crypto.randomUUID', async () => {
     const originalCrypto = Object.getOwnPropertyDescriptor(globalThis, 'crypto');
     Object.defineProperty(globalThis, 'crypto', { value: undefined, configurable: true });
     try {
@@ -2638,14 +2726,14 @@ describe('X402Client retry idempotency', () => {
           headers: { 'payment-required': btoa(JSON.stringify(unkeyed)) },
         });
       });
-      const client = new X402Client(mockWallet);
+      const client = new X402Client(mockWallet, { globalDailyLimit: 2_015_400n });
 
       expect((await client.fetch(url, { method: 'POST' })).status).toBe(200);
       expect((await client.fetch(url, { method: 'POST' })).status).toBe(200);
       expect(executeSpy).toHaveBeenCalledTimes(2);
       const logs = client.getTransactionLog();
       expect(logs).toHaveLength(2);
-      expect(logs[0].idempotencyKey).not.toBe(logs[1].idempotencyKey);
+      expect(logs.every((log) => log.replayed === false)).toBe(true);
     } finally {
       if (originalCrypto) {
         Object.defineProperty(globalThis, 'crypto', originalCrypto);

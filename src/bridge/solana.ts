@@ -30,11 +30,12 @@ import {
   TOKEN_MESSENGER_V2,
   MESSAGE_TRANSMITTER_V2 as MESSAGE_TRANSMITTER_V2_MAP,
   CIRCLE_ATTESTATION_API,
-  MAX_ATTESTATION_POLLS,
-  ATTESTATION_POLL_INTERVAL_MS,
   FINALITY_THRESHOLD,
+  type BridgeRecovery,
   type EVMBridgeChain,
 } from './types.js';
+import { BridgeError } from './errors.js';
+import { assertMessageFields, evmMintRecipient, extractBurnResult, parseCctpMessage, pollForAttestation } from './messages.js';
 
 // ─── Solana Constants ───
 
@@ -90,11 +91,14 @@ function solanaPubkeyToBytes32(base58Address: string): Hex {
   // Dynamic import for optional @solana/web3.js
   // We manually decode base58 here to avoid requiring the dependency at import time.
   const ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+  if (base58Address.length < 32 || base58Address.length > 44) {
+    throw new SolanaBridgeError('INVALID_RECIPIENT', 'Expected a canonical 32-byte Solana public key.');
+  }
   const bytes = new Uint8Array(32);
   let intVal = 0n;
   for (const char of base58Address) {
     const digit = BigInt(ALPHABET.indexOf(char));
-    if (digit < 0n) throw new Error(`SolanaBridge: Invalid base58 character '${char}' in address.`);
+    if (digit < 0n) throw new SolanaBridgeError('INVALID_RECIPIENT', `Invalid base58 character '${char}' in address.`);
     intVal = intVal * 58n + digit;
   }
   // Write to 32-byte big-endian buffer
@@ -102,8 +106,11 @@ function solanaPubkeyToBytes32(base58Address: string): Hex {
     bytes[i] = Number(intVal & 0xffn);
     intVal >>= 8n;
   }
-  if (intVal !== 0n) throw new Error(`SolanaBridge: Address value overflows 32 bytes.`);
+  if (intVal !== 0n) throw new SolanaBridgeError('INVALID_RECIPIENT', 'Address value overflows 32 bytes.');
   const hex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+  if (bytes32ToSolanaPubkey(`0x${hex}`) !== base58Address) {
+    throw new SolanaBridgeError('INVALID_RECIPIENT', 'Expected a canonical 32-byte Solana public key.');
+  }
   return `0x${hex}` as Hex;
 }
 
@@ -114,7 +121,7 @@ function solanaPubkeyToBytes32(base58Address: string): Hex {
 export function bytes32ToSolanaPubkey(bytes32: Hex): string {
   const ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
   const hex = bytes32.startsWith('0x') ? bytes32.slice(2) : bytes32;
-  if (hex.length !== 64) throw new Error(`SolanaBridge: Expected 32-byte hex (64 chars), got ${hex.length}.`);
+  if (!/^[0-9a-fA-F]{64}$/.test(hex)) throw new Error('SolanaBridge: Expected a 32-byte hex value.');
   let intVal = BigInt('0x' + hex);
   let result = '';
   while (intVal > 0n) {
@@ -122,19 +129,24 @@ export function bytes32ToSolanaPubkey(bytes32: Hex): string {
     intVal /= 58n;
     result = ALPHABET[rem] + result;
   }
-  return result || '1';
+  const leadingZeroBytes = (hex.match(/^(?:00)*/)?.[0].length ?? 0) / 2;
+  return '1'.repeat(leadingZeroBytes) + result;
 }
 
 // ─── EVM→Solana Bridge ───
 
 export interface EVMToSolanaOptions {
-  /** Solana recipient address (base58). Defaults to the EVM signer's address re-encoded — usually wrong; always specify. */
+  /** Existing Solana USDC token account (base58), not its wallet owner. */
   solanaRecipient: string;
+  /** Solana RPC endpoint used to verify the USDC token account before burning. */
+  solanaRpcUrl?: string;
+  /** Resume this existing EVM burn transaction instead of approving or burning again. */
+  burnTxHash?: Hash;
   /** EVM source chain. Defaults to 'base'. */
   fromChain?: EVMBridgeChain;
   /** Optional EVM RPC URL override. */
   evmRpcUrl?: string;
-  /** Finality threshold: FAST (0) or FINALIZED (1000). Default: FAST. */
+  /** Finality threshold: FAST (1000) or FINALIZED (2000). Default: FAST. */
   minFinalityThreshold?: number;
   /** Max bridge fee in USDC base units. Default: 0 (no fee). */
   maxFee?: bigint;
@@ -145,9 +157,9 @@ export interface EVMToSolanaOptions {
 export interface EVMToSolanaResult {
   /** EVM burn transaction hash */
   burnTxHash: Hash;
-  /** Circle message hash (used to poll for attestation) */
+  /** Hash of the returned attested message. Polling uses burnTxHash. */
   messageHash: Hex;
-  /** Raw CCTP message bytes (for manual receiveMessage on Solana) */
+  /** Attested CCTP V2 message bytes (for manual receiveMessage on Solana) */
   messageBytes: Hex;
   /** Circle attestation signature (for receiveMessage on Solana) */
   attestation: Hex;
@@ -193,8 +205,15 @@ export async function bridgeEVMToSolana(
     throw new SolanaBridgeError('INVALID_RECIPIENT', 'solanaRecipient (base58 Solana address) is required.');
   }
 
-  // Encode Solana address as 32-byte CCTP mint recipient
-  const mintRecipient = solanaPubkeyToBytes32(options.solanaRecipient);
+  // Circle requires an existing USDC token account, rather than its wallet owner.
+  let mintRecipient: Hex;
+  try {
+    mintRecipient = solanaPubkeyToBytes32(options.solanaRecipient);
+    await validateSolanaTokenAccount(options.solanaRecipient, options.solanaRpcUrl ?? SOLANA_DEFAULT_RPC);
+  } catch (error) {
+    if (options.burnTxHash) throw withSolanaRecovery(error, { burnTxHash: options.burnTxHash, sourceDomain: CCTP_DOMAIN_IDS[fromChain], destinationDomain: SOLANA_CCTP_DOMAIN });
+    throw error;
+  }
 
   // Zero destinationCaller = any relayer can submit on Solana
   const destinationCaller = pad('0x0' as Hex, { size: 32 });
@@ -208,67 +227,49 @@ export async function bridgeEVMToSolana(
   const usdcAddress = USDC_CONTRACT[fromChain];
   const messengerAddress = TOKEN_MESSENGER_V2[fromChain];
 
-  // Approve USDC if needed
-  const usdcRead = getContract({ address: usdcAddress, abi: ERC20BridgeAbi, client: publicClient });
-  const currentAllowance = await usdcRead.read.allowance([account.address, messengerAddress]) as bigint;
-  if (currentAllowance < amount) {
-    const usdcWrite = getContract({
-      address: usdcAddress,
-      abi: ERC20BridgeAbi,
-      client: { public: publicClient, wallet: walletClient },
-    });
-    const approveTxHash = await usdcWrite.write.approve([messengerAddress, amount], {
-      account,
-      chain: VIEM_CHAINS[fromChain],
-    });
-    const approveReceipt = await publicClient.waitForTransactionReceipt({ hash: approveTxHash });
-    if (approveReceipt.status !== 'success') {
-      throw new SolanaBridgeError('INSUFFICIENT_ALLOWANCE', `USDC approve failed (tx: ${approveTxHash}).`);
+  let burnTxHash = options.burnTxHash;
+  if (!burnTxHash) {
+    const usdcRead = getContract({ address: usdcAddress, abi: ERC20BridgeAbi, client: publicClient });
+    const currentAllowance = await usdcRead.read.allowance([account.address, messengerAddress]) as bigint;
+    if (currentAllowance < amount) {
+      const usdcWrite = getContract({ address: usdcAddress, abi: ERC20BridgeAbi, client: { public: publicClient, wallet: walletClient } });
+      const approveTxHash = await usdcWrite.write.approve([messengerAddress, amount], { account, chain: VIEM_CHAINS[fromChain] });
+      const approveReceipt = await publicClient.waitForTransactionReceipt({ hash: approveTxHash });
+      if (approveReceipt.status !== 'success') {
+        throw new SolanaBridgeError('INSUFFICIENT_ALLOWANCE', `USDC approve failed (tx: ${approveTxHash}).`);
+      }
+    }
+    const messenger = getContract({ address: messengerAddress, abi: TokenMessengerV2Abi, client: { public: publicClient, wallet: walletClient } });
+    try {
+      burnTxHash = await messenger.write.depositForBurn(
+        [amount, SOLANA_CCTP_DOMAIN, mintRecipient, usdcAddress, destinationCaller, maxFee, minFinalityThreshold],
+        { account, chain: VIEM_CHAINS[fromChain] },
+      );
+    } catch (err: unknown) {
+      throw new SolanaBridgeError('BURN_FAILED', `CCTP depositForBurn to Solana failed: ${err instanceof Error ? err.message : String(err)}.`);
     }
   }
 
-  // Burn USDC via CCTP V2 depositForBurn targeting Solana domain
-  const messenger = getContract({
-    address: messengerAddress,
-    abi: TokenMessengerV2Abi,
-    client: { public: publicClient, wallet: walletClient },
-  });
-
-  let burnTxHash: Hash;
+  let recovery: BridgeRecovery = { burnTxHash, sourceDomain: CCTP_DOMAIN_IDS[fromChain], destinationDomain: SOLANA_CCTP_DOMAIN };
   try {
-    burnTxHash = await messenger.write.depositForBurn(
-      [amount, SOLANA_CCTP_DOMAIN, mintRecipient, usdcAddress, destinationCaller, maxFee, minFinalityThreshold],
-      { account, chain: VIEM_CHAINS[fromChain] },
-    );
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    throw new SolanaBridgeError('BURN_FAILED', `CCTP depositForBurn to Solana failed: ${msg}.`);
+    const receipt = await publicClient.waitForTransactionReceipt({ hash: burnTxHash });
+    const burnResult = extractBurnResult(receipt, burnTxHash, MESSAGE_TRANSMITTER_V2_MAP[fromChain], {
+      sourceDomain: CCTP_DOMAIN_IDS[fromChain], destinationDomain: SOLANA_CCTP_DOMAIN,
+      sender: pad(messengerAddress, { size: 32 }), recipient: solanaPubkeyToBytes32(SOLANA_TOKEN_MESSENGER),
+      burnToken: pad(usdcAddress, { size: 32 }), mintRecipient, amount,
+      messageSender: pad(account.address, { size: 32 }), destinationCaller,
+      ...(!options.burnTxHash || options.minFinalityThreshold !== undefined ? { minFinalityThreshold } : {}),
+      ...(!options.burnTxHash || options.maxFee !== undefined ? { maxFee } : {}),
+    });
+    recovery = burnResult;
+    const attested = await pollForAttestation(burnTxHash, burnResult.messageBytes, attestationApiUrl);
+    return {
+      burnTxHash, messageHash: attested.messageHash, messageBytes: attested.message, attestation: attested.attestation,
+      destinationDomain: SOLANA_CCTP_DOMAIN, amount, elapsedMs: Date.now() - startMs,
+    };
+  } catch (error) {
+    throw withSolanaRecovery(error, recovery, 'BURN_FAILED');
   }
-
-  const receipt = await publicClient.waitForTransactionReceipt({ hash: burnTxHash });
-  if (receipt.status !== 'success') {
-    throw new SolanaBridgeError('BURN_FAILED', `depositForBurn transaction reverted (tx: ${burnTxHash}).`);
-  }
-
-  // Extract message bytes from MessageSent event
-  const { messageBytes, messageHash } = extractMessageSent(receipt.logs);
-
-  // Poll Circle IRIS for attestation
-  const attestation = await pollForAttestation(
-    messageHash,
-    CCTP_DOMAIN_IDS[fromChain],
-    attestationApiUrl,
-  );
-
-  return {
-    burnTxHash,
-    messageHash,
-    messageBytes,
-    attestation,
-    destinationDomain: SOLANA_CCTP_DOMAIN,
-    amount,
-    elapsedMs: Date.now() - startMs,
-  };
 }
 
 // ─── Solana→EVM Bridge ───
@@ -278,15 +279,19 @@ export interface SolanaToEVMOptions {
   toChain: EVMBridgeChain;
   /** Optional EVM destination RPC URL override */
   evmRpcUrl?: string;
-  /** EVM recipient address. Defaults to the EVM walletClient's account address. */
+  /** Optional expected EVM mint recipient. Must match the burned and attested recipient. */
   evmRecipient?: Address;
   /** Circle IRIS API URL override */
   attestationApiUrl?: string;
   /** Solana RPC URL override */
   solanaRpcUrl?: string;
+  /** Existing destination mint, if a prior receiveMessage hash was retained. */
+  mintTxHash?: Hash;
 }
 
 export interface SolanaToEVMBurnParams {
+  /** Solana burn transaction signature, used to query the V2 attestation API. */
+  burnTxHash: string;
   /** Raw CCTP message bytes from Solana burn transaction */
   messageBytes: Hex;
   /** Circle message hash */
@@ -312,7 +317,7 @@ export interface SolanaToEVMResult {
  * Complete the Solana→EVM bridge by polling for Circle's attestation and minting on EVM.
  *
  * The caller is responsible for initiating the Solana burn via the Solana
- * CCTP MessageTransmitter and passing the resulting messageBytes + messageHash here.
+ * CCTP MessageTransmitter and passing its transaction signature and source message here.
  *
  * @param walletClient - Viem WalletClient (for EVM signing)
  * @param burnParams - Message bytes and hash from the Solana burn transaction
@@ -331,120 +336,83 @@ export async function receiveFromSolanaOnEVM(
     throw new SolanaBridgeError('NO_WALLET_CLIENT', 'WalletClient must have an account attached.');
   }
 
-  const account = walletClient.account;
-  const recipient = options.evmRecipient ?? account.address;
-
-  // Poll Circle IRIS for attestation
-  const attestation = await pollForAttestation(
-    burnParams.messageHash,
-    burnParams.sourceDomain,
-    attestationApiUrl,
-  );
-
-  // Submit receiveMessage on EVM
-  const transmitterAddress = MESSAGE_TRANSMITTER_V2_MAP[toChain];
-  const destChain = VIEM_CHAINS[toChain];
-  const destPublicClient = createPublicClient({ chain: destChain, transport: http(evmRpcUrl) }) as PublicClient;
-
-  const transmitter = getContract({
-    address: transmitterAddress,
-    abi: MessageTransmitterV2Abi,
-    client: { public: destPublicClient, wallet: walletClient },
-  });
-
-  let mintTxHash: Hash;
+  if (!burnParams.burnTxHash || typeof burnParams.burnTxHash !== 'string') {
+    throw new SolanaBridgeError('BURN_FAILED', 'A Solana burn transaction signature is required; message hashes cannot identify V2 attestations.');
+  }
+  let recovery: BridgeRecovery = {
+    burnTxHash: burnParams.burnTxHash, sourceDomain: SOLANA_CCTP_DOMAIN, destinationDomain: CCTP_DOMAIN_IDS[toChain],
+    messageBytes: burnParams.messageBytes, messageHash: burnParams.messageHash,
+  };
   try {
-    mintTxHash = await transmitter.write.receiveMessage(
-      [burnParams.messageBytes, attestation],
-      { account, chain: destChain },
-    );
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    throw new SolanaBridgeError('MINT_FAILED', `CCTP receiveMessage on ${toChain} failed: ${msg}.`);
+    const source = parseCctpMessage(burnParams.messageBytes);
+    assertMessageFields(source, {
+      sourceDomain: SOLANA_CCTP_DOMAIN, destinationDomain: CCTP_DOMAIN_IDS[toChain],
+      sender: solanaPubkeyToBytes32(SOLANA_TOKEN_MESSENGER), recipient: pad(TOKEN_MESSENGER_V2[toChain], { size: 32 }),
+      burnToken: solanaPubkeyToBytes32(SOLANA_USDC_MINT),
+    });
+    if (burnParams.sourceDomain !== SOLANA_CCTP_DOMAIN || keccak256(burnParams.messageBytes).toLowerCase() !== burnParams.messageHash.toLowerCase()) {
+      throw new SolanaBridgeError('BURN_FAILED', 'Solana source domain or source message hash does not match the supplied burn.');
+    }
+    const recipient = evmMintRecipient(source);
+    if (options.evmRecipient && recipient.toLowerCase() !== options.evmRecipient.toLowerCase()) {
+      throw new SolanaBridgeError('INVALID_RECIPIENT', 'evmRecipient does not match the Solana burn mintRecipient.');
+    }
+    const attested = await pollForAttestation(burnParams.burnTxHash, burnParams.messageBytes, attestationApiUrl);
+    const decoded = parseCctpMessage(attested.message);
+    const account = walletClient.account;
+    const destChain = VIEM_CHAINS[toChain];
+    const destPublicClient = createPublicClient({ chain: destChain, transport: http(evmRpcUrl) }) as PublicClient;
+    if (options.mintTxHash) {
+      recovery = { ...recovery, mintTxHash: options.mintTxHash };
+      const existingReceipt = await destPublicClient.waitForTransactionReceipt({ hash: options.mintTxHash });
+      if (existingReceipt.status === 'success') {
+        return {
+          mintTxHash: options.mintTxHash, amount: decoded.amount - decoded.feeExecuted, toChain,
+          recipient: evmMintRecipient(decoded), elapsedMs: Date.now() - startMs,
+        };
+      }
+    }
+    const transmitter = getContract({ address: MESSAGE_TRANSMITTER_V2_MAP[toChain], abi: MessageTransmitterV2Abi, client: { public: destPublicClient, wallet: walletClient } });
+    const mintTxHash = await transmitter.write.receiveMessage([attested.message, attested.attestation], { account, chain: destChain });
+    recovery = { ...recovery, mintTxHash };
+    const mintReceipt = await destPublicClient.waitForTransactionReceipt({ hash: mintTxHash });
+    if (mintReceipt.status !== 'success') {
+      throw new SolanaBridgeError('MINT_FAILED', `receiveMessage reverted on ${toChain} (tx: ${mintTxHash}).`);
+    }
+    return { mintTxHash, amount: decoded.amount - decoded.feeExecuted, toChain, recipient: evmMintRecipient(decoded), elapsedMs: Date.now() - startMs };
+  } catch (error) {
+    throw withSolanaRecovery(error, recovery);
   }
-
-  const mintReceipt = await destPublicClient.waitForTransactionReceipt({ hash: mintTxHash });
-  if (mintReceipt.status !== 'success') {
-    throw new SolanaBridgeError('MINT_FAILED', `receiveMessage reverted on ${toChain} (tx: ${mintTxHash}).`);
-  }
-
-  // Parse amount from mint receipt logs (MintAndWithdraw event)
-  // Fallback: return 0n if event not found (amount can be retrieved from the original Solana tx)
-  const amount = parseMintAmount(mintReceipt.logs);
-
-  return { mintTxHash, amount, toChain, recipient, elapsedMs: Date.now() - startMs };
 }
 
 // ─── Shared helpers ───
 
-/**
- * Extract CCTP MessageSent event from EVM transaction logs.
- * Event topic: keccak256("MessageSent(bytes)") = 0x8c5261668696ce22758910d05bab8f186d6eb247ceac2af2e82c7dc17669b036
- */
-function extractMessageSent(logs: readonly { topics: readonly Hex[]; data: Hex }[]): { messageBytes: Hex; messageHash: Hex } {
-  const MESSAGE_SENT_TOPIC = '0x8c5261668696ce22758910d05bab8f186d6eb247ceac2af2e82c7dc17669b036';
-  for (const log of logs) {
-    if (log.topics[0]?.toLowerCase() === MESSAGE_SENT_TOPIC.toLowerCase()) {
-      const dataHex = log.data.slice(2);
-      if (dataHex.length < 128) continue;
-      const lengthHex = dataHex.slice(64, 128);
-      const messageLength = parseInt(lengthHex, 16);
-      if (messageLength === 0) continue;
-      const messageBytesHex = dataHex.slice(128, 128 + messageLength * 2);
-      const messageBytes = ('0x' + messageBytesHex) as Hex;
-      const messageHash = keccak256(messageBytes);
-      return { messageBytes, messageHash };
+async function validateSolanaTokenAccount(address: string, rpcUrl: string): Promise<void> {
+  try {
+    const response = await fetch(rpcUrl, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getAccountInfo', params: [address, { encoding: 'jsonParsed', commitment: 'confirmed' }] }),
+    });
+    if (!response.ok) throw new Error(`Solana RPC returned HTTP ${response.status}`);
+    const data = await response.json() as {
+      error?: unknown;
+      result?: { value?: { owner?: string; data?: { program?: string; parsed?: { type?: string; info?: { mint?: string; state?: string } } } } | null };
+    };
+    const account = data.result?.value;
+    if (data.error || !account || account.owner !== 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA' ||
+        account.data?.program !== 'spl-token' || account.data.parsed?.type !== 'account' ||
+        account.data.parsed.info?.mint !== SOLANA_USDC_MINT || account.data.parsed.info.state !== 'initialized') {
+      throw new Error('solanaRecipient must be an existing initialized USDC token account');
     }
+  } catch (error) {
+    throw new SolanaBridgeError('INVALID_RECIPIENT', `Could not verify the Solana USDC recipient: ${error instanceof Error ? error.message : String(error)}.`);
   }
-  throw new SolanaBridgeError('BURN_FAILED', 'Could not find MessageSent event in burn transaction receipt.');
 }
 
-/** Parse USDC amount from MintAndWithdraw event logs (best-effort). */
-function parseMintAmount(logs: readonly { topics: readonly Hex[]; data: Hex }[]): bigint {
-  // MintAndWithdraw(address,uint256,address) — topic0 = keccak256("MintAndWithdraw(address,uint256,address)")
-  const MINT_AND_WITHDRAW_TOPIC = '0x1b2a7ff080b8cb6ff436ce0372e399692bbfb6d4ae5766fd8d58a7b8cc6142e9';
-  for (const log of logs) {
-    if (log.topics[0]?.toLowerCase() === MINT_AND_WITHDRAW_TOPIC.toLowerCase()) {
-      // amount is the second indexed param OR first data word
-      if (log.data.length >= 66) {
-        return BigInt('0x' + log.data.slice(2, 66));
-      }
-    }
-  }
-  return 0n; // fallback: caller can determine amount from source transaction
-}
-
-/** Poll Circle IRIS attestation API. */
-async function pollForAttestation(messageHash: Hex, sourceDomain: number, apiUrl: string): Promise<Hex> {
-  const url = `${apiUrl}/v2/messages/${sourceDomain}/${messageHash}`;
-  for (let attempt = 0; attempt < MAX_ATTESTATION_POLLS; attempt++) {
-    let response: { status: string; attestation?: Hex | null; error?: string };
-    try {
-      const res = await fetch(url, { headers: { Accept: 'application/json' } });
-      if (!res.ok) {
-        if (res.status === 404) { await sleep(ATTESTATION_POLL_INTERVAL_MS); continue; }
-        const body = await res.text().catch(() => '');
-        throw new SolanaBridgeError('ATTESTATION_ERROR', `Circle API returned HTTP ${res.status}: ${body}.`);
-      }
-      response = await res.json() as typeof response;
-    } catch (err: unknown) {
-      if (err instanceof SolanaBridgeError) throw err;
-      const msg = err instanceof Error ? err.message : String(err);
-      throw new SolanaBridgeError('ATTESTATION_ERROR', `Failed to reach Circle IRIS API: ${msg}.`);
-    }
-
-    if (response.status === 'complete' && response.attestation) return response.attestation;
-    if (response.status === 'error') {
-      throw new SolanaBridgeError('ATTESTATION_ERROR', `Circle attestation failed: ${response.error ?? 'unknown error'}.`);
-    }
-    await sleep(ATTESTATION_POLL_INTERVAL_MS);
-  }
-  throw new SolanaBridgeError('ATTESTATION_TIMEOUT',
-    `Attestation not received after ${MAX_ATTESTATION_POLLS} attempts. Message hash: ${messageHash}.`);
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
+function withSolanaRecovery(error: unknown, recovery: BridgeRecovery, fallbackCode: SolanaBridgeErrorCode = 'MINT_FAILED'): SolanaBridgeError {
+  const code = error instanceof BridgeError || error instanceof SolanaBridgeError ? error.code as SolanaBridgeErrorCode : fallbackCode;
+  const detail = error instanceof Error ? error.message.replace(/^\[(?:BridgeModule|SolanaBridge):[^\]]+\] /, '') : String(error);
+  return new SolanaBridgeError(code, `${detail} Resume the existing burn transaction ${recovery.burnTxHash}; do not burn again.`, recovery);
 }
 
 // ─── Error Class ───
@@ -461,9 +429,11 @@ export type SolanaBridgeErrorCode =
 
 export class SolanaBridgeError extends Error {
   readonly code: SolanaBridgeErrorCode;
-  constructor(code: SolanaBridgeErrorCode, message: string) {
+  readonly recovery?: BridgeRecovery;
+  constructor(code: SolanaBridgeErrorCode, message: string, recovery?: BridgeRecovery) {
     super(`[SolanaBridge:${code}] ${message}`);
     this.code = code;
+    this.recovery = recovery;
     this.name = 'SolanaBridgeError';
   }
 }

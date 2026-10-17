@@ -69,6 +69,11 @@ policy.applyOutcome(reserved.reservation, outcome);
 
 `check()` still exists as a reserve-then-commit wrapper. Prefer reserve / execute / `applyOutcome()` so an unknown broadcast cannot free the hold. A timer never unlocks `hold-unknown`.
 
+Only `reserved` authorizes a new execution. `existing` returns the earlier
+attempt for observation or reconciliation. The security repairs change retry,
+metadata, bridge and swap behavior; read the [migration notes](docs/security-remediation.md)
+before adopting this branch.
+
 ## Install
 
 ```bash
@@ -141,8 +146,9 @@ consume gas.
   manifest.
 - `deployWallet()` requires a factory address, token contract, token ID, RPC,
   and caller-controlled wallet client.
-- `createWallet()` currently maps Base, Base Sepolia, Ethereum, Arbitrum, and
-  Polygon runtime clients in [`src/index.ts`](src/index.ts).
+- `createWallet()` currently maps Base, Base Sepolia, Ethereum, Arbitrum,
+  Polygon, Optimism, Avalanche, Unichain, Linea, Sonic, and World Chain
+  runtime clients in [`src/index.ts`](src/index.ts).
 - `walletFromEnv()` maps `CHAIN_NAME` / `CHAIN_ID` onto those keys. It does not
   pass viem display names such as `"arbitrum one"` into `createWallet()`.
 - `setPolicyFromEnv()` copies a single configured spend limit onto the omitted
@@ -160,6 +166,7 @@ npm ci
 npm run build
 npm test
 npm run lint
+npm audit --audit-level=high
 ```
 
 The test suite covers the core SDK plus x402, policy, receipt, token, identity,
@@ -178,6 +185,8 @@ external payment endpoint is available.
 
 - Report vulnerabilities through the process in
   [`SECURITY.md`](SECURITY.md).
+- Security changes, caller migrations and the outstanding live GitHub ruleset
+  action are tracked in [`docs/security-remediation.md`](docs/security-remediation.md).
 - Contribution setup and review rules live in
   [`CONTRIBUTING.md`](CONTRIBUTING.md).
 - Public issues are tracked in the

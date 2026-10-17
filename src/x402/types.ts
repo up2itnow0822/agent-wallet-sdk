@@ -107,6 +107,8 @@ export interface X402ClientConfig {
   facilitatorUrl?: string;
   /** Whether to auto-pay 402 responses (default: true) */
   autoPay?: boolean;
+  /** Allow automatic payment over plain HTTP only for localhost/loopback development. Default: false. */
+  allowInsecureHttpForDevelopment?: boolean;
   /** Callback before payment — return false to reject */
   onBeforePayment?: (req: X402PaymentRequirements, url: string) => Promise<boolean> | boolean;
   /** Callback after payment */

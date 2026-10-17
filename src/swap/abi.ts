@@ -1,6 +1,16 @@
 // [MAX-ADDED] ABIs for Uniswap V3 SwapRouter02 and QuoterV2 on Base Mainnet
-/** Uniswap V3 SwapRouter02 ABI — exactInputSingle */
+/** Uniswap V3 SwapRouter02 ABI, including its deadline-enforcing multicall. */
 export const UniswapV3RouterAbi = [
+    {
+        name: 'multicall',
+        type: 'function',
+        stateMutability: 'payable',
+        inputs: [
+            { name: 'deadline', type: 'uint256' },
+            { name: 'data', type: 'bytes[]' },
+        ],
+        outputs: [{ name: 'results', type: 'bytes[]' }],
+    },
     {
         name: 'exactInputSingle',
         type: 'function',
