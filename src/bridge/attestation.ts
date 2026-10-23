@@ -12,6 +12,28 @@ import type { Hex } from 'viem';
 export interface CctpAttestedMessage {
   message: Hex;
   attestation: Hex;
+  /** Circle-assigned 32-byte V2 event nonce (hex), when returned. */
+  eventNonce?: Hex;
+}
+
+/**
+ * CCTP V2 message header fields that Circle does not rewrite on attestation:
+ * version|sourceDomain|destinationDomain (bytes 0..12) and
+ * sender|recipient|destinationCaller (bytes 44..140). The nonce (12..44)
+ * and finalityThresholdExecuted are filled in offchain, so they are skipped.
+ */
+function stableHeader(msg: string): string | null {
+  const h = msg.toLowerCase().replace(/^0x/, '');
+  if (h.length < 140 * 2) return null;
+  return h.slice(0, 24) + h.slice(88, 280);
+}
+
+function toNonceHex(n: string | undefined): Hex | undefined {
+  if (typeof n !== 'string' || n.length === 0) return undefined;
+  try {
+    const v = BigInt(n);
+    return ('0x' + v.toString(16).padStart(64, '0')) as Hex;
+  } catch { return undefined; }
 }
 
 export interface CircleV2MessagesResponse {
@@ -37,9 +59,22 @@ export function attestationUrl(apiUrl: string, sourceDomain: number, burnTxHash:
 export function parseAttestationResponse(
   body: CircleV2MessagesResponse,
   onError: (msg: string) => never,
+  expectedMessage?: Hex,
 ): CctpAttestedMessage | 'pending' {
-  const m = body.messages?.[0];
-  if (!m) return 'pending';
+  const all = body.messages ?? [];
+  if (all.length === 0) return 'pending';
+  let m = all[0];
+  if (all.length > 1) {
+    // Multi-burn tx: pick the entry matching our MessageSent, never guess.
+    const want = expectedMessage ? stableHeader(expectedMessage) : null;
+    if (!want) onError(`transaction has ${all.length} CCTP messages; the source message is required to select one`);
+    const hits = all.filter((x) => typeof x.message === 'string' && stableHeader(x.message) === want);
+    if (hits.length !== 1) {
+      if (hits.length === 0 && all.some((x) => typeof x.message !== 'string' || x.message === '0x')) return 'pending';
+      onError(`could not uniquely match the burn message among ${all.length} CCTP messages`);
+    }
+    m = hits[0];
+  }
   if (m.status === 'error') onError(body.error ?? 'Circle reported an attestation error');
   const att = m.attestation;
   const msg = m.message;
@@ -48,7 +83,7 @@ export function parseAttestationResponse(
     typeof att === 'string' && att.startsWith('0x') && att.length > 2 &&
     typeof msg === 'string' && msg.startsWith('0x') && msg.length > 2
   ) {
-    return { message: msg as Hex, attestation: att as Hex };
+    return { message: msg as Hex, attestation: att as Hex, eventNonce: toNonceHex(m.eventNonce) };
   }
   return 'pending';
 }

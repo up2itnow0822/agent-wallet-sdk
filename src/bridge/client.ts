@@ -102,8 +102,9 @@ export class BridgeModule {
     await this.approveUsdc(amount);
     const burnResult = await this.depositForBurn(amount, toChain, recipient, minFinalityThreshold, maxFee);
     let mintTxHash: Hash;
+    let attested: CctpAttestedMessage | undefined;
     try {
-      const attested = await this.pollForAttestation(burnResult.burnTxHash, this.fromChain, attestationApiUrl);
+      attested = await this.pollForAttestation(burnResult.burnTxHash, this.fromChain, attestationApiUrl, burnResult.messageBytes);
       mintTxHash = await this.receiveMessage(attested.message, attested.attestation, toChain, options.destinationRpcUrl);
     } catch (err: unknown) {
       // USDC is already burned: never drop the data needed to finish the mint.
@@ -115,6 +116,11 @@ export class BridgeModule {
         messageBytes: burnResult.messageBytes,
         nonce: burnResult.nonce,
         toChain,
+        ...(attested ? {
+          attestedMessage: attested.message,
+          attestation: attested.attestation,
+          eventNonce: attested.eventNonce,
+        } : {}),
       };
       if (err instanceof BridgeError) { err.recovery = recovery; throw err; }
       const e = new BridgeError('MINT_FAILED', err instanceof Error ? err.message : String(err));
@@ -130,6 +136,7 @@ export class BridgeModule {
       toChain,
       recipient,
       nonce: burnResult.nonce,
+      eventNonce: attested!.eventNonce,
       elapsedMs: Date.now() - startMs,
     };
   }
@@ -262,7 +269,7 @@ export class BridgeModule {
     throw new BridgeError('BURN_FAILED', 'Could not find MessageSent event in burn transaction receipt.');
   }
 
-  private async pollForAttestation(burnTxHash: Hash, fromChain: EVMBridgeChain, apiUrl: string): Promise<CctpAttestedMessage> {
+  private async pollForAttestation(burnTxHash: Hash, fromChain: EVMBridgeChain, apiUrl: string, expectedMessage?: Hex): Promise<CctpAttestedMessage> {
     const sourceDomain = CCTP_DOMAIN_IDS[fromChain];
     const url = attestationUrl(apiUrl, sourceDomain, burnTxHash);
     const fail = (m: string): never => { throw new BridgeError('ATTESTATION_ERROR', `Circle attestation failed: ${m}.`); };
@@ -282,7 +289,7 @@ export class BridgeModule {
         const msg = err instanceof Error ? err.message : String(err);
         throw new BridgeError('ATTESTATION_ERROR', `Failed to reach Circle IRIS API: ${msg}.`);
       }
-      const r = parseAttestationResponse(body, fail);
+      const r = parseAttestationResponse(body, fail, expectedMessage);
       if (r !== 'pending') return r;
       await this.sleep(ATTESTATION_POLL_INTERVAL_MS);
     }
@@ -340,8 +347,14 @@ export interface BridgeRecovery {
   destinationDomain: number;
   messageHash: Hex;
   messageBytes: Hex;
+  /** Source MessageSent nonce (zero in CCTP V2; see eventNonce). */
   nonce: bigint;
   toChain: EVMBridgeChain;
+  /** Present when attestation succeeded: pass these to mint() to finish. */
+  attestedMessage?: Hex;
+  attestation?: Hex;
+  /** Circle-assigned V2 event nonce. */
+  eventNonce?: Hex;
 }
 
 export class BridgeError extends Error {

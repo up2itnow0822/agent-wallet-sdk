@@ -174,7 +174,10 @@ export interface BridgeResult {
   fromChain: EVMBridgeChain;
   toChain: EVMBridgeChain;
   recipient: Address;
+  /** Source MessageSent nonce (zero in CCTP V2; use eventNonce). */
   nonce: bigint;
+  /** Circle-assigned CCTP V2 event nonce (32-byte hex), when returned. */
+  eventNonce?: Hex;
   elapsedMs: number;
 }
 
