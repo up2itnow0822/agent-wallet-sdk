@@ -13,7 +13,7 @@ export {
   TOKEN_MESSENGER_V2, MESSAGE_TRANSMITTER_V2, FINALITY_THRESHOLD,
 } from './client.js';
 export type { BridgeRecovery } from './client.js';
-export type { CctpAttestedMessage } from './attestation.js';
+export type { CctpAttestedMessage, AttestationSelector } from './attestation.js';
 export type {
   BridgeChain, EVMBridgeChain, BridgeOptions, BurnResult, BridgeResult, AttestationResponse, AttestationStatus,
 } from './types.js';

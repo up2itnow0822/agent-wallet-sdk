@@ -10,7 +10,7 @@
  *   - CCTP domain IDs: https://developers.circle.com/cctp/references/contract-addresses
  */
 
-import { attestationUrl, parseAttestationResponse, type CctpAttestedMessage, type CircleV2MessagesResponse } from './attestation.js';
+import { attestationUrl, parseAttestationResponse, type CctpAttestedMessage, type AttestationSelector, type CircleV2MessagesResponse } from './attestation.js';
 import {
   createPublicClient,
   http,
@@ -305,6 +305,10 @@ export interface SolanaToEVMBurnParams {
   sourceDomain: number;
   /** Solana burn transaction signature (base58). Required: Circle V2 looks attestations up by tx (#44). */
   burnTxSignature: string;
+  /** Only for identical burns batched in one tx: Circle eventNonce of the wanted message. */
+  eventNonce?: string;
+  /** Only for identical burns batched in one tx: index among identical messages. */
+  messageIndex?: number;
 }
 
 export interface SolanaToEVMResult {
@@ -355,6 +359,7 @@ export async function receiveFromSolanaOnEVM(
     burnParams.sourceDomain,
     attestationApiUrl,
     burnParams.messageBytes,
+    { eventNonce: burnParams.eventNonce, index: burnParams.messageIndex },
   );
 
   // Submit receiveMessage on EVM
@@ -431,7 +436,7 @@ function parseMintAmount(logs: readonly { topics: readonly Hex[]; data: Hex }[])
 }
 
 /** Poll Circle IRIS V2 attestation API by source domain + burn tx hash/signature (#44). */
-async function pollForAttestation(burnTx: string, sourceDomain: number, apiUrl: string, expectedMessage?: Hex): Promise<CctpAttestedMessage> {
+async function pollForAttestation(burnTx: string, sourceDomain: number, apiUrl: string, expectedMessage?: Hex, select?: AttestationSelector): Promise<CctpAttestedMessage> {
   const url = attestationUrl(apiUrl, sourceDomain, burnTx as Hex);
   const fail = (m: string): never => { throw new SolanaBridgeError('ATTESTATION_ERROR', `Circle attestation failed: ${m}.`); };
   for (let attempt = 0; attempt < MAX_ATTESTATION_POLLS; attempt++) {
@@ -449,7 +454,7 @@ async function pollForAttestation(burnTx: string, sourceDomain: number, apiUrl: 
       const msg = err instanceof Error ? err.message : String(err);
       throw new SolanaBridgeError('ATTESTATION_ERROR', `Failed to reach Circle IRIS API: ${msg}.`);
     }
-    const r = parseAttestationResponse(body, fail, expectedMessage);
+    const r = parseAttestationResponse(body, fail, expectedMessage, select);
     if (r !== 'pending') return r;
     await sleep(ATTESTATION_POLL_INTERVAL_MS);
   }

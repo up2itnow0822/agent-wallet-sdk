@@ -40,6 +40,14 @@ function toNonceHex(n: string | undefined): Hex | undefined {
   } catch { return undefined; }
 }
 
+/** Disambiguates identical burns batched in one transaction. */
+export interface AttestationSelector {
+  /** Circle eventNonce of the wanted message (hex or decimal). */
+  eventNonce?: string;
+  /** Index among identical matching messages, in Circle's response order. */
+  index?: number;
+}
+
 export interface CircleV2MessagesResponse {
   messages?: Array<{
     message?: Hex | string | null;
@@ -64,6 +72,7 @@ export function parseAttestationResponse(
   body: CircleV2MessagesResponse,
   onError: (msg: string) => never,
   expectedMessage?: Hex,
+  select?: AttestationSelector,
 ): CctpAttestedMessage | 'pending' {
   const all = body.messages ?? [];
   if (all.length === 0) return 'pending';
@@ -71,6 +80,7 @@ export function parseAttestationResponse(
   // Terminal errors win over matching: never poll to timeout on a failed attestation.
   if (all.length === 1 && m.status === 'error') onError(body.error ?? 'Circle reported an attestation error');
   const want = expectedMessage ? stableFields(expectedMessage) : null;
+  if (expectedMessage && !want) onError('source messageBytes is not a valid CCTP V2 message');
   if (all.length > 1 && !want) {
     onError(`transaction has ${all.length} CCTP messages; the source message is required to select one`);
   }
@@ -79,7 +89,15 @@ export function parseAttestationResponse(
     const ready = all.filter((x) => typeof x.message === 'string' && x.message.length > 2 && x.message !== '0x');
     const hits = ready.filter((x) => stableFields(x.message as string) === want);
     if (hits.length === 1) m = hits[0];
-    else if (hits.length > 1) onError(`could not uniquely match the burn message among ${all.length} CCTP messages`);
+    else if (hits.length > 1) {
+      // Identical batched burns: needs an explicit discriminator.
+      const byNonce = select?.eventNonce
+        ? hits.filter((x) => toNonceHex(x.eventNonce) === toNonceHex(select.eventNonce))
+        : [];
+      if (byNonce.length === 1) m = byNonce[0];
+      else if (select?.index !== undefined && Number.isInteger(select.index) && select.index >= 0 && select.index < hits.length) m = hits[select.index];
+      else onError(`${hits.length} identical CCTP messages in this transaction; pass eventNonce or messageIndex to choose one`);
+    }
     else if (ready.length < all.length) {
       if (all.every((x) => x.status === 'error')) onError(body.error ?? 'Circle reported an attestation error');
       return 'pending';

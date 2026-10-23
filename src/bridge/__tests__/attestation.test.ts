@@ -111,3 +111,25 @@ describe('terminal errors with expectedMessage (#93 review 4)', () => {
     expect(() => parseAttestationResponse({ messages: [{ status: 'error' }], error: 'boom' }, fail, ('0x' + '11'.repeat(200)) as `0x${string}`)).toThrow(/boom/);
   });
 });
+
+describe('malformed source + identical batched burns (#93 review 5)', () => {
+  const fail = (m: string): never => { throw new Error(m); };
+  const msg = (nonce: string) => ('0x' + '000000010000000500000003' + nonce + 'aa'.repeat(96) + '000003e8' + '00000000' + 'bb'.repeat(170)) as `0x${string}`;
+  const z = '00'.repeat(32);
+  const res = { messages: [
+    { status: 'complete', message: msg('11'.repeat(32)), attestation: '0xa1', eventNonce: '0x' + '11'.repeat(32) },
+    { status: 'complete', message: msg('22'.repeat(32)), attestation: '0xa2', eventNonce: '0x' + '22'.repeat(32) },
+  ] };
+  it('rejects a truncated source message', () => {
+    expect(() => parseAttestationResponse({ messages: [res.messages[0]] }, fail, '0x1234')).toThrow(/not a valid/);
+  });
+  it('requires a discriminator for identical burns', () => {
+    expect(() => parseAttestationResponse(res, fail, msg(z))).toThrow(/eventNonce or messageIndex/);
+  });
+  it('selects by eventNonce or index', () => {
+    const a = parseAttestationResponse(res, fail, msg(z), { eventNonce: '0x' + '22'.repeat(32) });
+    expect(a !== 'pending' && a.attestation).toBe('0xa2');
+    const b = parseAttestationResponse(res, fail, msg(z), { index: 0 });
+    expect(b !== 'pending' && b.attestation).toBe('0xa1');
+  });
+});
