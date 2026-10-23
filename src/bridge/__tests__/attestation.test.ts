@@ -70,3 +70,22 @@ describe('parseAttestationResponse multi-message + eventNonce (#93 review)', () 
     if (r !== 'pending') expect(r.eventNonce).toBe('0x' + 'ff'.padStart(64, '0'));
   });
 });
+
+describe('batched burns sharing header fields (#93 review 2)', () => {
+  const fail = (m: string): never => { throw new Error(m); };
+  const header = (nonce: string) => '00000001' + '00000005' + '00000003' + nonce + 'aa'.repeat(96) + '000003e8' + '00000000';
+  const body = (amount: string, filled: string) =>
+    '00000001' + 'cc'.repeat(32) + 'dd'.repeat(32) + amount.padStart(64, '0') + 'ee'.repeat(32) + '00'.repeat(32) + filled.repeat(64) ;
+  const msg = (nonce: string, amount: string, filled: string) => ('0x' + header(nonce) + body(amount, filled)) as `0x${string}`;
+  const z = '00'.repeat(32);
+  const res = { messages: [
+    { status: 'complete', message: msg('11'.repeat(32), '64', '1'), attestation: '0xa1' },
+    { status: 'complete', message: msg('22'.repeat(32), 'c8', '2'), attestation: '0xa2' },
+  ] };
+  it('selects by body (amount) when headers are identical', () => {
+    const r = parseAttestationResponse(res, fail, msg(z, 'c8', '0'));
+    expect(r !== 'pending' && r.attestation).toBe('0xa2');
+    const r1 = parseAttestationResponse(res, fail, msg(z, '64', '0'));
+    expect(r1 !== 'pending' && r1.attestation).toBe('0xa1');
+  });
+});

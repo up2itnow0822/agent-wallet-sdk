@@ -17,15 +17,19 @@ export interface CctpAttestedMessage {
 }
 
 /**
- * CCTP V2 message header fields that Circle does not rewrite on attestation:
- * version|sourceDomain|destinationDomain (bytes 0..12) and
- * sender|recipient|destinationCaller (bytes 44..140). The nonce (12..44)
- * and finalityThresholdExecuted are filled in offchain, so they are skipped.
+ * Bytes of a CCTP V2 message that Circle does not rewrite on attestation.
+ * Header (148 bytes): version|sourceDomain|destinationDomain [0,12),
+ * nonce [12,44) (filled offchain, skipped), sender|recipient|destinationCaller|
+ * minFinalityThreshold [44,144), finalityThresholdExecuted [144,148) (skipped).
+ * BurnMessageV2 body at 148: version|burnToken|mintRecipient|amount|
+ * messageSender|maxFee [148,312), feeExecuted|expirationBlock [312,376)
+ * (filled offchain, skipped), hookData [376,...).
  */
-function stableHeader(msg: string): string | null {
+function stableFields(msg: string): string | null {
   const h = msg.toLowerCase().replace(/^0x/, '');
-  if (h.length < 140 * 2) return null;
-  return h.slice(0, 24) + h.slice(88, 280);
+  if (h.length < 148 * 2) return null;
+  const b = (a: number, z?: number) => h.slice(a * 2, z === undefined ? undefined : z * 2);
+  return b(0, 12) + b(44, 144) + '|' + b(148, 312) + '|' + b(376);
 }
 
 function toNonceHex(n: string | undefined): Hex | undefined {
@@ -66,9 +70,9 @@ export function parseAttestationResponse(
   let m = all[0];
   if (all.length > 1) {
     // Multi-burn tx: pick the entry matching our MessageSent, never guess.
-    const want = expectedMessage ? stableHeader(expectedMessage) : null;
+    const want = expectedMessage ? stableFields(expectedMessage) : null;
     if (!want) onError(`transaction has ${all.length} CCTP messages; the source message is required to select one`);
-    const hits = all.filter((x) => typeof x.message === 'string' && stableHeader(x.message) === want);
+    const hits = all.filter((x) => typeof x.message === 'string' && stableFields(x.message) === want);
     if (hits.length !== 1) {
       if (hits.length === 0 && all.some((x) => typeof x.message !== 'string' || x.message === '0x')) return 'pending';
       onError(`could not uniquely match the burn message among ${all.length} CCTP messages`);
