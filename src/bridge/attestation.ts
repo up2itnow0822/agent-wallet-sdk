@@ -88,7 +88,16 @@ export function parseAttestationResponse(
     // Always match against the caller's burn (also catches a stale/wrong tx).
     const ready = all.filter((x) => typeof x.message === 'string' && x.message.length > 2 && x.message !== '0x');
     const hits = ready.filter((x) => stableFields(x.message as string) === want);
-    if (hits.length === 1) m = hits[0];
+    const nonceOf = (x: { eventNonce?: string }) => toNonceHex(x.eventNonce);
+    const wantNonce = select?.eventNonce ? toNonceHex(select.eventNonce) : undefined;
+    const nonceHit = wantNonce ? hits.filter((x) => nonceOf(x) === wantNonce) : [];
+    if (nonceHit.length === 1) { m = nonceHit[0]; }
+    else if (all.length > 1 && all.some((x) => !ready.includes(x) && x.status !== 'error')) {
+      // Some entries are not ready yet: a sole ready hit may be a different identical burn.
+      return 'pending';
+    }
+    else if (wantNonce && hits.length >= 1) onError('no CCTP message with the requested eventNonce in this transaction');
+    else if (hits.length === 1) m = hits[0];
     else if (hits.length > 1) {
       // Identical batched burns: needs an explicit discriminator.
       const byNonce = select?.eventNonce

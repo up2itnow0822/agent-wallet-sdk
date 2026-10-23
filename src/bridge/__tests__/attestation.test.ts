@@ -133,3 +133,22 @@ describe('malformed source + identical batched burns (#93 review 5)', () => {
     expect(b !== 'pending' && b.attestation).toBe('0xa1');
   });
 });
+
+describe('selector with partially-ready batches (#93 review 6)', () => {
+  const fail = (m: string): never => { throw new Error(m); };
+  const msg = (nonce: string) => ('0x' + '000000010000000500000003' + nonce + 'aa'.repeat(96) + '000003e8' + '00000000' + 'bb'.repeat(170)) as `0x${string}`;
+  const z = '00'.repeat(32);
+  const res = { messages: [
+    { status: 'complete', message: msg('11'.repeat(32)), attestation: '0xa1', eventNonce: '0x' + '11'.repeat(32) },
+    { status: 'pending_confirmations', message: null, attestation: null },
+  ] };
+  it('stays pending instead of minting the other identical burn', () => {
+    expect(parseAttestationResponse(res, fail, msg(z), { eventNonce: '0x' + '22'.repeat(32) })).toBe('pending');
+    expect(parseAttestationResponse(res, fail, msg(z), { index: 1 })).toBe('pending');
+    expect(parseAttestationResponse(res, fail, msg(z))).toBe('pending');
+  });
+  it('accepts the ready one when its eventNonce is requested', () => {
+    const r = parseAttestationResponse(res, fail, msg(z), { eventNonce: '0x' + '11'.repeat(32) });
+    expect(r !== 'pending' && r.attestation).toBe('0xa1');
+  });
+});
