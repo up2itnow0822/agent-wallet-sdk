@@ -122,7 +122,10 @@ export class BridgeModule {
           eventNonce: attested.eventNonce,
         } : {}),
       };
-      if (err instanceof BridgeError) { err.recovery = recovery; throw err; }
+      if (err instanceof BridgeError) {
+        if (err.mintTxHash) recovery.mintTxHash = err.mintTxHash;
+        err.recovery = recovery; throw err;
+      }
       const e = new BridgeError('MINT_FAILED', err instanceof Error ? err.message : String(err));
       e.recovery = recovery;
       throw e;
@@ -329,9 +332,18 @@ export class BridgeModule {
       throw new BridgeError('MINT_FAILED', `CCTP receiveMessage failed on ${toChain}: ${msg}.`);
     }
 
-    const mintReceipt = await destPublicClient.waitForTransactionReceipt({ hash: mintTxHash });
+    let mintReceipt;
+    try {
+      mintReceipt = await destPublicClient.waitForTransactionReceipt({ hash: mintTxHash });
+    } catch (err: unknown) {
+      const e = new BridgeError('MINT_UNCONFIRMED', `receiveMessage submitted on ${toChain} (tx: ${mintTxHash}) but receipt polling failed: ${err instanceof Error ? err.message : String(err)}. Check this tx before retrying.`);
+      e.mintTxHash = mintTxHash;
+      throw e;
+    }
     if (mintReceipt.status !== 'success') {
-      throw new BridgeError('MINT_FAILED', `receiveMessage reverted on ${toChain} (tx: ${mintTxHash}).`);
+      const e = new BridgeError('MINT_FAILED', `receiveMessage reverted on ${toChain} (tx: ${mintTxHash}).`);
+      e.mintTxHash = mintTxHash;
+      throw e;
     }
     return mintTxHash;
   }
@@ -368,12 +380,16 @@ export interface BridgeRecovery {
   attestation?: Hex;
   /** Circle-assigned V2 event nonce. */
   eventNonce?: Hex;
+  /** Set when receiveMessage was already broadcast: monitor it, do not resend blindly. */
+  mintTxHash?: Hash;
 }
 
 export class BridgeError extends Error {
   readonly code: string;
   /** Set when USDC was already burned; use it to finish the mint later. */
   recovery?: BridgeRecovery;
+  /** Destination receiveMessage tx, when it was broadcast. */
+  mintTxHash?: Hash;
   constructor(code: string, message: string) {
     super(`[BridgeModule:${code}] ${message}`);
     this.code = code;

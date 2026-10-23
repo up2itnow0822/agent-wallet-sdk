@@ -104,3 +104,10 @@ describe('single-message responses are matched too (#93 review 3)', () => {
     expect(parseAttestationResponse({ messages: [{ status: 'pending_confirmations', message: '0x', attestation: 'PENDING' }] }, fail, mk('02'))).toBe('pending');
   });
 });
+
+describe('terminal errors with expectedMessage (#93 review 4)', () => {
+  it('throws Circle error instead of pending', () => {
+    const fail = (m: string): never => { throw new Error(m); };
+    expect(() => parseAttestationResponse({ messages: [{ status: 'error' }], error: 'boom' }, fail, ('0x' + '11'.repeat(200)) as `0x${string}`)).toThrow(/boom/);
+  });
+});

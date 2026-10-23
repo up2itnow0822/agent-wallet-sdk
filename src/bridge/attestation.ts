@@ -68,6 +68,8 @@ export function parseAttestationResponse(
   const all = body.messages ?? [];
   if (all.length === 0) return 'pending';
   let m = all[0];
+  // Terminal errors win over matching: never poll to timeout on a failed attestation.
+  if (all.length === 1 && m.status === 'error') onError(body.error ?? 'Circle reported an attestation error');
   const want = expectedMessage ? stableFields(expectedMessage) : null;
   if (all.length > 1 && !want) {
     onError(`transaction has ${all.length} CCTP messages; the source message is required to select one`);
@@ -78,7 +80,10 @@ export function parseAttestationResponse(
     const hits = ready.filter((x) => stableFields(x.message as string) === want);
     if (hits.length === 1) m = hits[0];
     else if (hits.length > 1) onError(`could not uniquely match the burn message among ${all.length} CCTP messages`);
-    else if (ready.length < all.length) return 'pending';
+    else if (ready.length < all.length) {
+      if (all.every((x) => x.status === 'error')) onError(body.error ?? 'Circle reported an attestation error');
+      return 'pending';
+    }
     else onError('Circle returned no CCTP message matching this burn (wrong or stale burn transaction?)');
   }
   if (m.status === 'error') onError(body.error ?? 'Circle reported an attestation error');
