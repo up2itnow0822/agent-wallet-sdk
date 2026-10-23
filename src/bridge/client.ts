@@ -239,12 +239,24 @@ export class BridgeModule {
       throw new BridgeError('BURN_FAILED', `CCTP depositForBurn failed: ${msg}.`);
     }
 
-    const receipt = await this.publicClient.waitForTransactionReceipt({ hash: burnTxHash });
-    if (receipt.status !== 'success') {
-      throw new BridgeError('BURN_FAILED', `depositForBurn transaction reverted (tx: ${burnTxHash}).`);
+    let receipt: TransactionReceipt;
+    let extracted: { messageBytes: Hex; messageHash: Hex; nonce: bigint };
+    try {
+      receipt = await this.publicClient.waitForTransactionReceipt({ hash: burnTxHash });
+      if (receipt.status !== 'success') {
+        throw new BridgeError('BURN_FAILED', `depositForBurn transaction reverted (tx: ${burnTxHash}).`);
+      }
+      extracted = this.extractMessageSent(receipt);
+    } catch (err: unknown) {
+      if (err instanceof BridgeError && err.code === 'BURN_FAILED') throw err;
+      // Burn was submitted: it may have burned USDC. Keep the tx hash so the
+      // caller can finish via waitForAttestation(burnTxHash) + mint().
+      const e = err instanceof BridgeError ? err
+        : new BridgeError('BURN_UNCONFIRMED', `Burn submitted (tx: ${burnTxHash}) but receipt handling failed: ${err instanceof Error ? err.message : String(err)}. Funds may be burned: call waitForAttestation(burnTxHash) then mint().`);
+      e.recovery = { burnTxHash, sourceDomain: CCTP_DOMAIN_IDS[this.fromChain], destinationDomain, toChain };
+      throw e;
     }
-
-    const { messageBytes, messageHash, nonce } = this.extractMessageSent(receipt);
+    const { messageBytes, messageHash, nonce } = extracted;
     return { burnTxHash, nonce, messageHash, messageBytes, sourceDomain: CCTP_DOMAIN_IDS[this.fromChain], destinationDomain };
   }
 
@@ -345,10 +357,11 @@ export interface BridgeRecovery {
   burnTxHash: Hash;
   sourceDomain: number;
   destinationDomain: number;
-  messageHash: Hex;
-  messageBytes: Hex;
+  /** Absent if the burn receipt could not be read (code BURN_UNCONFIRMED). */
+  messageHash?: Hex;
+  messageBytes?: Hex;
   /** Source MessageSent nonce (zero in CCTP V2; see eventNonce). */
-  nonce: bigint;
+  nonce?: bigint;
   toChain: EVMBridgeChain;
   /** Present when attestation succeeded: pass these to mint() to finish. */
   attestedMessage?: Hex;

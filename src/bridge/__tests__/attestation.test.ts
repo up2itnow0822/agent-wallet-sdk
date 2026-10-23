@@ -89,3 +89,18 @@ describe('batched burns sharing header fields (#93 review 2)', () => {
     expect(r1 !== 'pending' && r1.attestation).toBe('0xa1');
   });
 });
+
+describe('single-message responses are matched too (#93 review 3)', () => {
+  const fail = (m: string): never => { throw new Error(m); };
+  const mk = (amt: string) => ('0x' + '00000001000000050000000' + '3' + '00'.repeat(32) + 'aa'.repeat(96) + '000003e8' + '00000000' + '00000001' + 'cc'.repeat(64) + amt.padStart(64, '0')) as `0x${string}`;
+  it('rejects a one-message response for a different burn', () => {
+    expect(() => parseAttestationResponse({ messages: [{ status: 'complete', message: mk('01'), attestation: '0xa1' }] }, fail, mk('02'))).toThrow(/no CCTP message matching/);
+  });
+  it('accepts the matching one-message response', () => {
+    const r = parseAttestationResponse({ messages: [{ status: 'complete', message: mk('02'), attestation: '0xa1' }] }, fail, mk('02'));
+    expect(r !== 'pending' && r.attestation).toBe('0xa1');
+  });
+  it('stays pending while the message is not yet available', () => {
+    expect(parseAttestationResponse({ messages: [{ status: 'pending_confirmations', message: '0x', attestation: 'PENDING' }] }, fail, mk('02'))).toBe('pending');
+  });
+});

@@ -68,16 +68,18 @@ export function parseAttestationResponse(
   const all = body.messages ?? [];
   if (all.length === 0) return 'pending';
   let m = all[0];
-  if (all.length > 1) {
-    // Multi-burn tx: pick the entry matching our MessageSent, never guess.
-    const want = expectedMessage ? stableFields(expectedMessage) : null;
-    if (!want) onError(`transaction has ${all.length} CCTP messages; the source message is required to select one`);
-    const hits = all.filter((x) => typeof x.message === 'string' && stableFields(x.message) === want);
-    if (hits.length !== 1) {
-      if (hits.length === 0 && all.some((x) => typeof x.message !== 'string' || x.message === '0x')) return 'pending';
-      onError(`could not uniquely match the burn message among ${all.length} CCTP messages`);
-    }
-    m = hits[0];
+  const want = expectedMessage ? stableFields(expectedMessage) : null;
+  if (all.length > 1 && !want) {
+    onError(`transaction has ${all.length} CCTP messages; the source message is required to select one`);
+  }
+  if (want) {
+    // Always match against the caller's burn (also catches a stale/wrong tx).
+    const ready = all.filter((x) => typeof x.message === 'string' && x.message.length > 2 && x.message !== '0x');
+    const hits = ready.filter((x) => stableFields(x.message as string) === want);
+    if (hits.length === 1) m = hits[0];
+    else if (hits.length > 1) onError(`could not uniquely match the burn message among ${all.length} CCTP messages`);
+    else if (ready.length < all.length) return 'pending';
+    else onError('Circle returned no CCTP message matching this burn (wrong or stale burn transaction?)');
   }
   if (m.status === 'error') onError(body.error ?? 'Circle reported an attestation error');
   const att = m.attestation;
