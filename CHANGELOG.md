@@ -1,4 +1,12 @@
-## [Unreleased]
+## [6.4.0] — 2026-10-23
+
+Security release. Lifts the security-maintenance pause.
+
+### Fixed
+- **Bridge (#44, #93):** CCTP V2 attestation lookup by burn transaction. Attested messages are matched to the caller's burn, multi-message transactions are handled, and recovery data (`BridgeError.recovery`, `mintTxHash`, `eventNonce`) is kept so a burn or mint is never lost or repeated. New error codes `BURN_UNCONFIRMED` and `MINT_UNCONFIRMED`.
+- **x402 (#94, supersedes #26, #27, #30, #31, #32, #55):** fails closed on queued transfers, waits for the settlement receipt before retrying, counts the protocol fee in budget checks, refuses payment after a cross-origin redirect, binds payment to the exact resource, rejects zero amounts, and transfers the resolved token address.
+- **Escrow (#94, supersedes #49):** `MutualStakeEscrow` returns the vault from the factory `VaultCreated` event.
+- Hardened SpendingPolicy, SwapModule, ERC-8004 identity, outcomes and the ElizaOS plugin. CI hardened; `npm audit` reports 0 issues.
 
 ### Security
 - Removed `smithery.yaml`. Its start command ran `npx -y @agentwallet/sdk mcp` and passed the user's agent key as `AGENT_PRIVATE_KEY`. `@agentwallet/sdk` is a third-party npm package, not this project's `agentwallet-sdk`. MCP belongs in [agentpay-mcp](https://github.com/up2itnow0822/agentpay-mcp). Rotate any wallet key ever entered through that Smithery listing.
