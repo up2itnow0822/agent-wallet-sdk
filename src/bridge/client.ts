@@ -14,7 +14,7 @@
  */
 // BridgeModule — CCTP V2 cross-chain USDC bridge for AgentWallet
 // Non-custodial: all signing is done locally via the agent's WalletClient.
-import { attestationUrl, parseAttestationResponse, type CctpAttestedMessage, type CircleV2MessagesResponse } from './attestation.js';
+import { attestationUrl, parseAttestationResponse, isDefinitelyNotBroadcast, BURN_SUBMISSION_UNKNOWN_HINT, type CctpAttestedMessage, type CircleV2MessagesResponse } from './attestation.js';
 import {
   createPublicClient,
   http,
@@ -239,7 +239,10 @@ export class BridgeModule {
       );
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      throw new BridgeError('BURN_FAILED', `CCTP depositForBurn failed: ${msg}.`);
+      if (isDefinitelyNotBroadcast(err)) {
+        throw new BridgeError('BURN_FAILED', `CCTP depositForBurn failed: ${msg}.`);
+      }
+      throw new BridgeError('BURN_SUBMISSION_UNKNOWN', `CCTP depositForBurn outcome unknown: ${msg}. ${BURN_SUBMISSION_UNKNOWN_HINT}`);
     }
 
     let receipt: TransactionReceipt;

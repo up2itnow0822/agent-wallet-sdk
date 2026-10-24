@@ -1,5 +1,3 @@
-> [!WARNING]
-> **Paused for security maintenance. Do not use in production.**
 
 # 🔐 AgentWallet SDK — Non-Custodial Wallets for AI Agents
 
