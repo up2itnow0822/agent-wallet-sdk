@@ -103,6 +103,13 @@ export const ERC8004IdentityRegistryAbi = [
     ],
   },
   {
+    name: 'Transfer', type: 'event', inputs: [
+      { name: 'from', type: 'address', indexed: true },
+      { name: 'to', type: 'address', indexed: true },
+      { name: 'tokenId', type: 'uint256', indexed: true },
+    ],
+  },
+  {
     name: 'URIUpdated', type: 'event', inputs: [
       { name: 'agentId', type: 'uint256', indexed: true },
       { name: 'newURI', type: 'string', indexed: false },
@@ -173,10 +180,39 @@ export interface MetadataEntry {
 
 export type SupportedChain = 'base' | 'base-sepolia' | 'ethereum' | 'arbitrum' | 'polygon' | 'arbitrum-sepolia';
 
+export interface AgentURIResolverContext {
+  /** Best-effort cancellation. The resolver must stop its own network work on abort. */
+  signal: AbortSignal;
+  /** Maximum UTF-8 JSON bytes; enforce this while reading, before buffering the body. */
+  maxBytes: number;
+}
+
+/**
+ * Explicitly trusted external metadata resolver. The SDK does not perform HTTP
+ * requests or enforce destination safety for this callback. Server resolvers must
+ * enforce an exact HTTPS destination allowlist, reject private/local/reserved IPv4
+ * and IPv6 DNS results, and bind connections to validated addresses to prevent DNS
+ * rebinding. Disable redirects or apply the same policy to every redirect. Bound
+ * network time/body consumption and honor the signal; the SDK only bounds its own
+ * wait and the JSON text it accepts. Do not pass an unrestricted fetch wrapper.
+ */
+export type AgentURIResolver = (uri: string, context: AgentURIResolverContext) => Promise<string>;
+
+export interface AgentURIResolutionOptions {
+  /** Opt in to external HTTPS metadata with a resolver whose network policy you control. */
+  resolver?: AgentURIResolver;
+  /** Maximum accepted UTF-8 JSON bytes, including inline data. Default: 256 KiB. */
+  maxBytes?: number;
+  /** Maximum wait for the external resolver in milliseconds. Default: 5,000. */
+  timeoutMs?: number;
+}
+
 export interface ERC8004ClientConfig {
   registryAddress?: Address;
   chain: SupportedChain;
   rpcUrl?: string;
+  /** Inline metadata only by default. External metadata requires a trusted resolver. */
+  uriResolution?: AgentURIResolutionOptions;
 }
 
 export interface RegistrationResult {
@@ -230,6 +266,9 @@ const CHAINS: Record<string, Chain> = {
 };
 
 const REGISTERED_TOPIC = '0xca52e62c367d81bb2e328eb795f7c7ba24afb478408a26c0e201d155c449bc4a';
+const DEFAULT_METADATA_MAX_BYTES = 256 * 1024;
+const DEFAULT_METADATA_TIMEOUT_MS = 5_000;
+const DATA_URI_PREFIX = 'data:application/json;base64,';
 
 // ─── Client ──────────────────────────────────────────────────────────────────
 
@@ -244,7 +283,10 @@ export class ERC8004Client {
     if (!resolvedAddress) {
       throw new Error(`ERC8004Client: No registry address provided and no known address for chain "${config.chain}"`);
     }
-    this.config = { ...config, registryAddress: resolvedAddress };
+    this.config = {
+      ...config, registryAddress: resolvedAddress,
+      uriResolution: config.uriResolution ? { ...config.uriResolution } : undefined,
+    };
     const chain = CHAINS[config.chain];
     if (!chain) throw new Error(`ERC8004Client: Unsupported chain "${config.chain}"`);
     this.chain = chain;
@@ -310,17 +352,24 @@ export class ERC8004Client {
   }
 
   async lookupAgentIdentity(agentId: bigint): Promise<AgentIdentity> {
+    return this.lookupAgentIdentityAtBlock(agentId);
+  }
+
+  private async lookupAgentIdentityAtBlock(agentId: bigint, blockNumber?: bigint): Promise<AgentIdentity> {
     const contract = this.getReadContract();
+    const readOptions = blockNumber === undefined ? undefined : { blockNumber };
     const [owner, agentURI, agentWallet] = await Promise.all([
-      contract.read.ownerOf([agentId]),
-      contract.read.tokenURI([agentId]),
-      contract.read.getAgentWallet([agentId]),
+      contract.read.ownerOf([agentId], readOptions),
+      contract.read.tokenURI([agentId], readOptions),
+      contract.read.getAgentWallet([agentId], readOptions),
     ]);
 
     let registrationFile: AgentRegistrationFile | null = null;
-    try { registrationFile = await resolveAgentURI(agentURI as string); } catch { /* unavailable */ }
+    try {
+      registrationFile = await resolveAgentURI(agentURI as string, this.config.uriResolution);
+    } catch { /* disabled, rejected, or unavailable */ }
 
-    const modelMetadata = await this.readModelMetadata(agentId);
+    const modelMetadata = await this.readModelMetadata(agentId, blockNumber);
 
     return {
       agentId, owner: owner as Address, agentURI: agentURI as string,
@@ -328,8 +377,14 @@ export class ERC8004Client {
     };
   }
 
+  /**
+   * Finds the newest discovered token currently owned at one block snapshot.
+   * fromBlock limits discovery; earlier registrations/transfers may be missed.
+   * Ownership can change after the snapshot, so this is not payment authorization.
+   */
   async lookupAgentByOwner(ownerAddress: Address, fromBlock: bigint = 0n): Promise<AgentIdentity | null> {
-    const logs = await this.publicClient.getLogs({
+    const blockNumber = await this.publicClient.getBlockNumber();
+    const [registrations, transfers] = await Promise.all([this.publicClient.getLogs({
       address: this.config.registryAddress,
       event: {
         type: 'event', name: 'Registered',
@@ -340,13 +395,41 @@ export class ERC8004Client {
         ],
       },
       args: { owner: ownerAddress },
-      fromBlock, toBlock: 'latest',
-    });
+      fromBlock, toBlock: blockNumber,
+    }), this.publicClient.getLogs({
+      address: this.config.registryAddress,
+      event: {
+        type: 'event', name: 'Transfer',
+        inputs: [
+          { name: 'from', type: 'address', indexed: true },
+          { name: 'to', type: 'address', indexed: true },
+          { name: 'tokenId', type: 'uint256', indexed: true },
+        ],
+      },
+      args: { to: ownerAddress },
+      fromBlock, toBlock: blockNumber,
+    })]);
 
-    if (logs.length === 0) return null;
-    const latestLog = logs[logs.length - 1];
-    const agentId = BigInt(latestLog.args?.agentId ?? 0);
-    return this.lookupAgentIdentity(agentId);
+    const candidates = [
+      ...registrations.map((log) => ({ agentId: log.args.agentId, blockNumber: log.blockNumber, logIndex: log.logIndex })),
+      ...transfers.map((log) => ({ agentId: log.args.tokenId, blockNumber: log.blockNumber, logIndex: log.logIndex })),
+    ].sort((a, b) => {
+      const aBlock = a.blockNumber ?? 0n;
+      const bBlock = b.blockNumber ?? 0n;
+      return aBlock === bBlock ? (b.logIndex ?? 0) - (a.logIndex ?? 0) : aBlock > bBlock ? -1 : 1;
+    });
+    const seen = new Set<bigint>();
+    const expectedOwner = ownerAddress.toLowerCase();
+    const contract = this.getReadContract();
+    for (const { agentId } of candidates) {
+      if (agentId === undefined || seen.has(agentId)) continue;
+      seen.add(agentId);
+      const owner = await contract.read.ownerOf([agentId], { blockNumber });
+      if (owner.toLowerCase() !== expectedOwner) continue;
+      const identity = await this.lookupAgentIdentityAtBlock(agentId, blockNumber);
+      if (identity.owner.toLowerCase() === expectedOwner) return identity;
+    }
+    return null;
   }
 
   async updateAgentURI(walletClient: WalletClient, agentId: bigint, newURI: string): Promise<Hash> {
@@ -357,9 +440,9 @@ export class ERC8004Client {
     });
   }
 
-  async getOnChainMetadata(agentId: bigint, key: string): Promise<Hex | null> {
+  async getOnChainMetadata(agentId: bigint, key: string, blockNumber?: bigint): Promise<Hex | null> {
     const contract = this.getReadContract();
-    const value = await contract.read.getMetadata([agentId, key]);
+    const value = await contract.read.getMetadata([agentId, key], blockNumber === undefined ? undefined : { blockNumber });
     return value === '0x' || value === null ? null : value as Hex;
   }
 
@@ -391,9 +474,9 @@ export class ERC8004Client {
     return hashes;
   }
 
-  async readModelMetadata(agentId: bigint): Promise<AgentModelMetadata | null> {
+  async readModelMetadata(agentId: bigint, blockNumber?: bigint): Promise<AgentModelMetadata | null> {
     const keys = [METADATA_KEYS.MODEL, METADATA_KEYS.MODEL_PROVIDER, METADATA_KEYS.VERSION, METADATA_KEYS.FRAMEWORK, METADATA_KEYS.CAPABILITIES];
-    const values = await Promise.all(keys.map((k) => this.getOnChainMetadata(agentId, k)));
+    const values = await Promise.all(keys.map((k) => this.getOnChainMetadata(agentId, k, blockNumber)));
     const [modelHex, providerHex, versionHex, frameworkHex, capabilitiesHex] = values;
 
     if (!modelHex && !providerHex && !versionHex && !frameworkHex && !capabilitiesHex) return null;
@@ -442,24 +525,62 @@ export function buildDataURI(registrationFile: AgentRegistrationFile): string {
   return `data:application/json;base64,${b64}`;
 }
 
-export function parseDataURI(uri: string): AgentRegistrationFile {
-  if (uri.startsWith('data:application/json;base64,')) {
-    const b64 = uri.replace('data:application/json;base64,', '');
-    const json = decodeURIComponent(escape(atob(b64)));
-    return JSON.parse(json);
+/** Decode inline JSON with a byte limit checked before base64 decoding. */
+export function parseDataURI(uri: string, maxBytes: number = DEFAULT_METADATA_MAX_BYTES): AgentRegistrationFile {
+  assertPositiveInteger(maxBytes, 'maxBytes');
+  if (uri.startsWith(DATA_URI_PREFIX)) {
+    if (uri.length - DATA_URI_PREFIX.length > Math.ceil(maxBytes / 3) * 4) {
+      throw new Error('parseDataURI: Metadata exceeds maxBytes');
+    }
+    const binary = atob(uri.slice(DATA_URI_PREFIX.length));
+    if (binary.length > maxBytes) throw new Error('parseDataURI: Metadata exceeds maxBytes');
+    const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+    const json = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    return parseBoundedJSON(json, maxBytes);
   }
-  if (uri.startsWith('{')) return JSON.parse(uri);
+  if (uri.startsWith('{')) return parseBoundedJSON(uri, maxBytes);
   throw new Error(`parseDataURI: Cannot parse URI scheme: ${uri.substring(0, 50)}`);
 }
 
-export async function resolveAgentURI(uri: string): Promise<AgentRegistrationFile> {
-  if (uri.startsWith('data:')) return parseDataURI(uri);
-  if (uri.startsWith('https://') || uri.startsWith('http://')) {
-    const response = await fetch(uri);
-    if (!response.ok) throw new Error(`resolveAgentURI: HTTP ${response.status} for ${uri}`);
-    return response.json();
+/**
+ * Resolves bounded inline metadata without network access. External HTTPS URIs
+ * require an explicitly trusted resolver; destination/DNS/redirect safety belongs
+ * to that resolver, not this helper. It receives the original URI unchanged.
+ */
+export async function resolveAgentURI(uri: string, options: AgentURIResolutionOptions = {}): Promise<AgentRegistrationFile> {
+  const maxBytes = options.maxBytes ?? DEFAULT_METADATA_MAX_BYTES;
+  const timeoutMs = options.timeoutMs ?? DEFAULT_METADATA_TIMEOUT_MS;
+  assertPositiveInteger(maxBytes, 'maxBytes');
+  assertPositiveInteger(timeoutMs, 'timeoutMs');
+  if (timeoutMs > 2_147_483_647) throw new Error('resolveAgentURI: timeoutMs exceeds timer range');
+  if (uri.startsWith('data:')) return parseDataURI(uri, maxBytes);
+  if (!options.resolver) throw new Error('resolveAgentURI: External metadata resolution is disabled; supply a trusted resolver');
+  if (!uri.startsWith('https://') || /[\u0000-\u0020\u007f\\]/.test(uri) || uri.length > 8192) {
+    throw new Error('resolveAgentURI: External metadata must use an unambiguous HTTPS URI');
   }
-  throw new Error(`resolveAgentURI: Unsupported URI scheme: ${uri}`);
+  const url = new URL(uri);
+  if (url.protocol !== 'https:' || url.username || url.password) {
+    throw new Error('resolveAgentURI: HTTPS URI credentials are forbidden');
+  }
+
+  const resolver = options.resolver;
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        reject(new Error('resolveAgentURI: Metadata resolution timed out'));
+        controller.abort();
+      }, timeoutMs);
+    });
+    const json = await Promise.race([
+      Promise.resolve().then(() => resolver(uri, { signal: controller.signal, maxBytes })),
+      timeout,
+    ]);
+    return parseBoundedJSON(json, maxBytes);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 export function validateRegistrationFile(file: AgentRegistrationFile): string[] {
@@ -487,6 +608,18 @@ export function formatAgentRegistry(chainId: number, registryAddress: Address): 
 }
 
 // ─── Internal utilities ───────────────────────────────────────────────────────
+
+function assertPositiveInteger(value: number, name: string): void {
+  if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`ERC8004: ${name} must be a positive safe integer`);
+}
+
+function parseBoundedJSON(json: string, maxBytes: number): AgentRegistrationFile {
+  if (typeof json !== 'string') throw new Error('resolveAgentURI: Resolver must return JSON text');
+  if (json.length > maxBytes || new TextEncoder().encode(json).length > maxBytes) {
+    throw new Error('ERC8004: Metadata exceeds maxBytes');
+  }
+  return JSON.parse(json) as AgentRegistrationFile;
+}
 
 function stringToHex(str: string): Hex {
   const bytes = new TextEncoder().encode(str);

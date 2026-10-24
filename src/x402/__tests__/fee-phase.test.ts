@@ -535,7 +535,7 @@ describe('X402Client protocol-fee phase (#50)', () => {
     expect(client.getTransactionLog()).toHaveLength(0);
   });
 
-  it('clears an unkeyed fee phase after delayed payee confirmation', async () => {
+  it('retains an unkeyed fee and payment proof after delayed payee confirmation', async () => {
     const { wallet, payeeHashes } = setupTransfers({
       feeReceipts: ['success', 'success'],
       payeeReceipts: ['success', 'success'],
@@ -554,10 +554,14 @@ describe('X402Client protocol-fee phase (#50)', () => {
 
     await expect(client.fetch(URL, { method: 'POST' })).rejects.toThrow('payee receipt timeout');
     expect((await client.fetch(URL, { method: 'POST' })).status).toBe(200);
-    expect((await client.fetch(URL, { method: 'POST' })).status).toBe(200);
+    expect(transfer.mock.calls.filter((call) => isFeeTransfer(call[1]))).toHaveLength(1);
+    expect(transfer.mock.calls.filter((call) => !isFeeTransfer(call[1]))).toHaveLength(1);
+    expect(client.getDailySpendSummary().global).toBe(1_007_700n);
 
+    expect((await client.fetch(URL, { method: 'POST' })).status).toBe(200);
     expect(transfer.mock.calls.filter((call) => isFeeTransfer(call[1]))).toHaveLength(2);
     expect(transfer.mock.calls.filter((call) => !isFeeTransfer(call[1]))).toHaveLength(2);
+    expect(client.getDailySpendSummary().global).toBe(2_015_400n);
   });
 
   it('expires a confirmed fee phase with its completed settlement', async () => {

@@ -1,4 +1,6 @@
 import {
+  decodeEventLog,
+  zeroAddress,
   type Address,
   type Hex,
   type PublicClient,
@@ -134,50 +136,72 @@ export class MutualStakeEscrow {
     const token = params.token ?? BASE_USDC;
     const verifierAddress = resolveVerifierAddress(params.verifier, this.chainId);
     const verifierData = params.verifierData ?? encodeOptimisticVerifierData();
+    // Keep the signed terms stable while submission and confirmation await RPC.
+    const buyer = account.address;
+    const seller = params.seller;
+    const paymentAmount = params.paymentAmount;
+    const buyerStake = params.buyerStake;
+    const sellerStake = params.sellerStake;
+    const deadline = BigInt(params.deadline);
+    const challengeWindow = BigInt(params.challengeWindow);
 
     const txHash = await this.walletClient.writeContract({
       address: this.factoryAddress,
       abi: StakeVaultFactoryAbi,
       functionName: 'createEscrow',
       args: [
-        account.address,
-        params.seller,
+        buyer,
+        seller,
         token,
-        params.paymentAmount,
-        params.buyerStake,
-        params.sellerStake,
+        paymentAmount,
+        buyerStake,
+        sellerStake,
         verifierAddress,
         verifierData,
-        BigInt(params.deadline),
-        BigInt(params.challengeWindow),
+        deadline,
+        challengeWindow,
       ],
       account,
       chain: this.walletClient.chain,
     });
 
-    await this.publicClient.waitForTransactionReceipt({ hash: txHash });
+    const receipt = await this.publicClient.waitForTransactionReceipt({ hash: txHash });
+    if (receipt.status !== 'success') {
+      throw new Error('MutualStakeEscrow: creation transaction was not confirmed successful');
+    }
 
-    // Read vault address from return data via simulation
-    // (VaultCreated event parsing reserved for future use)
-    const vaultAddress = await this.publicClient.readContract({
-      address: this.factoryAddress,
-      abi: StakeVaultFactoryAbi,
-      functionName: 'createEscrow',
-      args: [
-        account.address,
-        params.seller,
-        token,
-        params.paymentAmount,
-        params.buyerStake,
-        params.sellerStake,
-        verifierAddress,
-        verifierData,
-        BigInt(params.deadline),
-        BigInt(params.challengeWindow),
-      ],
-    }) as Address;
-
-    return { address: vaultAddress, txHash };
+    const vaults: Address[] = [];
+    for (const log of receipt.logs) {
+      if (log.address.toLowerCase() !== this.factoryAddress.toLowerCase()) continue;
+      try {
+        const { args } = decodeEventLog({
+          abi: StakeVaultFactoryAbi,
+          eventName: 'VaultCreated',
+          data: log.data,
+          topics: log.topics,
+          strict: true,
+        });
+        if (
+          args.vault.toLowerCase() !== zeroAddress &&
+          args.buyer.toLowerCase() === buyer.toLowerCase() &&
+          args.seller.toLowerCase() === seller.toLowerCase() &&
+          args.token.toLowerCase() === token.toLowerCase() &&
+          args.paymentAmount === paymentAmount &&
+          args.buyerStake === buyerStake &&
+          args.sellerStake === sellerStake &&
+          args.verifier.toLowerCase() === verifierAddress.toLowerCase() &&
+          args.deadline === deadline
+        ) {
+          vaults.push(args.vault);
+        }
+      } catch {
+        // Unrelated or malformed factory logs cannot establish vault creation.
+      }
+    }
+    if (vaults.length !== 1) {
+      throw new Error('MutualStakeEscrow: creation receipt must contain exactly one matching factory VaultCreated event; reconcile this transaction before retrying');
+    }
+    return { address: vaults[0], txHash };
   }
 
   /**
