@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   X402BudgetExceededError,
   X402IntentTermsConflictError,
+  X402PaidRequestError,
   X402PaymentError,
   X402SettlementBacklogError,
   X402SettlementQueuedError,
@@ -96,9 +97,87 @@ describe('classifySpendError', () => {
     expectHoldUnknown(classifySpendError(new Error(`receipt polling failed (${VALID_HASH})`)));
   });
 
-  it('treats generic pre-broadcast throws as definite not-charged', () => {
-    expectReleased(classifySpendError(new Error('user rejected request')));
-    expectReleased(classifySpendError(new Error('insufficient funds for gas')));
+  it('holds generic throws because their message does not prove no broadcast', () => {
+    expectHoldUnknown(classifySpendError(new Error('user rejected request')));
+    expectHoldUnknown(classifySpendError(new Error('insufficient funds for gas')));
+    expectHoldUnknown(classifySpendError(new Error('unexpected executor failure')));
+  });
+
+  it('holds a generic failure and preserves all attached broadcast hashes', () => {
+    const outcome = classifySpendError(Object.assign(new Error('submission failed'), {
+      transactionHash: VALID_HASH,
+      txHashes: [VALID_HASH, VALID_FEE_HASH],
+    }));
+    expectHoldUnknown(outcome);
+    expect(outcome.txHash).toBe(VALID_HASH);
+    expect(outcome.txHashes).toEqual([VALID_HASH, VALID_FEE_HASH]);
+  });
+
+  it('does not release a named pre-broadcast failure carrying broadcast evidence', () => {
+    const outcome = classifySpendError(Object.assign(
+      new X402PaymentError('submission failed', REQUIREMENTS),
+      { txHash: VALID_HASH },
+    ));
+    expectHoldUnknown(outcome);
+    expect(outcome.txHash).toBe(VALID_HASH);
+  });
+
+  it('holds malformed broadcast evidence attached to a named pre-broadcast failure', () => {
+    expectHoldUnknown(classifySpendError(Object.assign(
+      new X402PaymentError('submission failed', REQUIREMENTS),
+      { txHash: SHORT_HASH },
+    )));
+  });
+
+  it('holds a revert error that does not identify a valid reverted transaction', () => {
+    expectHoldUnknown(classifySpendError(new X402SettlementRevertedError(SHORT_HASH as `0x${string}`)));
+  });
+
+  it('keeps intent conflicts with broadcast evidence held', () => {
+    const outcome = classifySpendError(Object.assign(
+      new X402IntentTermsConflictError('intent', 'cached', 'observed'),
+      { txHash: VALID_HASH },
+    ));
+    expectHoldUnknown(outcome);
+  });
+
+  it('keeps the full hold when only the payee reverted and a protocol fee was charged', () => {
+    const outcome = classifySpendError(Object.assign(
+      new X402SettlementRevertedError(VALID_HASH as `0x${string}`),
+      { confirmedFeeTxHash: VALID_FEE_HASH, txHashes: [VALID_HASH, VALID_FEE_HASH] },
+    ));
+    expectHoldUnknown(outcome);
+    expect(outcome.txHashes).toEqual([VALID_HASH, VALID_FEE_HASH]);
+  });
+
+  it('settles a paid HTTP error only with a successful receipt and valid hashes', () => {
+    const outcome = classifySpendError(new X402PaidRequestError(
+      VALID_HASH, VALID_FEE_HASH, new Error('HTTP retry failed'), 'paid-intent',
+    ));
+    expectSettled(outcome);
+    expect(outcome.txHashes).toEqual([VALID_HASH, VALID_FEE_HASH]);
+    expect(outcome.idempotencyKey).toBe('paid-intent');
+  });
+
+  it('preserves the confirmed fee amount when a partial spend stays held', () => {
+    const outcome = classifySpendError(Object.assign(
+      new X402SettlementRevertedError(VALID_HASH as `0x${string}`),
+      { confirmedFeeTxHash: VALID_FEE_HASH, fee: 7_700n },
+    ));
+    expectHoldUnknown(outcome);
+    expect(outcome.fee).toBe(7_700n);
+  });
+
+  it.each([
+    { receipt: undefined, txHashes: [VALID_HASH] },
+    { receipt: { status: 'success' }, txHashes: [] },
+    { receipt: { status: 'success', transactionHash: VALID_HASH }, txHashes: [SHORT_HASH] },
+  ])('holds a paid HTTP error lacking valid settlement proof: %j', (proof) => {
+    const outcome = classifySpendError(Object.assign(new Error('HTTP retry failed'), {
+      name: 'X402PaidRequestError',
+      ...proof,
+    }));
+    expectHoldUnknown(outcome);
   });
 });
 
@@ -138,6 +217,10 @@ describe('classifySpendAttempt', () => {
     expect(outcome.txHash).toBe(VALID_HASH);
   });
 
+  it.each([undefined, SHORT_HASH])('holds a revert-shaped receipt without a valid hash: %s', (txHash) => {
+    expectHoldUnknown(classifySpendAttempt({ receipt: { status: 'reverted', txHash } }));
+  });
+
   it('keeps a hold when a hash was returned but confirmation is missing', () => {
     const outcome = classifySpendAttempt({
       txHash: VALID_HASH,
@@ -147,10 +230,85 @@ describe('classifySpendAttempt', () => {
     expect(outcome.txHash).toBe(VALID_HASH);
   });
 
+  it('keeps a queued authorization held despite its successful outer receipt', () => {
+    const outcome = classifySpendAttempt({
+      error: new X402SettlementQueuedError(VALID_HASH),
+      receipt: { status: 'success', transactionHash: VALID_HASH },
+    });
+    expectHoldUnknown(outcome);
+    expect(outcome.txHashes).toEqual([VALID_HASH]);
+  });
+
   it('releases a definite error even if a hash is attached', () => {
     const outcome = classifySpendAttempt({
       error: new X402SettlementRevertedError(VALID_HASH as `0x${string}`),
       txHash: VALID_HASH,
+    });
+    expectReleased(outcome);
+  });
+
+  it('releases a confirmed agent-execution revert instead of holding the reservation', () => {
+    const error = Object.assign(new Error(`Agent execution reverted: ${VALID_HASH}`), {
+      name: 'AgentExecutionError',
+      txHash: VALID_HASH,
+      executionStatus: 'reverted',
+    });
+    const classified = classifySpendError(error);
+    expectReleased(classified);
+    expect(classified.txHash).toBe(VALID_HASH);
+    expectReleased(classifySpendAttempt({ error }));
+  });
+
+  it('holds an unconfirmed agent-execution error carrying the submitted hash', () => {
+    const error = Object.assign(new Error(`Agent execution unknown: ${VALID_HASH}`), {
+      name: 'AgentExecutionError',
+      txHash: VALID_HASH,
+      executionStatus: 'unknown',
+    });
+    expectHoldUnknown(classifySpendError(error));
+    expectHoldUnknown(classifySpendAttempt({ error }));
+  });
+
+  it('holds a named pre-broadcast error when the attempt includes a transaction hash', () => {
+    const outcome = classifySpendAttempt({
+      error: new X402PaymentError('submission failed', REQUIREMENTS),
+      txHash: VALID_HASH,
+    });
+    expectHoldUnknown(outcome);
+    expect(outcome.txHashes).toEqual([VALID_HASH]);
+  });
+
+  it('holds a named pre-broadcast error when the attempt includes a malformed hash', () => {
+    expectHoldUnknown(classifySpendAttempt({
+      error: new X402PaymentError('submission failed', REQUIREMENTS),
+      txHash: SHORT_HASH,
+    }));
+  });
+
+  it('holds an empty attempt because absence of evidence does not prove no charge', () => {
+    expectHoldUnknown(classifySpendAttempt({}));
+  });
+
+  it('uses a confirmed receipt even when a subsequent operation throws', () => {
+    const outcome = classifySpendAttempt({
+      error: new Error('HTTP retry failed'),
+      receipt: { status: 'success', transactionHash: VALID_HASH },
+    });
+    expectSettled(outcome);
+  });
+
+  it('preserves paid request intent metadata when classifying the complete attempt', () => {
+    const outcome = classifySpendAttempt({
+      error: new X402PaidRequestError(VALID_HASH, VALID_FEE_HASH, new Error('response failed'), 'paid-intent'),
+    });
+    expectSettled(outcome);
+    expect(outcome.idempotencyKey).toBe('paid-intent');
+  });
+
+  it('releases a confirmed revert even when receipt processing throws', () => {
+    const outcome = classifySpendAttempt({
+      error: new Error('receipt processing failed'),
+      receipt: { status: 'reverted', transactionHash: VALID_HASH },
     });
     expectReleased(outcome);
   });

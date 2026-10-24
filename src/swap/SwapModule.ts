@@ -1,14 +1,14 @@
 /**
  * @module swap/SwapModule
- * SwapModule — multi-chain Uniswap V3 token swap aggregator with 0.875% protocol fee.
+ * SwapModule — multi-chain Uniswap V3 token quotes and fee-free EOA swaps.
  *
  * Supports Base, Arbitrum, Optimism, and Polygon. Automatically selects the best
  * Uniswap V3 fee tier (0.01%, 0.05%, 0.3%, 1%) by quoting all tiers and choosing
- * the highest output. Applies slippage protection and an optional protocol fee.
+ * the highest output. Execution requires feeBps: 0 until a reviewed atomic fee
+ * route exists, and the signer must own accountAddress directly.
  *
- * Usage: construct with `chain` param or use `attachSwap(wallet, { chain: 'arbitrum' })`.
+ * For execution use `attachSwap(eoaWallet, { chain: 'arbitrum', feeBps: 0 })`.
  */
-// SwapModule — Uniswap V3 token swap aggregator with 0.875% protocol fee
 import {
   encodeFunctionData,
   type Address,
@@ -31,20 +31,43 @@ import {
 } from './types.js';
 
 const FEE_TIERS: UniswapFeeTier[] = [100, 500, 3000, 10000];
+const MAX_UINT256 = (1n << 256n) - 1n;
+
+function validateAmount(amount: bigint, name: string, allowZero = false): void {
+  if (typeof amount !== 'bigint' || amount < (allowZero ? 0n : 1n) || amount > MAX_UINT256) {
+    throw new Error(`SwapModule: ${name} must be ${allowZero ? 'a non-negative' : 'a positive'} uint256 amount`);
+  }
+}
+
+function validateSlippage(slippageBps: number): void {
+  if (!Number.isSafeInteger(slippageBps) || slippageBps < 0 || slippageBps >= 10000) {
+    throw new Error('SwapModule: slippageBps must be an integer between 0 and 9999');
+  }
+}
 
 /** Calculate protocol fee: floor(amount * feeBps / 100_000) */
 export function calcProtocolFee(amount: bigint, feeBps: number): bigint {
+  validateAmount(amount, 'amount', true);
+  if (!Number.isSafeInteger(feeBps) || feeBps < 0 || feeBps > 100000) {
+    throw new Error('SwapModule: feeBps must be an integer between 0 and 100000');
+  }
   return (amount * BigInt(feeBps)) / 100000n;
 }
 
 /** Apply slippage: floor(amount * (10_000 - slippageBps) / 10_000) */
 export function applySlippage(amount: bigint, slippageBps: number): bigint {
+  validateAmount(amount, 'amount', true);
+  validateSlippage(slippageBps);
   return (amount * BigInt(10000 - slippageBps)) / 10000n;
 }
 
-/** Encode deadline: block.timestamp + deadlineSecs */
+/** Encode local Unix time + deadlineSecs; the router checks this expiry on-chain. */
 export function calcDeadline(deadlineSecs: number): bigint {
-  return BigInt(Math.floor(Date.now() / 1000) + deadlineSecs);
+  const deadline = Math.floor(Date.now() / 1000) + deadlineSecs;
+  if (!Number.isSafeInteger(deadlineSecs) || deadlineSecs <= 0 || !Number.isSafeInteger(deadline)) {
+    throw new Error('SwapModule: deadlineSecs must be a positive integer with a safe Unix deadline');
+  }
+  return BigInt(deadline);
 }
 
 export class SwapModule {
@@ -83,7 +106,9 @@ export class SwapModule {
     amountIn: bigint,
     options: Pick<SwapOptions, 'slippageBps' | 'feeTiers'> = {},
   ): Promise<SwapQuote> {
+    validateAmount(amountIn, 'amountIn');
     const slippageBps = options.slippageBps ?? DEFAULT_SLIPPAGE_BPS;
+    validateSlippage(slippageBps);
     const tiersToTry = options.feeTiers ?? FEE_TIERS;
     const feeAmount = calcProtocolFee(amountIn, this.config.feeBps);
     const amountInNet = amountIn - feeAmount;
@@ -114,7 +139,10 @@ export class SwapModule {
     }
 
     const amountOutMinimum = applySlippage(bestQuote.amountOut, slippageBps);
-    const effectiveRate = amountInNet > 0n ? Number(bestQuote.amountOut) / Number(amountInNet) : 0;
+    if (amountOutMinimum <= 0n) {
+      throw new Error('SwapModule: minimum output must be positive; increase input or reduce slippage');
+    }
+    const effectiveRate = Number(bestQuote.amountOut) / Number(amountInNet);
 
     return {
       tokenIn, tokenOut, amountInRaw: amountIn, amountInNet, feeAmount,
@@ -124,6 +152,8 @@ export class SwapModule {
   }
 
   async ensureApproval(token: Address, spender: Address, amount: bigint): Promise<Hash | undefined> {
+    validateAmount(amount, 'approval amount');
+    const account = this.executionAccount();
     const currentAllowance = (await this.publicClient.readContract({
       address: token, abi: ERC20Abi, functionName: 'allowance',
       args: [this.accountAddress, spender],
@@ -131,30 +161,34 @@ export class SwapModule {
 
     if (currentAllowance >= amount) return undefined;
 
-    const MAX_UINT256 = 115792089237316195423570985008687907853269984665640564039457584007913129639935n;
-    const account = this.walletClient.account;
-    if (!account) throw new Error('SwapModule: walletClient has no account');
-
     const approveData = encodeFunctionData({
-      abi: ERC20Abi, functionName: 'approve', args: [spender, MAX_UINT256],
+      abi: ERC20Abi, functionName: 'approve', args: [spender, amount],
     });
 
-    return this.walletClient.sendTransaction({
+    const hash = await this.walletClient.sendTransaction({
       account, to: token, data: approveData, chain: this.walletClient.chain ?? null,
     });
+    const receipt = await this.publicClient.waitForTransactionReceipt({ hash });
+    if (receipt.status !== 'success') {
+      throw new Error('SwapModule: approval reverted or was not confirmed successful');
+    }
+    const confirmedAllowance = (await this.publicClient.readContract({
+      address: token, abi: ERC20Abi, functionName: 'allowance',
+      args: [this.accountAddress, spender],
+    })) as bigint;
+    if (confirmedAllowance < amount) {
+      throw new Error('SwapModule: confirmed allowance does not cover the swap input');
+    }
+    return hash;
   }
 
-  private async transferFee(token: Address, feeAmount: bigint, feeWallet: Address): Promise<Hash> {
+  private executionAccount() {
     const account = this.walletClient.account;
     if (!account) throw new Error('SwapModule: walletClient has no account');
-
-    const transferData = encodeFunctionData({
-      abi: ERC20Abi, functionName: 'transfer', args: [feeWallet, feeAmount],
-    });
-
-    return this.walletClient.sendTransaction({
-      account, to: token, data: transferData, chain: this.walletClient.chain ?? null,
-    });
+    if (account.address.toLowerCase() !== this.accountAddress.toLowerCase()) {
+      throw new Error('SwapModule: only direct EOA execution is supported; accountAddress must equal the signer address. AgentAccount/TBA execution requires a reviewed account route.');
+    }
+    return account;
   }
 
   async swap(
@@ -163,9 +197,15 @@ export class SwapModule {
     amountIn: bigint,
     options: SwapOptions = {},
   ): Promise<SwapResult> {
+    validateAmount(amountIn, 'amountIn');
     const slippageBps = options.slippageBps ?? DEFAULT_SLIPPAGE_BPS;
+    validateSlippage(slippageBps);
     const deadlineSecs = options.deadlineSecs ?? 300;
-    const feeWallet = options.feeWallet ?? this.config.feeWallet;
+    calcDeadline(deadlineSecs); // Validate before an approval can be signed.
+    if (this.config.feeBps !== 0) {
+      throw new Error('SwapModule: fee-bearing swaps are disabled until a reviewed atomic fee route exists. Configure feeBps: 0 for fee-free EOA execution.');
+    }
+    const account = this.executionAccount();
 
     const quote = await this.getQuote(tokenIn, tokenOut, amountIn, { slippageBps, feeTiers: options.feeTiers });
 
@@ -176,16 +216,7 @@ export class SwapModule {
     const approvalTxHash = await this.ensureApproval(tokenIn, this.config.routerAddress, amountIn);
     const approvalRequired = approvalTxHash !== undefined;
 
-    let feeTxHash: Hash | undefined;
-    if (quote.feeAmount > 0n && feeWallet !== this.accountAddress) {
-      feeTxHash = await this.transferFee(tokenIn, quote.feeAmount, feeWallet);
-    }
-
-    const account = this.walletClient.account;
-    if (!account) throw new Error('SwapModule: walletClient has no account');
-
-    const _deadline = calcDeadline(deadlineSecs); // reserved for future router versions
-    const swapData = encodeFunctionData({
+    const exactInputData = encodeFunctionData({
       abi: UniswapV3RouterAbi,
       functionName: 'exactInputSingle',
       args: [{
@@ -193,12 +224,19 @@ export class SwapModule {
         amountIn: quote.amountInNet, amountOutMinimum: quote.amountOutMinimum, sqrtPriceLimitX96: 0n,
       }],
     });
+    // SwapRouter02 exactInputSingle has no deadline field. Its deadline overload
+    // of multicall enforces expiry before delegating to the inner swap.
+    const swapData = encodeFunctionData({
+      abi: UniswapV3RouterAbi,
+      functionName: 'multicall',
+      args: [calcDeadline(deadlineSecs), [exactInputData]],
+    });
 
     const txHash = await this.walletClient.sendTransaction({
       account, to: this.config.routerAddress, data: swapData, chain: this.walletClient.chain ?? null,
     });
 
-    return { txHash, feeTxHash, quote, approvalRequired, approvalTxHash };
+    return { txHash, quote, approvalRequired, approvalTxHash };
   }
 
   getConfig(): SwapModuleConfig {

@@ -18,10 +18,10 @@ import { USDC_ADDRESSES } from './types.js';
  * Returns the chainId portion as a number.
  */
 export function parseNetworkChainId(network: string): number | null {
-  const parts = network.split(':');
-  if (parts.length < 2) return null;
-  const id = parseInt(parts[parts.length - 1], 10);
-  return isNaN(id) ? null : id;
+  const match = /^[a-zA-Z][a-zA-Z0-9-]*:([1-9]\d*)$/.exec(network);
+  if (!match) return null;
+  const id = Number(match[1]);
+  return Number.isSafeInteger(id) && id > 0 ? id : null;
 }
 
 /**

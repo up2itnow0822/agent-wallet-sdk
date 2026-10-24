@@ -19,9 +19,16 @@
 - Keep npm metadata, README install commands, GitHub releases, and package
   behavior consistent.
 - Treat generated `dist/`, coverage, and dependency folders as build outputs.
-- `main` is protected by a GitHub ruleset: changes land only through a pull
-  request with the `verify` check green and every review thread resolved.
-  No direct pushes, force-pushes, or branch deletion.
+- Changes to `main` land only through a pull request. The required deployment
+  policy is green `build`, `verify`, and `review-gate` checks, with every review
+  thread resolved. Verify these separately in the live GitHub ruleset; workflow
+  files do not configure branch protection. No direct pushes, force-pushes, or
+  branch deletion.
+- Environment and plugin USDC budgets must accept only USDC on the configured
+  wallet chain. Client recipient allowlists must not be described as on-chain
+  enforcement or isolated signing.
+- Persist and reconcile in-flight intents outside these in-memory clients
+  before restarting a payment service or replacing its configuration.
 
 ## Work Guidance
 
@@ -39,3 +46,6 @@
 
 - `src/` contains the TypeScript SDK implementation. Local contract:
   `src/AGENTS.md`.
+- `.github/` contains verification and review workflows. Local contract:
+  `.github/AGENTS.md`.
+- `scripts/` contains CI helpers. Local contract: `scripts/AGENTS.md`.

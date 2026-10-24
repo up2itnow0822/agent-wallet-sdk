@@ -12,7 +12,7 @@
  * @module policy/SpendingPolicy
  */
 
-import type { SpendOutcome } from '../outcomes/index.js';
+import { isEvmTxHash, type SpendOutcome } from '../outcomes/index.js';
 import { x402DebitAmount, x402ProtocolFeeAmount } from '../x402/fee.js';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -31,16 +31,17 @@ export interface PaymentIntent {
   /** Optional human-readable label */
   description?: string;
   /**
-   * Caller-supplied idempotency key. Reuse with the same payload joins the
-   * in-flight reservation; reuse with a different payload is a conflict.
+   * Caller-supplied idempotency key. Reuse with the same payload observes the
+   * existing reservation without authorizing execution again. A definite
+   * release permits a new attempt with the same terms; changed terms conflict.
    */
   idempotencyKey?: string;
 }
 
 export type PolicyStatus = 'approved' | 'rejected' | 'draft';
 export type ReservationStatus = 'held' | 'committed' | 'released' | 'locked';
-export type ReserveStatus = 'reserved' | 'rejected' | 'draft';
-export type AuditStatus = PolicyStatus | ReservationStatus | 'reserved';
+export type ReserveStatus = 'reserved' | 'existing' | 'rejected' | 'draft';
+export type AuditStatus = PolicyStatus | ReservationStatus | ReserveStatus;
 
 /** Result returned by SpendingPolicy.check(). */
 export interface PolicyResult {
@@ -50,7 +51,11 @@ export interface PolicyResult {
   reservationId?: string;
 }
 
-/** Result returned by SpendingPolicy.reserve(). */
+/**
+ * Result returned by reserve() or reserveApprovedDraft(). Only `reserved`
+ * grants permission to execute. `existing` shares the previous attempt for
+ * observation or reconciliation and never authorizes another transfer.
+ */
 export interface ReserveResult {
   status: ReserveStatus;
   reason?: string;
@@ -58,7 +63,10 @@ export interface ReserveResult {
   reservation?: SpendReservation;
 }
 
-/** A held, committed, released, or locked spend reservation. */
+/**
+ * A protected view of a spend reservation. Its status reflects later policy
+ * transitions; changing the view cannot change the policy's authorization.
+ */
 export interface SpendReservation {
   reservationId: string;
   payment: PaymentIntent;
@@ -142,7 +150,7 @@ function nextId(prefix: string): string {
 }
 
 function paymentFingerprint(payment: PaymentIntent): string {
-  return `${payment.merchant.toLowerCase()}|${payment.amount}|${payment.description ?? ''}`;
+  return JSON.stringify([payment.merchant.toLowerCase(), payment.amount, payment.description ?? '']);
 }
 
 function toSafeIntegerAmount(amount: number, label: string): number {
@@ -188,6 +196,7 @@ export class SpendingPolicy {
   private drafts: Map<string, DraftEntry>;
   private reservations: Map<string, SpendReservation>;
   private idempotency: Map<string, string>;
+  private approvedDraftReservations: Map<string, string>;
 
   constructor(config: SpendingPolicyConfig) {
     this.config = config;
@@ -199,6 +208,7 @@ export class SpendingPolicy {
     this.drafts = new Map();
     this.reservations = new Map();
     this.idempotency = new Map();
+    this.approvedDraftReservations = new Map();
   }
 
   // ─── Public Interface ───────────────────────────────────────────────────────
@@ -225,6 +235,8 @@ export class SpendingPolicy {
   /**
    * Hold capacity all-or-nothing against allowlist and rolling caps.
    * Does not commit spend. Over-cap rejects or returns a stored draft.
+   * Only a new `reserved` result authorizes execution. An `existing` result
+   * observes the same intent, including when it is locked or committed.
    */
   async reserve(payment: PaymentIntent): Promise<ReserveResult> {
     try {
@@ -243,6 +255,8 @@ export class SpendingPolicy {
    * After a draft is approved, reserve the stored intent so it can execute.
    * Over-cap drafts skip the rolling cap (human approved the stored amount).
    * Threshold drafts still enforce the cap against current occupancy.
+   * One approval binds to one attempt. Repeated callers observe `existing`;
+   * a new executable reservation is possible only after definite release.
    */
   async reserveApprovedDraft(draftId: string): Promise<ReserveResult> {
     const draft = this.drafts.get(draftId);
@@ -256,13 +270,22 @@ export class SpendingPolicy {
       return { status: 'rejected', reason: `Draft ${draftId} is not approved.`, draftId };
     }
     try {
+      const existingId = this.approvedDraftReservations.get(draftId);
+      const existing = existingId ? this.reservations.get(existingId) : undefined;
+      if (existing && existing.status !== 'released') {
+        const result = this.existingResult(existing);
+        await this.logReserve(draft.payment, result);
+        return result;
+      }
       const result = this.reserveSync(draft.payment, {
         fromApprovedDraft: draftId,
         skipCap: draft.overCap,
         skipDraftThreshold: true,
       });
-      if (result.reservation) {
-        result.reservation.draftId = draftId;
+      if ((result.status === 'reserved' || result.status === 'existing') && result.reservation) {
+        // Bind before the first await so concurrent callers cannot claim the
+        // same human approval for separate spends.
+        this.approvedDraftReservations.set(draftId, result.reservation.reservationId);
       }
       await this.logReserve(draft.payment, result);
       return result;
@@ -323,8 +346,8 @@ export class SpendingPolicy {
 
   /**
    * Lock a held reservation after a hold-unknown outcome.
-   * Capacity stays occupied until an explicit later commit (on-chain settle)
-   * or a code path that never includes a timer.
+   * Capacity stays occupied until a confirmed settlement commits it or an
+   * explicit reconciled release proves no charge. A timer never unlocks it.
    */
   lock(reservation: SpendReservation | string): boolean {
     const record = this.resolveReservation(reservation);
@@ -343,6 +366,8 @@ export class SpendingPolicy {
   /**
    * Apply a classified spend outcome to a reservation.
    * settled → commit; released → release; hold-unknown → lock (never release).
+   * An already-locked attempt needs valid revert hash evidence to release;
+   * a later pre-broadcast rejection cannot reconcile the earlier submission.
    */
   applyOutcome(reservation: SpendReservation | string, outcome: SpendOutcome): boolean {
     if (outcome.status === 'settled') {
@@ -351,7 +376,8 @@ export class SpendingPolicy {
     if (outcome.status === 'released') {
       const record = this.resolveReservation(reservation);
       return this.release(reservation, {
-        reconciled: record?.status === 'locked',
+        reconciled: record?.status === 'locked' && outcome.retrySafe &&
+          outcome.txHashes.length > 0 && outcome.txHashes.every(isEvmTxHash),
       });
     }
     return this.lock(reservation);
@@ -413,16 +439,16 @@ export class SpendingPolicy {
     return true;
   }
 
-  /** Return all pending (not yet approved or rejected) drafts. */
+  /** Return copies of all pending (not yet approved or rejected) drafts. */
   getPendingDrafts(): DraftEntry[] {
     return Array.from(this.drafts.values()).filter(
       (d) => !d.approved && !d.rejected
-    );
+    ).map((d) => ({ ...d, payment: { ...d.payment } }));
   }
 
-  /** Return all drafts. */
+  /** Return copies of all drafts, including their stored payment terms. */
   getAllDrafts(): DraftEntry[] {
-    return Array.from(this.drafts.values());
+    return Array.from(this.drafts.values()).map((d) => ({ ...d, payment: { ...d.payment } }));
   }
 
   // ─── Private Logic ──────────────────────────────────────────────────────────
@@ -447,7 +473,11 @@ export class SpendingPolicy {
       await this.log(payment, result);
       return result;
     }
-    const result: PolicyResult = { status: 'rejected', reason: reserved.reason };
+    const result: PolicyResult = {
+      status: 'rejected',
+      reason: reserved.reason,
+      reservationId: reserved.reservation?.reservationId,
+    };
     await this.log(payment, result);
     return result;
   }
@@ -483,16 +513,16 @@ export class SpendingPolicy {
     if (payment.idempotencyKey) {
       const existingId = this.idempotency.get(payment.idempotencyKey);
       const existing = existingId ? this.reservations.get(existingId) : undefined;
-      if (existing && existing.status !== 'released') {
+      if (existing) {
         if (paymentFingerprint(existing.payment) !== paymentFingerprint(payment)) {
           return {
             status: 'rejected',
             reason: `Idempotency key "${payment.idempotencyKey}" reused with a different payment payload.`,
-            reservation: existing,
+            reservation: this.reservationView(existing),
           };
         }
-        if (existing.status === 'held' || existing.status === 'locked' || existing.status === 'committed') {
-          return { status: 'reserved', reservation: existing };
+        if (existing.status !== 'released') {
+          return this.existingResult(existing);
         }
       }
     }
@@ -537,7 +567,7 @@ export class SpendingPolicy {
     if (payment.idempotencyKey) {
       this.idempotency.set(payment.idempotencyKey, reservation.reservationId);
     }
-    return { status: 'reserved', reservation };
+    return { status: 'reserved', reservation: this.reservationView(reservation) };
   }
 
   private queueDraft(payment: PaymentIntent, reason: string, overCap: boolean): ReserveResult {
@@ -578,7 +608,24 @@ export class SpendingPolicy {
     if (typeof reservation === 'string') {
       return this.reservations.get(reservation);
     }
-    return this.reservations.get(reservation.reservationId) ?? reservation;
+    return this.reservations.get(reservation.reservationId);
+  }
+
+  private reservationView(record: SpendReservation): SpendReservation {
+    return Object.freeze({
+      ...record,
+      payment: Object.freeze({ ...record.payment }),
+      get status() { return record.status; },
+    });
+  }
+
+  private existingResult(record: SpendReservation): ReserveResult {
+    return {
+      status: 'existing',
+      reason: `Reservation ${record.reservationId} is ${record.status}; observe or reconcile the existing attempt, do not execute again.`,
+      draftId: record.draftId,
+      reservation: this.reservationView(record),
+    };
   }
 
   private logSync(
@@ -598,10 +645,8 @@ export class SpendingPolicy {
   }
 
   private async logReserve(payment: PaymentIntent, result: ReserveResult): Promise<void> {
-    const status: AuditStatus =
-      result.status === 'reserved' ? 'reserved' : result.status === 'draft' ? 'draft' : 'rejected';
     this.logSync(payment, {
-      status,
+      status: result.status,
       reason: result.reason,
       draftId: result.draftId,
       reservationId: result.reservation?.reservationId,

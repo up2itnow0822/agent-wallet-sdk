@@ -2,6 +2,7 @@ import {
   createPublicClient,
   http,
   getContract,
+  parseEventLogs,
   type Address,
   type Hash,
   type Hex,
@@ -11,7 +12,10 @@ import {
   type Chain,
   zeroAddress,
 } from 'viem';
-import { base, baseSepolia, mainnet, arbitrum, polygon } from 'viem/chains';
+import {
+  base, baseSepolia, mainnet, arbitrum, polygon, optimism, avalanche,
+  unichain, linea, sonic, worldchain,
+} from 'viem/chains';
 import { AgentAccountV2Abi, AgentAccountFactoryV2Abi } from './abi.js';
 import type {
   AgentWalletConfig,
@@ -43,6 +47,9 @@ export {
   X402SettlementUnknownError,
   X402SettlementBacklogError,
   X402IntentTermsConflictError,
+  X402PaidRequestError,
+  encodeX402PaymentHeader,
+  decodeX402PaymentHeader,
   createX402Client,
   createX402Fetch,
   wrapWithX402,
@@ -62,6 +69,7 @@ export type {
   X402ServiceBudget,
   X402TransactionLog,
   X402ClientConfig,
+  X402Fetch,
 } from './x402/index.js';
 
 const CHAINS: Record<string, Chain> = {
@@ -70,6 +78,12 @@ const CHAINS: Record<string, Chain> = {
   ethereum: mainnet,
   arbitrum,
   polygon,
+  optimism,
+  avalanche,
+  unichain,
+  linea,
+  sonic,
+  worldchain,
 };
 
 /** Native ETH token address (zero address) */
@@ -121,6 +135,18 @@ export function createWallet(config: AgentWalletConfig & { walletClient: WalletC
 
 type Wallet = ReturnType<typeof createWallet>;
 
+/** Submitted execution that reverted or could not be confirmed. Do not resubmit an unknown execution. */
+export class AgentExecutionError extends Error {
+  readonly name = 'AgentExecutionError';
+  constructor(
+    readonly txHash: Hash,
+    readonly executionStatus: 'reverted' | 'unknown',
+    readonly cause?: unknown,
+  ) {
+    super(`Agent execution ${executionStatus}: ${txHash}`);
+  }
+}
+
 /**
  * Set a spend policy for a token. Only callable by the NFT owner.
  * Use NATIVE_TOKEN (address(0)) for native ETH.
@@ -159,21 +185,26 @@ export async function agentExecute(
   ], { value, account: wallet.walletClient.account!, chain: wallet.chain });
 
   // Check the tx receipt for TransactionQueued vs TransactionExecuted events
-  const receipt = await wallet.publicClient.waitForTransactionReceipt({ hash });
-
-  // Event topic hash for AgentAccountV2 queue detection
-  const QUEUED_TOPIC = '0x338e4b9b04df0b67a953d7ea6a7037128b8c6948e3d8c09a9d51a5f5be6c2284';
+  const receipt = await wallet.publicClient.waitForTransactionReceipt({ hash }).catch(error => {
+    throw new AgentExecutionError(hash, 'unknown', error);
+  });
+  if (receipt.status !== 'success') {
+    throw new AgentExecutionError(hash, receipt.status === 'reverted' ? 'reverted' : 'unknown');
+  }
 
   const walletAddr = wallet.address.toLowerCase();
-  const queuedLog = receipt.logs.find(
-    (log) => log.address.toLowerCase() === walletAddr && log.topics[0] === QUEUED_TOPIC
-  );
+  const queuedLog = parseEventLogs({
+    abi: AgentAccountV2Abi,
+    eventName: 'TransactionQueued',
+    logs: receipt.logs.filter(log => log.address.toLowerCase() === walletAddr),
+  })[0];
 
   const wasExecuted = !queuedLog;
 
   return {
     executed: wasExecuted,
     txHash: hash,
+    ...(queuedLog && { pendingTxId: queuedLog.args.txId }),
   };
 }
 
@@ -561,6 +592,7 @@ export type {
   AgentServiceEndpoint, SupportedTrustMechanism, AgentRegistrationRef,
   AgentRegistrationFile, AgentModelMetadata, AgentIdentity,
   MetadataEntry, ERC8004ClientConfig, RegistrationResult, SupportedChain,
+  AgentURIResolver, AgentURIResolverContext, AgentURIResolutionOptions,
 } from './identity/erc8004.js';
 
 // ─── ERC-8004: Reputation Registry ─────────────────────────────────────────

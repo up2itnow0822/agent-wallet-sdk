@@ -34,14 +34,19 @@ export interface SwapQuote {
 }
 
 export interface SwapOptions {
+  /** Integer from 0 to 9999. Zero-minimum-output quotes are rejected. */
   slippageBps?: number;
   feeTiers?: UniswapFeeTier[];
+  /** Positive integer expiry in seconds, enforced by router multicall. */
   deadlineSecs?: number;
+  /** Retained for API compatibility; fee-bearing execution is disabled. */
   feeWallet?: Address;
 }
 
 export interface SwapResult {
+  /** Submitted swap transaction; callers must confirm its receipt separately. */
   txHash: Hash;
+  /** @deprecated Fee-bearing execution is disabled; this is never returned. */
   feeTxHash?: Hash;
   quote: SwapQuote;
   approvalRequired: boolean;
@@ -51,6 +56,7 @@ export interface SwapResult {
 export interface SwapModuleConfig {
   routerAddress: Address;
   quoterAddress: Address;
+  /** Historical 1/100000 fee units; execution currently requires explicit 0. */
   feeBps: number;
   feeWallet: Address;
   /** Chain this SwapModule is configured for */

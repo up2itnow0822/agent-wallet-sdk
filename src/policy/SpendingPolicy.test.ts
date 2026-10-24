@@ -1,5 +1,6 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { classifySpendAttempt } from '../outcomes/index.js';
+import { X402SettlementBacklogError, X402SettlementQueuedError } from '../x402/client.js';
 import { x402DebitAmount, x402ProtocolFeeAmount } from '../x402/fee.js';
 import { SpendingPolicy } from './SpendingPolicy.js';
 import type { PaymentIntent, SpendingPolicyConfig } from './SpendingPolicy.js';
@@ -207,6 +208,28 @@ describe('SpendingPolicy reserve/commit/release', () => {
     expect(policy.release(reserved.reservation!)).toBe(false);
   });
 
+  it('releases a confirmed agent-execution revert so the spend hold is not retained', async () => {
+    const policy = makePolicy({
+      rollingCap: { maxAmount: 100, windowMs: 86_400_000 },
+    });
+    const reserved = await policy.reserve(makePayment({ amount: 80 }));
+    const outcome = classifySpendAttempt({
+      error: Object.assign(new Error(`Agent execution reverted: ${VALID_HASH}`), {
+        name: 'AgentExecutionError',
+        txHash: VALID_HASH,
+        executionStatus: 'reverted',
+      }),
+    });
+    expect(outcome.status).toBe('released');
+    expect(outcome.retrySafe).toBe(true);
+
+    expect(policy.applyOutcome(reserved.reservation!, outcome)).toBe(true);
+    expect(reserved.reservation?.status).toBe('released');
+
+    const retried = await policy.reserve(makePayment({ amount: 80 }));
+    expect(retried.status).toBe('reserved');
+  });
+
   it('does not release a hold-unknown reservation, even twice', async () => {
     const policy = makePolicy({
       rollingCap: { maxAmount: 100, windowMs: 86_400_000 },
@@ -229,6 +252,20 @@ describe('SpendingPolicy reserve/commit/release', () => {
     expect(blocked.status).toBe('rejected');
   });
 
+  it('does not reconcile an earlier unknown spend using a later no-hash rejection', async () => {
+    const policy = makePolicy({ rollingCap: { maxAmount: 100, windowMs: 86_400_000 } });
+    const payment = makePayment({ amount: 80, idempotencyKey: 'unresolved-intent' });
+    const reserved = await policy.reserve(payment);
+    policy.applyOutcome(reserved.reservation!, classifySpendAttempt({ txHash: VALID_HASH }));
+
+    const rejectedAttempt = classifySpendAttempt({ error: new X402SettlementBacklogError(3) });
+    expect(rejectedAttempt.status).toBe('released');
+    expect(policy.applyOutcome(reserved.reservation!, rejectedAttempt)).toBe(false);
+    expect(policy.getReservation(reserved.reservation!.reservationId)?.status).toBe('locked');
+    expect((await policy.reserve(payment)).status).toBe('existing');
+    expect((await policy.reserve(makePayment({ amount: 30 }))).status).toBe('rejected');
+  });
+
   it('does not auto-unlock a hold-unknown reservation after the rolling window elapses', async () => {
     const policy = makePolicy({
       rollingCap: { maxAmount: 100, windowMs: 50 },
@@ -244,6 +281,37 @@ describe('SpendingPolicy reserve/commit/release', () => {
     expect(policy.release(reserved.reservation!)).toBe(false);
     expect(reserved.reservation?.status).toBe('locked');
     expect((await policy.reserve(makePayment({ amount: 30 }))).status).toBe('rejected');
+  });
+
+  it('keeps a queued spend locked beyond the rolling window after its outer receipt succeeds', async () => {
+    vi.useFakeTimers();
+    try {
+      const policy = makePolicy({ rollingCap: { maxAmount: 100, windowMs: 50 } });
+      const reserved = await policy.reserve(makePayment({ amount: 100, idempotencyKey: 'queued-intent' }));
+      const queuedError = new X402SettlementQueuedError(VALID_HASH);
+      expect(policy.applyOutcome(reserved.reservation!, classifySpendAttempt({ error: queuedError }))).toBe(true);
+      expect(reserved.reservation?.status).toBe('locked');
+
+      policy.applyOutcome(reserved.reservation!, classifySpendAttempt({
+        error: queuedError,
+        receipt: { status: 'success', transactionHash: VALID_HASH },
+      }));
+      vi.advanceTimersByTime(1_000);
+
+      expect(reserved.reservation?.status).toBe('locked');
+      expect(policy.getHeldAmount()).toBe(100);
+      expect((await policy.reserve(makePayment({ amount: 100 }))).status).toBe('rejected');
+
+      const executedHash = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+      const executedOutcome = classifySpendAttempt({
+        receipt: { status: 'success', transactionHash: executedHash },
+      });
+      expect(executedOutcome.status).toBe('settled');
+      expect(policy.applyOutcome(reserved.reservation!, executedOutcome)).toBe(true);
+      expect(reserved.reservation?.status).toBe('committed');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('applies a settled outcome by committing the reservation', async () => {
@@ -318,7 +386,7 @@ describe('SpendingPolicy reserve/commit/release', () => {
     expect(policy.getHeldAmount()).toBe(80);
   });
 
-  it('reuses an in-flight reservation for the same idempotency key', async () => {
+  it('joins an in-flight reservation without authorizing another execution', async () => {
     const policy = makePolicy({
       rollingCap: { maxAmount: 100, windowMs: 86_400_000 },
     });
@@ -326,9 +394,225 @@ describe('SpendingPolicy reserve/commit/release', () => {
     const first = await policy.reserve(payment);
     const second = await policy.reserve(payment);
     expect(first.status).toBe('reserved');
-    expect(second.status).toBe('reserved');
+    expect(second.status).toBe('existing');
     expect(second.reservation?.reservationId).toBe(first.reservation?.reservationId);
     expect(policy.getHeldAmount()).toBe(40);
+  });
+
+  it('grants one executable claim to concurrent reserves for the same intent', async () => {
+    const policy = makePolicy({ rollingCap: { maxAmount: 100, windowMs: 86_400_000 } });
+    const payment = makePayment({ amount: 80, idempotencyKey: 'concurrent-intent' });
+    const results = await Promise.all([policy.reserve(payment), policy.reserve(payment)]);
+
+    expect(results.map((result) => result.status).sort()).toEqual(['existing', 'reserved']);
+    expect(results[0].reservation?.reservationId).toBe(results[1].reservation?.reservationId);
+    expect(policy.getHeldAmount()).toBe(80);
+  });
+
+  it.each(['held', 'locked', 'committed'] as const)(
+    'does not make an existing %s idempotent reservation executable',
+    async (state) => {
+      const policy = makePolicy({});
+      const payment = makePayment({ idempotencyKey: `state-${state}` });
+      const first = await policy.reserve(payment);
+      if (state === 'locked') policy.lock(first.reservation!);
+      if (state === 'committed') policy.commit(first.reservation!);
+
+      const repeated = await policy.reserve(payment);
+      expect(repeated.status).toBe('existing');
+      expect(repeated.reservation?.reservationId).toBe(first.reservation?.reservationId);
+      expect(repeated.reservation?.status).toBe(state);
+    },
+  );
+
+  it.each(['held', 'locked', 'committed'] as const)(
+    'check() refuses an existing %s reservation without changing its state',
+    async (state) => {
+      const policy = makePolicy({ rollingCap: { maxAmount: 100, windowMs: 86_400_000 } });
+      const payment = makePayment({ amount: 80, idempotencyKey: `checked-${state}` });
+      const first = await policy.reserve(payment);
+      if (state === 'locked') policy.lock(first.reservation!);
+      if (state === 'committed') policy.commit(first.reservation!);
+
+      expect((await policy.check(payment)).status).toBe('rejected');
+      expect(policy.getReservation(first.reservation!.reservationId)?.status).toBe(state);
+      expect((await policy.reserve(makePayment({ amount: 30 }))).status).toBe('rejected');
+    },
+  );
+
+  it.each(['held', 'locked'] as const)(
+    'keeps a %s reservation occupied after the rolling window expires',
+    async (state) => {
+      vi.useFakeTimers();
+      try {
+        const policy = makePolicy({ rollingCap: { maxAmount: 100, windowMs: 50 } });
+        const payment = makePayment({ amount: 80, idempotencyKey: `expired-${state}` });
+        const first = await policy.reserve(payment);
+        if (state === 'locked') policy.lock(first.reservation!);
+        vi.advanceTimersByTime(1_000);
+
+        expect((await policy.reserve(payment)).status).toBe('existing');
+        expect(policy.getReservation(first.reservation!.reservationId)?.status).toBe(state);
+        expect(policy.getHeldAmount()).toBe(80);
+        expect((await policy.reserve(makePayment({ amount: 30 }))).status).toBe('rejected');
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it('keeps a committed idempotency key consumed after its spend ages out of the cap', async () => {
+    vi.useFakeTimers();
+    try {
+      const policy = makePolicy({ rollingCap: { maxAmount: 100, windowMs: 50 } });
+      const payment = makePayment({ amount: 80, idempotencyKey: 'settled-intent' });
+      const first = await policy.reserve(payment);
+      policy.commit(first.reservation!);
+      vi.advanceTimersByTime(1_000);
+
+      expect((await policy.reserve(payment)).status).toBe('existing');
+      expect((await policy.reserve(makePayment({ amount: 80 }))).status).toBe('reserved');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(['held', 'locked', 'committed'] as const)(
+    'binds an over-cap draft approval to its %s reservation',
+    async (state) => {
+      const policy = makePolicy({
+        rollingCap: { maxAmount: 50, windowMs: 86_400_000 },
+        overCapBehavior: 'draft',
+      });
+      const draft = await policy.reserve(makePayment({ amount: 80 }));
+      policy.approveDraft(draft.draftId!);
+      const first = await policy.reserveApprovedDraft(draft.draftId!);
+      if (state === 'locked') policy.lock(first.reservation!);
+      if (state === 'committed') policy.commit(first.reservation!);
+
+      const repeated = await policy.reserveApprovedDraft(draft.draftId!);
+      expect(repeated.status).toBe('existing');
+      expect(repeated.reservation?.reservationId).toBe(first.reservation?.reservationId);
+      expect(policy.getHeldAmount()).toBe(state === 'committed' ? 0 : 80);
+    },
+  );
+
+  it('atomically claims an approved draft when callers reserve concurrently', async () => {
+    const policy = makePolicy({
+      rollingCap: { maxAmount: 50, windowMs: 86_400_000 },
+      overCapBehavior: 'draft',
+    });
+    const draft = await policy.reserve(makePayment({ amount: 80 }));
+    policy.approveDraft(draft.draftId!);
+
+    const results = await Promise.all([
+      policy.reserveApprovedDraft(draft.draftId!),
+      policy.reserveApprovedDraft(draft.draftId!),
+    ]);
+    expect(results.map((result) => result.status).sort()).toEqual(['existing', 'reserved']);
+    expect(results[0].reservation?.reservationId).toBe(results[1].reservation?.reservationId);
+    expect(policy.getHeldAmount()).toBe(80);
+  });
+
+  it('retries an approved draft once after a confirmed revert releases its previous claim', async () => {
+    const policy = makePolicy({
+      rollingCap: { maxAmount: 50, windowMs: 86_400_000 },
+      overCapBehavior: 'draft',
+    });
+    const draft = await policy.reserve(makePayment({ amount: 80 }));
+    policy.approveDraft(draft.draftId!);
+    const first = await policy.reserveApprovedDraft(draft.draftId!);
+    policy.lock(first.reservation!);
+    expect(policy.release(first.reservation!)).toBe(false);
+    expect((await policy.reserveApprovedDraft(draft.draftId!)).status).toBe('existing');
+
+    expect(policy.applyOutcome(first.reservation!, classifySpendAttempt({
+      receipt: { status: 'reverted', transactionHash: VALID_HASH },
+    }))).toBe(true);
+    const retry = await policy.reserveApprovedDraft(draft.draftId!);
+    expect(retry.status).toBe('reserved');
+    expect(retry.reservation?.reservationId).not.toBe(first.reservation?.reservationId);
+    expect((await policy.reserveApprovedDraft(draft.draftId!)).status).toBe('existing');
+    expect(policy.getHeldAmount()).toBe(80);
+  });
+
+  it('does not let a caller mutate a reservation into a released authorization', async () => {
+    const policy = makePolicy({ rollingCap: { maxAmount: 100, windowMs: 86_400_000 } });
+    const payment = makePayment({ amount: 80, idempotencyKey: 'immutable-claim' });
+    const first = await policy.reserve(payment);
+    try { first.reservation!.status = 'released'; } catch { /* a readonly view may throw */ }
+    try { first.reservation!.reservedAmount = 0; } catch { /* a readonly view may throw */ }
+    try { first.reservation!.payment.amount = 1; } catch { /* a readonly view may throw */ }
+
+    expect(policy.getReservation(first.reservation!.reservationId)?.status).toBe('held');
+    expect(policy.getHeldAmount()).toBe(80);
+    expect((await policy.reserve(payment)).status).toBe('existing');
+    expect((await policy.reserve(makePayment({ amount: 30 }))).status).toBe('rejected');
+  });
+
+  it('keeps reservation status observable through a protected view', async () => {
+    const policy = makePolicy({});
+    const first = await policy.reserve(makePayment());
+    expect(policy.lock(first.reservation!)).toBe(true);
+    expect(first.reservation?.status).toBe('locked');
+    expect(policy.commit(first.reservation!)).toBe(true);
+    expect(first.reservation?.status).toBe('committed');
+  });
+
+  it('does not allow draft readers to alter approval or the approved amount', async () => {
+    const policy = makePolicy({ draftThreshold: 50 });
+    const drafted = await policy.reserve(makePayment({ amount: 80 }));
+    const pending = policy.getPendingDrafts()[0];
+    pending.approved = true;
+    pending.payment.amount = 1;
+    expect((await policy.reserveApprovedDraft(drafted.draftId!)).status).toBe('rejected');
+
+    policy.approveDraft(drafted.draftId!);
+    const approved = policy.getAllDrafts()[0];
+    approved.payment.amount = 1;
+    const reserved = await policy.reserveApprovedDraft(drafted.draftId!);
+    expect(reserved.status).toBe('reserved');
+    expect(reserved.reservation?.principalAmount).toBe(80);
+  });
+
+  it('does not change reservations owned by another policy instance', async () => {
+    const owner = makePolicy({});
+    const observer = makePolicy({});
+    const first = await owner.reserve(makePayment());
+
+    expect(observer.commit(first.reservation!)).toBe(false);
+    expect(observer.release(first.reservation!)).toBe(false);
+    expect(observer.lock(first.reservation!)).toBe(false);
+    expect(owner.getReservation(first.reservation!.reservationId)?.status).toBe('held');
+    expect(owner.getHeldAmount()).toBe(10);
+    expect(observer.getHeldAmount()).toBe(0);
+  });
+
+  it('allows a released intent to retry while preserving its original terms', async () => {
+    const policy = makePolicy({});
+    const payment = makePayment({ amount: 40, idempotencyKey: 'released-intent' });
+    const first = await policy.reserve(payment);
+    policy.release(first.reservation!);
+
+    const conflict = await policy.reserve({ ...payment, amount: 41 });
+    expect(conflict.status).toBe('rejected');
+    const retry = await policy.reserve(payment);
+    expect(retry.status).toBe('reserved');
+    expect(retry.reservation?.reservationId).not.toBe(first.reservation?.reservationId);
+    expect(policy.getHeldAmount()).toBe(40);
+  });
+
+  it('rejects different intent terms even when field separators produce the same text', async () => {
+    const policy = makePolicy({});
+    const payment = makePayment({ merchant: 'merchant', amount: 10, description: '1|20|', idempotencyKey: 'terms-key' });
+    const first = await policy.reserve(payment);
+    policy.release(first.reservation!);
+
+    const conflict = await policy.reserve(makePayment({
+      merchant: 'merchant|10|1', amount: 20, description: '', idempotencyKey: 'terms-key',
+    }));
+    expect(conflict.status).toBe('rejected');
+    expect(policy.getHeldAmount()).toBe(0);
   });
 
   it('rejects idempotency-key reuse when the payload differs', async () => {
