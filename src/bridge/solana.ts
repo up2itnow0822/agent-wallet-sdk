@@ -10,6 +10,7 @@
  *   - CCTP domain IDs: https://developers.circle.com/cctp/references/contract-addresses
  */
 
+import { attestationUrl, parseAttestationResponse, type CctpAttestedMessage, type AttestationSelector, type CircleV2MessagesResponse } from './attestation.js';
 import {
   createPublicClient,
   http,
@@ -145,9 +146,13 @@ export interface EVMToSolanaOptions {
 export interface EVMToSolanaResult {
   /** EVM burn transaction hash */
   burnTxHash: Hash;
-  /** Circle message hash (used to poll for attestation) */
+  /** keccak256 of messageBytes (the attested V2 message) */
   messageHash: Hex;
-  /** Raw CCTP message bytes (for manual receiveMessage on Solana) */
+  /** keccak256 of the source MessageSent bytes (pre-attestation, nonce zero) */
+  sourceMessageHash: Hex;
+  /** Circle-assigned CCTP V2 event nonce, when returned */
+  eventNonce?: Hex;
+  /** Attested CCTP message bytes (for manual receiveMessage on Solana) */
   messageBytes: Hex;
   /** Circle attestation signature (for receiveMessage on Solana) */
   attestation: Hex;
@@ -254,17 +259,22 @@ export async function bridgeEVMToSolana(
   const { messageBytes, messageHash } = extractMessageSent(receipt.logs);
 
   // Poll Circle IRIS for attestation
-  const attestation = await pollForAttestation(
-    messageHash,
+  const attested = await pollForAttestation(
+    burnTxHash,
     CCTP_DOMAIN_IDS[fromChain],
     attestationApiUrl,
+    messageBytes,
   );
 
   return {
     burnTxHash,
-    messageHash,
-    messageBytes,
-    attestation,
+    // Hash of the attested bytes returned below (nonce filled in by Circle).
+    messageHash: keccak256(attested.message),
+    sourceMessageHash: messageHash,
+    eventNonce: attested.eventNonce,
+    // Circle's attested V2 message (nonce filled in) is what Solana receiveMessage needs.
+    messageBytes: attested.message,
+    attestation: attested.attestation,
     destinationDomain: SOLANA_CCTP_DOMAIN,
     amount,
     elapsedMs: Date.now() - startMs,
@@ -293,6 +303,12 @@ export interface SolanaToEVMBurnParams {
   messageHash: Hex;
   /** Source domain (should be SOLANA_CCTP_DOMAIN = 5) */
   sourceDomain: number;
+  /** Solana burn transaction signature (base58). Required: Circle V2 looks attestations up by tx (#44). */
+  burnTxSignature: string;
+  /** Only for identical burns batched in one tx: Circle eventNonce of the wanted message. */
+  eventNonce?: string;
+  /** Only for identical burns batched in one tx: index among identical messages. */
+  messageIndex?: number;
 }
 
 export interface SolanaToEVMResult {
@@ -335,10 +351,15 @@ export async function receiveFromSolanaOnEVM(
   const recipient = options.evmRecipient ?? account.address;
 
   // Poll Circle IRIS for attestation
-  const attestation = await pollForAttestation(
-    burnParams.messageHash,
+  if (!burnParams.burnTxSignature) {
+    throw new SolanaBridgeError('ATTESTATION_ERROR', 'burnParams.burnTxSignature is required (Circle CCTP V2 attestation lookup is by burn transaction).');
+  }
+  const attested = await pollForAttestation(
+    burnParams.burnTxSignature,
     burnParams.sourceDomain,
     attestationApiUrl,
+    burnParams.messageBytes,
+    { eventNonce: burnParams.eventNonce, index: burnParams.messageIndex },
   );
 
   // Submit receiveMessage on EVM
@@ -355,7 +376,7 @@ export async function receiveFromSolanaOnEVM(
   let mintTxHash: Hash;
   try {
     mintTxHash = await transmitter.write.receiveMessage(
-      [burnParams.messageBytes, attestation],
+      [attested.message, attested.attestation],
       { account, chain: destChain },
     );
   } catch (err: unknown) {
@@ -414,33 +435,31 @@ function parseMintAmount(logs: readonly { topics: readonly Hex[]; data: Hex }[])
   return 0n; // fallback: caller can determine amount from source transaction
 }
 
-/** Poll Circle IRIS attestation API. */
-async function pollForAttestation(messageHash: Hex, sourceDomain: number, apiUrl: string): Promise<Hex> {
-  const url = `${apiUrl}/v2/messages/${sourceDomain}/${messageHash}`;
+/** Poll Circle IRIS V2 attestation API by source domain + burn tx hash/signature (#44). */
+async function pollForAttestation(burnTx: string, sourceDomain: number, apiUrl: string, expectedMessage?: Hex, select?: AttestationSelector): Promise<CctpAttestedMessage> {
+  const url = attestationUrl(apiUrl, sourceDomain, burnTx as Hex);
+  const fail = (m: string): never => { throw new SolanaBridgeError('ATTESTATION_ERROR', `Circle attestation failed: ${m}.`); };
   for (let attempt = 0; attempt < MAX_ATTESTATION_POLLS; attempt++) {
-    let response: { status: string; attestation?: Hex | null; error?: string };
+    let body: CircleV2MessagesResponse;
     try {
       const res = await fetch(url, { headers: { Accept: 'application/json' } });
       if (!res.ok) {
         if (res.status === 404) { await sleep(ATTESTATION_POLL_INTERVAL_MS); continue; }
-        const body = await res.text().catch(() => '');
-        throw new SolanaBridgeError('ATTESTATION_ERROR', `Circle API returned HTTP ${res.status}: ${body}.`);
+        const text = await res.text().catch(() => '');
+        throw new SolanaBridgeError('ATTESTATION_ERROR', `Circle API returned HTTP ${res.status}: ${text}.`);
       }
-      response = await res.json() as typeof response;
+      body = await res.json() as CircleV2MessagesResponse;
     } catch (err: unknown) {
       if (err instanceof SolanaBridgeError) throw err;
       const msg = err instanceof Error ? err.message : String(err);
       throw new SolanaBridgeError('ATTESTATION_ERROR', `Failed to reach Circle IRIS API: ${msg}.`);
     }
-
-    if (response.status === 'complete' && response.attestation) return response.attestation;
-    if (response.status === 'error') {
-      throw new SolanaBridgeError('ATTESTATION_ERROR', `Circle attestation failed: ${response.error ?? 'unknown error'}.`);
-    }
+    const r = parseAttestationResponse(body, fail, expectedMessage, select);
+    if (r !== 'pending') return r;
     await sleep(ATTESTATION_POLL_INTERVAL_MS);
   }
   throw new SolanaBridgeError('ATTESTATION_TIMEOUT',
-    `Attestation not received after ${MAX_ATTESTATION_POLLS} attempts. Message hash: ${messageHash}.`);
+    `Attestation not received after ${MAX_ATTESTATION_POLLS} attempts. Burn tx: ${burnTx} (source domain ${sourceDomain}). Funds are not lost: retry the attestation lookup with this burn tx and complete receiveMessage.`);
 }
 
 function sleep(ms: number): Promise<void> {

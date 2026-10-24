@@ -597,7 +597,7 @@ export {
   TOKEN_MESSENGER_V2, MESSAGE_TRANSMITTER_V2, FINALITY_THRESHOLD,
 } from './bridge/index.js';
 export { TokenMessengerV2Abi, MessageTransmitterV2Abi, ERC20BridgeAbi } from './bridge/index.js';
-export type { BridgeChain, BridgeOptions, BurnResult, BridgeResult } from './bridge/index.js';
+export type { BridgeChain, BridgeOptions, BurnResult, BridgeResult, BridgeRecovery, CctpAttestedMessage } from './bridge/index.js';
 
 // x402 already exported above from original index.ts
 
