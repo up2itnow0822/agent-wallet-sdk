@@ -125,3 +125,21 @@ export function parseAttestationResponse(
   }
   return 'pending';
 }
+
+/**
+ * True only when a depositForBurn write error proves nothing was broadcast
+ * (the wallet or user rejected the request). Any other failure may have reached
+ * the RPC node, so the burn could exist on-chain without a known tx hash.
+ */
+export function isDefinitelyNotBroadcast(err: unknown): boolean {
+  let e: unknown = err;
+  for (let i = 0; i < 6 && e && typeof e === 'object'; i++) {
+    const o = e as { name?: unknown; code?: unknown; cause?: unknown };
+    if (o.name === 'UserRejectedRequestError' || o.code === 4001) return true;
+    e = o.cause;
+  }
+  return false;
+}
+
+export const BURN_SUBMISSION_UNKNOWN_HINT =
+  'The burn may have been broadcast even though no tx hash was returned. Do NOT retry: check the sender account nonce and recent transactions for a depositForBurn first, then resume with that tx hash.';

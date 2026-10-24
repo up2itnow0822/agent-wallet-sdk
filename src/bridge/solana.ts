@@ -10,7 +10,7 @@
  *   - CCTP domain IDs: https://developers.circle.com/cctp/references/contract-addresses
  */
 
-import { attestationUrl, parseAttestationResponse, type CctpAttestedMessage, type AttestationSelector, type CircleV2MessagesResponse } from './attestation.js';
+import { attestationUrl, parseAttestationResponse, isDefinitelyNotBroadcast, BURN_SUBMISSION_UNKNOWN_HINT, type CctpAttestedMessage, type AttestationSelector, type CircleV2MessagesResponse } from './attestation.js';
 import {
   createPublicClient,
   http,
@@ -247,7 +247,10 @@ export async function bridgeEVMToSolana(
     );
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    throw new SolanaBridgeError('BURN_FAILED', `CCTP depositForBurn to Solana failed: ${msg}.`);
+    if (isDefinitelyNotBroadcast(err)) {
+      throw new SolanaBridgeError('BURN_FAILED', `CCTP depositForBurn to Solana failed: ${msg}.`);
+    }
+    throw new SolanaBridgeError('BURN_SUBMISSION_UNKNOWN', `CCTP depositForBurn to Solana outcome unknown: ${msg}. ${BURN_SUBMISSION_UNKNOWN_HINT}`);
   }
 
   const receipt = await publicClient.waitForTransactionReceipt({ hash: burnTxHash });
@@ -469,6 +472,7 @@ function sleep(ms: number): Promise<void> {
 // ─── Error Class ───
 
 export type SolanaBridgeErrorCode =
+  | 'BURN_SUBMISSION_UNKNOWN'
   | 'NO_WALLET_CLIENT'
   | 'INVALID_AMOUNT'
   | 'INVALID_RECIPIENT'
