@@ -88,7 +88,7 @@ npm install @solana/web3.js @solana/spl-token
 
 ### Optional: check x402 terms before paying
 
-`withSpotCheck` wraps an x402 client config with an opt-in check from [x402-spotcheck](https://github.com/withgrokbot/x402-spotcheck) (optional peer, `npm i github:withgrokbot/x402-spotcheck#v1.3.0`). Before paying, it declines terms that don't match (e.g. a price or payTo other than listed). After paying (`afterPay: true`), it asks whether a failed transfer landed. If the peer is missing or errors, payments proceed unchanged.
+`withSpotCheck` wraps an x402 client config with an opt-in check from [x402-spotcheck](https://github.com/withgrokbot/x402-spotcheck) (optional peer, `npm i github:withgrokbot/x402-spotcheck#v1.6.0`). Before paying, it evaluates `check.expected` and declines a mismatched price, payTo, or network. SDK networks such as `base:8453` are converted to the peer's CAIP id (`eip155:8453`); a network the peer cannot judge is declined. After paying (`afterPay: true`), it looks up receipt failures and paid-request failures (including a throw before `onPaymentComplete` and an `X402PaidRequestError` after a `success: true` completion). If the peer is missing or `checkBeforePay` errors, the pre-pay check lets the payment proceed; expected, network, and `fits()` denials fail closed.
 
 ```ts
 import { createX402Fetch, withSpotCheck } from 'agentwallet-sdk';

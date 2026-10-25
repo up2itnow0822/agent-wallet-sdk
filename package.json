@@ -70,7 +70,8 @@
     "globals": "^16.5.0",
     "typescript": "5.9.3",
     "vitest": "4.1.12",
-    "wrangler": "4.152.0"
+    "wrangler": "4.152.0",
+    "x402-spotcheck": "github:withgrokbot/x402-spotcheck#v1.6.0"
   },
   "homepage": "https://github.com/up2itnow0822/agent-wallet-sdk#readme",
   "bugs": {
