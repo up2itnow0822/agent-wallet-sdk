@@ -4,6 +4,7 @@
  *
  * Supported chains: base, arbitrum, optimism, polygon.
  * Use SwapModule directly or attachSwap(wallet, { chain }) for a wallet-bound instance.
+ * Execution requires feeBps: 0 and a wallet address equal to its EOA signer.
  */
 export { SwapModule, attachSwap, calcProtocolFee, applySlippage, calcDeadline } from './SwapModule.js';
 export { UniswapV3RouterAbi, UniswapV3QuoterV2Abi, ERC20Abi } from './abi.js';
