@@ -69,8 +69,7 @@ separately, and every untrusted HTTP read has a deadline and a size cap.
 ## Dependency and release checks
 
 The verification workflows run the build, tests, lint and dependency audit.
-All workflow actions are pinned to full commit SHAs. The `review-gate` check
-requires Codex evidence newer than the base branch's current SHA.
+All workflow actions are pinned to full commit SHAs.
 High and critical advisory results fail verification. GitHub ruleset settings
 must independently require the intended verification and review checks;
 workflow definitions alone do not enforce merge policy.

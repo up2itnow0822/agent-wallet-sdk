@@ -21,10 +21,11 @@
   optional peer with a tested `>=` floor (`test/package-peers.test.ts`).
 - Treat generated `dist/`, coverage, and dependency folders as build outputs.
 - Changes to `main` land only through a pull request. The required deployment
-  policy is green `build`, `verify`, and `review-gate` checks, with every review
-  thread resolved. Verify these separately in the live GitHub ruleset; workflow
-  files do not configure branch protection. No direct pushes, force-pushes, or
-  branch deletion.
+  policy is green `build` and `verify` checks, with every review thread
+  resolved (live ruleset `23222371`; workflow files do not configure branch
+  protection). Codex reviews each PR automatically; evaluate its findings, but
+  do not request or wait for a second Codex pass. No direct pushes,
+  force-pushes, or branch deletion.
 - Environment and plugin USDC budgets must accept only USDC on the configured
   wallet chain. Client recipient allowlists must not be described as on-chain
   enforcement or isolated signing.

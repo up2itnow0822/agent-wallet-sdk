@@ -28,7 +28,7 @@ signing and network boundaries.
 | 16 | Mutable action tags with `checks:write` | All actions pinned to commit SHAs; Dependabot proposes pin updates. |
 | 17 | Ignored Horizon override | Configured Horizon used everywhere and must report the configured network passphrase; https only. |
 | 18 | Unbounded UAID bodies | Broker requests use one deadline over the body and a size cap; error bodies truncated. |
-| 19 | review-gate not bound to base SHA | Evidence must post-date the base branch moving to its current tip (tip from the branch API, time from the activity log; unknown ⇒ explicit fail-closed result); snapshot includes the tip; pushes to `main` re-evaluate. |
+| 19 | review-gate not bound to base SHA | Resolved by removal: the `review-gate` workflow is deleted at the maintainer's direction. Codex reviews every PR automatically, and no merge gate consumes Codex evidence. |
 | 20 | Examples spend real funds | Examples default to Base Sepolia, need `AGENT_EXAMPLE_LIVE_ACK` for mainnet, verify the installed policy, and never auto-run on import. |
 | 21 | Unbounded Horizon I/O | Deadlines and size caps; ambiguous submission ⇒ `StellarSubmissionUnknownError` with the expected hash. |
 | 22 | Unchecked Solana→EVM recipient | Source domain, message hash, destination, burn token, remote sender and mint recipient validated; returned values derived from attested bytes. |
@@ -128,7 +128,7 @@ installed npm package or establish the safety of external contracts.
 
 | Assessment ID | Repair |
 | --- | --- |
-| 1 | The existing required `build` job now runs build, tests, lint and dependency audit. Requiring `verify` and `review-gate` remains a live GitHub ruleset action; see below. |
+| 1 | The required `build` job runs build, tests, lint and dependency audit; the live ruleset now also requires `verify` (see below). |
 | 2 | The security scanner reads NUL-delimited filenames through filesystem APIs, never interpolates them into shell source, and uses read-only PR permissions. |
 | 4 | Environment x402 budgets accept only the configured wallet chain's exact USDC address. |
 | 5 | Generic or malformed spend outcomes retain the hold. Confirmed payments remain charged after HTTP delivery errors. |
@@ -262,23 +262,13 @@ The settlement test server is a read-only Base Sepolia demo. It does not
 forward fees or accept an untrusted receipt as settlement authorization.
 A production endpoint needs durable, atomic challenge and transfer consumption.
 
-## Live GitHub ruleset action
+## Live GitHub ruleset
 
-The inspected active ruleset `23222371` requires only `build`. Workflow files
-cannot change that administrative setting, and the connected GitHub tools do
-not expose a ruleset update operation.
-
-Preserve its PR-only, no-bypass, no-deletion, no-force-push and resolved-thread
-rules. Require these contexts from GitHub Actions (integration ID `15368`):
-
-- `build`
-- `verify`
-- `review-gate`
-
-Require branches to be up to date before merging. Confirm that a PR with
-missing verification or review evidence remains blocked. Do not waive the
-review gate simply to publish these repairs. This setting remains outstanding
-until an administrator applies and verifies it.
+Verified through the API on 2026-10-26: active ruleset `23222371` on `main`
+requires a pull request with every review thread resolved, blocks deletion and
+force-pushes, and requires the `build` and `verify` checks from GitHub Actions
+(integration ID `15368`) with branches up to date. Workflow files cannot change
+these settings; re-check them after any ruleset edit.
 
 ## Verification and limits
 

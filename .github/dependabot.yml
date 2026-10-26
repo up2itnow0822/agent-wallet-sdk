@@ -1,5 +1,5 @@
 # Action pins are full commit SHAs. Updates arrive as reviewable PRs that pass
-# the same build/verify/review-gate policy as any other change.
+# the same build/verify policy as any other change.
 version: 2
 updates:
   - package-ecosystem: github-actions

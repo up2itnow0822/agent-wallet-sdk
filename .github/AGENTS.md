@@ -2,7 +2,7 @@
 
 ## Purpose and ownership
 
-Maintainers own verification and merge-gate workflows for the SDK.
+Maintainers own the verification workflows for the SDK.
 
 ## Local contracts
 
@@ -10,30 +10,16 @@ Maintainers own verification and merge-gate workflows for the SDK.
 - PR-controlled filenames, bodies and metadata are data, never executable
   shell or JavaScript interpolation. Pass commit SHAs through validated inputs.
 - PR code runs with read-only permissions and checkout credentials removed.
-- `review-gate` runs from trusted default-branch code and never executes PR code.
 - Every `uses:` reference is pinned to a full 40-character commit SHA with a
   version comment; update pins only through reviewed PRs (Dependabot).
-- `review-gate` evidence must post-date the base branch's move to its current
-  SHA (repository activity log, `after` + `timestamp`, parsed by
-  `latestBaseMoveMs`; unknown means fail closed). Its only `push` trigger is
-  the protected `main` branch.
-- A retained "Codex waived" check counts only when its summary marker
-  (`waiverMarker`: PR, head, base ref, base tip, label event id) names the
-  current snapshot and it completed after both the base move and the current
-  label event (`waiverCheckQualifies`). Title-only checks never qualify.
-- A clean Codex pass (no review object) is proven only by the Codex bot's
-  summary `codex-review-state:v1` line (`completed`, no findings, full head
-  SHA) plus its `Code Review` row's `Completed` time for that commit, which
-  must post-date the base move (`codexCleanSummaryPasses`). The comment's
-  `updated_at` never dates a review, and a short SHA is never accepted. Gate
-  parsers live between `// BEGIN name` and `// END name` markers so tests
-  extract and run them on real payloads. Gate changes take effect only once
-  merged to the default branch.
+- Codex reviews every PR automatically and its findings arrive as review
+  threads. No workflow gates a merge on Codex review evidence, and agents do
+  not request a second Codex pass (`@codex review`) or wait for one.
 - Live required-check rules are configured separately in GitHub. Do not claim
   a ruleset was changed solely because a workflow was edited.
 
 ## Verification
 
 Run `npm test -- test/security-scan.test.ts` for scanner changes,
-`npm test -- test/workflow-security.test.ts` for workflow pins and review-gate
-binding, and the root verification commands for changes to job behavior.
+`npm test -- test/workflow-security.test.ts` for workflow pins, and the root
+verification commands for changes to job behavior.
