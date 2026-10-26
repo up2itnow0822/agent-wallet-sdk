@@ -102,6 +102,14 @@ export interface SubmissionIdentity {
   data?: string;
   value?: bigint;
   /**
+   * Some submitted phase has no usable hash or call binding (it may have been
+   * broadcast without a returned hash). The recorded hashes then cannot prove
+   * non-payment, so reconciliation never releases this lock (it can still
+   * commit on success evidence). Set automatically when a supplied hash or
+   * call is malformed, or from `SpendOutcome.incompleteEvidence`.
+   */
+  incomplete?: boolean;
+  /**
    * Per-hash call bindings for multi-phase submissions whose phases differ in
    * calldata (e.g. protocol fee and payee). Each entry's hash is recorded as
    * a submission hash; reconciliation checks each hash against its own call.
@@ -296,14 +304,21 @@ function freezeSubmission(submission: SubmissionIdentity): SubmissionIdentity {
   // unprovable (recorded with a binding that can never match), never a
   // silent fallback to the default binding.
   const byHash = new Map<string, SubmissionCall>();
+  // Anything supplied but unusable leaves a phase unaccounted for.
+  let incomplete = submission.incomplete === true;
   for (const call of Array.from(submission.calls ?? [])) {
     const frozenCall = freezeCall(call);
-    if (!frozenCall) continue;
+    if (!frozenCall) {
+      incomplete = true;
+      continue;
+    }
     const prior = byHash.get(frozenCall.hash);
     byHash.set(frozenCall.hash, prior && !sameCall(prior, frozenCall) ? CONFLICTING_CALL(frozenCall.hash) : (prior ?? frozenCall));
   }
   const calls = [...byHash.values()];
-  const hashes = [...Array.from(submission.txHashes ?? []), ...calls.map((c) => c.hash)].filter(isEvmTxHash);
+  const supplied = Array.from(submission.txHashes ?? []);
+  if (supplied.some((h) => !isEvmTxHash(h))) incomplete = true;
+  const hashes = [...supplied, ...calls.map((c) => c.hash)].filter(isEvmTxHash);
   const chainId = submission.chainId;
   const frozen: SubmissionIdentity = {
     txHashes: Object.freeze([...new Set(hashes.map((h) => h.toLowerCase()))]),
@@ -314,6 +329,7 @@ function freezeSubmission(submission: SubmissionIdentity): SubmissionIdentity {
   if (typeof submission.data === 'string') frozen.data = submission.data.toLowerCase();
   if (typeof submission.value === 'bigint') frozen.value = submission.value;
   if (calls.length > 0) frozen.calls = Object.freeze(calls);
+  if (incomplete) frozen.incomplete = true;
   return Object.freeze(frozen);
 }
 
@@ -542,7 +558,7 @@ export class SpendingPolicy {
     reservation: SpendReservation | string,
     outcome: SpendOutcome,
     /** Call binding of the submission (wallet sender, target, calldata, value). Required for later reconciliation. */
-    call?: Pick<SubmissionIdentity, 'from' | 'to' | 'data' | 'value' | 'calls'>,
+    call?: Pick<SubmissionIdentity, 'from' | 'to' | 'data' | 'value' | 'calls' | 'incomplete'>,
   ): boolean {
     if (outcome.status === 'settled') {
       return this.commit(reservation);
@@ -552,10 +568,13 @@ export class SpendingPolicy {
       // by a classified outcome. A locked one needs reconcileLocked().
       return this.release(reservation);
     }
+    // Unfiltered: a malformed or empty entry marks the lock incomplete
+    // instead of silently shrinking the evidence to the valid hashes.
     return this.lock(reservation, {
-      chainId: outcome.chainId,
-      txHashes: outcome.txHashes.filter(isEvmTxHash),
       ...(call ?? {}),
+      chainId: outcome.chainId,
+      txHashes: Array.from(outcome.txHashes ?? []),
+      incomplete: outcome.incompleteEvidence === true || call?.incomplete === true,
     });
   }
 
@@ -621,6 +640,12 @@ export class SpendingPolicy {
         }
         if (st === 'reverted' || st === 0 || st === '0x0') reverted += 1;
         else return { status: 'unresolved', reason: `unknown receipt status for ${hash}` };
+      }
+      if (reverted === submission.txHashes.length && submission.incomplete) {
+        return {
+          status: 'unresolved',
+          reason: 'every recorded hash reverted, but a submitted phase has no usable transaction hash; it cannot be proven unpaid (commit it to let it age out)',
+        };
       }
       if (reverted === submission.txHashes.length && record.status === 'locked') {
         record.status = 'released';

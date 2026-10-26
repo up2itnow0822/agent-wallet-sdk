@@ -85,8 +85,11 @@
   reservation is released only by `reconcileLocked` against the submission
   identity and call binding recorded once at lock time; the receipt and the
   transaction body must both name the requested hash. Multi-phase
-  submissions bind each hash to its own call (`calls`). There is no caller
-  override and no later hash attachment.
+  submissions bind each hash to its own call (`calls`). Evidence that dropped
+  a phase (a malformed or empty hash or call, or
+  `SpendOutcome.incompleteEvidence`) marks the lock `incomplete`: it can
+  commit on success but never release. There is no caller override and no
+  later hash attachment.
 - CCTP: attestations are always bound to a known source message; burn terms
   (domains, token, recipient, amount, maxFee, minFinalityThreshold) are
   checked from the transmitter-emitted `MessageSent`; the Solana recipient

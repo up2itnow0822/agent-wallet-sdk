@@ -22,10 +22,13 @@ Maintainers own verification and merge-gate workflows for the SDK.
   current snapshot and it completed after both the base move and the current
   label event (`waiverCheckQualifies`). Title-only checks never qualify.
 - A clean Codex pass (no review object) is proven only by the Codex bot's
-  summary `codex-review-state:v1` line: `completed`, no findings, full head
-  SHA (`codexCleanSummaryShas`). Gate parsers live between `// BEGIN name`
-  and `// END name` markers so tests extract and run them on real payloads. Codex's visible table shows a short SHA, which is never accepted.
-  Gate changes take effect only once merged to the default branch.
+  summary `codex-review-state:v1` line (`completed`, no findings, full head
+  SHA) plus its `Code Review` row's `Completed` time for that commit, which
+  must post-date the base move (`codexCleanSummaryPasses`). The comment's
+  `updated_at` never dates a review, and a short SHA is never accepted. Gate
+  parsers live between `// BEGIN name` and `// END name` markers so tests
+  extract and run them on real payloads. Gate changes take effect only once
+  merged to the default branch.
 - Live required-check rules are configured separately in GitHub. Do not claim
   a ruleset was changed solely because a workflow was edited.
 

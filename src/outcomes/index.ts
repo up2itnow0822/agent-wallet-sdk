@@ -22,6 +22,13 @@ export interface SpendOutcome {
   retrySafe: boolean;
   idempotencyKey?: string;
   reason?: string;
+  /**
+   * True when the attempt reported a transaction identifier that is not a
+   * valid EVM hash, so `txHashes` does not cover every submitted phase. Such
+   * evidence can prove payment but never non-payment: a lock built from it is
+   * never released by reconciliation.
+   */
+  incompleteEvidence?: true;
 }
 
 export interface SpendReceiptLike {
@@ -155,7 +162,13 @@ function outcome(
     retrySafe: extras.retrySafe,
     idempotencyKey: extras.idempotencyKey,
     reason: extras.reason,
+    ...(extras.incompleteEvidence ? { incompleteEvidence: true as const } : {}),
   };
+}
+
+/** Some reported identifier is not a valid hash (see SpendOutcome.incompleteEvidence). */
+function droppedHash(required: unknown[]): true | undefined {
+  return required.some((value) => !isEvmTxHash(value)) ? true : undefined;
 }
 
 const PRE_BROADCAST_DEFINITE = new Set([
@@ -208,6 +221,7 @@ export function classifySpendError(error: unknown): SpendOutcome {
       ...metadata,
       retrySafe: false,
       txHashes,
+      incompleteEvidence: droppedHash(required),
       reason: errorMessage(error) || 'broadcast evidence without complete settlement confirmation',
     });
   }
@@ -252,6 +266,16 @@ export function classifySpendError(error: unknown): SpendOutcome {
  * Classify a later verified execution receipt separately from that error.
  */
 export function classifySpendAttempt(input: ClassifySpendAttemptInput): SpendOutcome {
+  const { receipt, candidates } = attemptEvidence(input);
+  const result = classifyAttempt(input, receipt, candidates);
+  // A held outcome whose evidence dropped a malformed identifier says so, so
+  // its lock can never be released from the remaining hashes alone.
+  const { incompleteEvidence: _dropped, ...rest } = result;
+  const required = candidates.filter((value) => value !== undefined && value !== null && value !== '');
+  return result.status === 'hold-unknown' && droppedHash(required) ? { ...rest, incompleteEvidence: true } : rest;
+}
+
+function attemptEvidence(input: ClassifySpendAttemptInput): { receipt: SpendReceiptLike | undefined; candidates: unknown[] } {
   const receipt = input.receipt ??
     (errorName(input.error) === 'X402PaidRequestError' ? errorReceipt(input.error) : undefined);
   const candidates = [
@@ -261,6 +285,14 @@ export function classifySpendAttempt(input: ClassifySpendAttemptInput): SpendOut
     ...(input.txHashes ? Array.from(input.txHashes) : []),
     ...errorHashCandidates(input.error),
   ];
+  return { receipt, candidates };
+}
+
+function classifyAttempt(
+  input: ClassifySpendAttemptInput,
+  receipt: SpendReceiptLike | undefined,
+  candidates: unknown[],
+): SpendOutcome {
   const hashes = uniqueValidHashes(candidates);
   const metadata = errorMetadata(input.error);
   const amount = toBigInt(input.amount ?? metadata.amount);

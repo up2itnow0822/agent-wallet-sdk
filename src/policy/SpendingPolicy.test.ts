@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { classifySpendAttempt } from '../outcomes/index.js';
+import { classifySpendAttempt, classifySpendError } from '../outcomes/index.js';
 import { X402SettlementBacklogError, X402SettlementQueuedError } from '../x402/client.js';
 import { x402DebitAmount, x402ProtocolFeeAmount } from '../x402/fee.js';
 import { SpendingPolicy } from './SpendingPolicy.js';
@@ -839,5 +839,87 @@ describe('SpendingPolicy locked reconciliation (finding 8)', () => {
       const c = { ...client('reverted'), getTransaction: async ({ hash }: { hash: string }) => ({ hash: hash.toUpperCase().replace('0X', '0x'), from: CALL.from, to: CALL.to, input: CALL.data }) };
       expect((await policy.reconcileLocked(reservation, c)).status).toBe('released');
     });
+  });
+});
+
+describe('incomplete hash evidence never releases a lock (Codex round 10)', () => {
+  const HASH_A = ('0x' + 'a'.repeat(64)) as `0x${string}`;
+  const HASH_B = ('0x' + 'b'.repeat(64)) as `0x${string}`;
+  const CALL = { from: '0x' + '1'.repeat(40), to: '0x' + '2'.repeat(40), data: '0xa9059cbb' };
+  const chain = (status: (hash: string) => string) => ({
+    getChainId: async () => 8453,
+    getTransactionReceipt: async ({ hash }: { hash: string }) => ({ transactionHash: hash, status: status(hash) }),
+    getTransaction: async ({ hash }: { hash: string }) => ({ hash, from: CALL.from, to: CALL.to, input: CALL.data }),
+  });
+  const reverted = chain(() => 'reverted');
+
+  async function held() {
+    const policy = new SpendingPolicy({ rollingCap: { maxAmount: 100, windowMs: 86_400_000 } });
+    const r = await policy.reserve({ merchant: 'm', amount: 80 });
+    return { policy, reservation: r.reservation! };
+  }
+
+  it.each([
+    ['a malformed second phase', [HASH_A, '0xabc123']],
+    ['an empty second phase', [HASH_A, '']],
+  ])('keeps a hold-unknown outcome with %s locked when the recorded hash reverted', async (_label, txHashes) => {
+    const { policy, reservation } = await held();
+    policy.applyOutcome(reservation, { status: 'hold-unknown', retrySafe: false, txHashes: txHashes as string[], chainId: 8453 }, CALL);
+    expect(policy.getReservation(reservation.reservationId)?.submission?.incomplete).toBe(true);
+    const res = await policy.reconcileLocked(reservation, reverted);
+    expect(res.status).toBe('unresolved');
+    expect(res.reason).toMatch(/no usable transaction hash/);
+    expect(policy.getHeldAmount()).toBe(80);
+  });
+
+  it('carries the classifier\'s dropped-hash evidence into the lock', async () => {
+    // Fee hash valid, payee hash garbled by the RPC: the classifier keeps only
+    // the valid hash, so the outcome must say the evidence is incomplete.
+    const err = Object.assign(new Error('payee submission failed'), { name: 'Error', feeTxHash: HASH_A, txHash: '0xnot-a-hash', chainId: 8453 });
+    const outcome = classifySpendError(err);
+    expect(outcome.status).toBe('hold-unknown');
+    expect(outcome.txHashes).toEqual([HASH_A]);
+    expect(outcome.incompleteEvidence).toBe(true);
+    const { policy, reservation } = await held();
+    policy.applyOutcome(reservation, outcome, CALL);
+    expect((await policy.reconcileLocked(reservation, reverted)).status).toBe('unresolved');
+    expect(policy.getHeldAmount()).toBe(80);
+  });
+
+  it('marks classifySpendAttempt outcomes with a dropped hash', () => {
+    const o = classifySpendAttempt({ receipt: { status: 'success', transactionHash: HASH_A }, txHashes: ['0xabc123'], chainId: 8453 });
+    expect(o.status).toBe('hold-unknown');
+    expect(o.incompleteEvidence).toBe(true);
+    expect(classifySpendAttempt({ receipt: { status: 'success', transactionHash: HASH_A }, chainId: 8453 }).incompleteEvidence).toBeUndefined();
+  });
+
+  it('keeps a per-phase call without a usable hash or binding locked', async () => {
+    for (const bad of [{ ...CALL, hash: 'pending' }, { ...CALL, hash: HASH_B, data: undefined as unknown as string }]) {
+      const { policy, reservation } = await held();
+      policy.applyOutcome(reservation, { status: 'hold-unknown', retrySafe: false, txHashes: [], chainId: 8453 }, {
+        calls: [{ hash: HASH_A, ...CALL }, bad],
+      });
+      expect((await policy.reconcileLocked(reservation, reverted)).status).toBe('unresolved');
+      expect(policy.getHeldAmount()).toBe(80);
+    }
+  });
+
+  it('honors an explicit incomplete flag on lock()', async () => {
+    const { policy, reservation } = await held();
+    policy.lock(reservation, { chainId: 8453, txHashes: [HASH_A], incomplete: true, ...CALL });
+    expect((await policy.reconcileLocked(reservation, reverted)).status).toBe('unresolved');
+  });
+
+  it('still commits incomplete evidence when a recorded hash succeeded', async () => {
+    const { policy, reservation } = await held();
+    policy.applyOutcome(reservation, { status: 'hold-unknown', retrySafe: false, txHashes: [HASH_A, ''], chainId: 8453 }, CALL);
+    expect((await policy.reconcileLocked(reservation, chain(() => 'success'))).status).toBe('committed');
+  });
+
+  it('still releases complete evidence when every hash reverted', async () => {
+    const { policy, reservation } = await held();
+    policy.applyOutcome(reservation, { status: 'hold-unknown', retrySafe: false, txHashes: [HASH_A], chainId: 8453 }, CALL);
+    expect(policy.getReservation(reservation.reservationId)?.submission?.incomplete).toBeUndefined();
+    expect((await policy.reconcileLocked(reservation, reverted)).status).toBe('released');
   });
 });

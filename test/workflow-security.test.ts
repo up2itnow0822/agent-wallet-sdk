@@ -41,52 +41,71 @@ describe('review-gate evidence binding (finding 19)', () => {
   });
 });
 
-describe('review-gate accepts a clean Codex pass by full SHA (review follow-up)', () => {
+describe('review-gate accepts a clean Codex pass by full SHA and completion time (review follow-up, Codex round 10)', () => {
   const src = readFileSync(join(WF, 'review-gate.yml'), 'utf8');
-  const fn = /\/\/ BEGIN codexCleanSummaryShas\n([\s\S]*?)\/\/ END codexCleanSummaryShas/.exec(src)?.[1];
+  const fn = /\/\/ BEGIN codexCleanSummaryPasses\n([\s\S]*?)\/\/ END codexCleanSummaryPasses/.exec(src)?.[1];
   // eslint-disable-next-line @typescript-eslint/no-implied-eval
-  const codexCleanSummaryShas = new Function(`${fn}\nreturn codexCleanSummaryShas;`)() as (body: string) => string[];
-  const HEAD = 'f41e8a2557774cb6acda18c3d3df762468c34973';
-  const summary = (state: object | string, row = '`f41e8a2`') => [
+  const codexCleanSummaryPasses = new Function(`${fn}\nreturn codexCleanSummaryPasses;`)() as
+    (body: string) => Array<{ sha: string; completedMs: number }>;
+  const HEAD = 'a7449a0e75824251473dad7d17cb4048a7e8c07f';
+  const DONE = '2026-10-26T05:52:57.138268Z';
+  // Layout verbatim from the Codex summary comment on #98 (comment 6407103723).
+  const summary = (state: object | string, status = `✅ **Completed** <relative-time datetime="${DONE}">${DONE}</relative-time>`, commit = '`a7449a0`') => [
     '<!-- codex-pull-request-review-summary -->',
     `<!-- codex-review-state:v1 ${typeof state === 'string' ? state : JSON.stringify(state)} -->`,
     '',
+    '## Codex Review Summary',
+    '',
     '| Review | Status | Commit | Review trigger |',
     '| --- | --- | --- | --- |',
-    `| 📝 **Code Review** | ✅ **Completed** <relative-time>t</relative-time> | ${row} | Manual request |`,
+    `| 📝 **Code Review** | ${status} | ${commit} | Manual request |`,
   ].join('\n');
   const clean = { code_review: { commit_sha: HEAD, has_any_findings: false, has_unresolved_findings: false, status: 'completed' } };
+  const pass = [{ sha: HEAD, completedMs: Date.parse(DONE) }];
 
-  it('is defined in the evaluate script and used for the clean-pass fallback', () => {
+  it('is defined in the evaluate script and dates the clean pass by its completion time', () => {
     expect(fn).toBeTruthy();
-    expect(src).toMatch(/codexCleanSummaryShas\(c\.body \|\| ''\)\.some\(sha => sameSha\(sha, headSha\)\)/);
+    expect(src).toMatch(/codexCleanSummaryPasses\(c\.body \|\| ''\)\.some\(p =>\s*sameSha\(p\.sha, headSha\) && p\.completedMs > baseChangedMs\)/);
+    expect(src).not.toMatch(/codexCleanSummaryShas/);
   });
 
-  it('reads the full SHA from the Codex state line (the table only shows a short SHA)', () => {
-    expect(codexCleanSummaryShas(summary(clean))).toEqual([HEAD]);
+  it('reads the full SHA from the state line and the completion time from the Code Review row', () => {
+    expect(codexCleanSummaryPasses(summary(clean))).toEqual(pass);
   });
 
   it('decodes HTML-escaped braces in the state line', () => {
     const escaped = JSON.stringify(clean).replace(/{/g, '&#123;').replace(/}/g, '&#125;');
-    expect(codexCleanSummaryShas(summary(escaped))).toEqual([HEAD]);
+    expect(codexCleanSummaryPasses(summary(escaped))).toEqual(pass);
   });
 
   it.each([
     ['still running', { code_review: { ...clean.code_review, status: 'running', has_any_findings: null } }],
     ['with findings', { code_review: { ...clean.code_review, has_any_findings: true, has_unresolved_findings: true } }],
     ['with unresolved findings', { code_review: { ...clean.code_review, has_unresolved_findings: true } }],
-    ['for a short SHA', { code_review: { ...clean.code_review, commit_sha: 'f41e8a2' } }],
+    ['for a short SHA', { code_review: { ...clean.code_review, commit_sha: 'a7449a0' } }],
   ])('gives no evidence for a review %s', (_case, state) => {
-    expect(codexCleanSummaryShas(summary(state))).toEqual([]);
+    expect(codexCleanSummaryPasses(summary(state))).toEqual([]);
+  });
+
+  it('gives no evidence without a machine-readable completion time', () => {
+    // The comment's updated_at moves on any later edit, so it never dates the review.
+    expect(codexCleanSummaryPasses(summary(clean, '✅ **Completed**'))).toEqual([]);
+    expect(codexCleanSummaryPasses(summary(clean, '✅ **Completed** <relative-time datetime="soon">x</relative-time>'))).toEqual([]);
+    expect(codexCleanSummaryPasses(summary(clean, `🔄 **Running** since <relative-time datetime="${DONE}">x</relative-time>`))).toEqual([]);
+  });
+
+  it('requires the row to describe the same commit as the state line', () => {
+    expect(codexCleanSummaryPasses(summary(clean, undefined, '`f41e8a2`'))).toEqual([]);
+    expect(codexCleanSummaryPasses(summary(clean, undefined, '`a74`'))).toEqual([]);
   });
 
   it('ignores malformed state and comments without the summary marker', () => {
-    expect(codexCleanSummaryShas(summary('{not json'))).toEqual([]);
-    expect(codexCleanSummaryShas(summary(clean).replace('<!-- codex-pull-request-review-summary -->', ''))).toEqual([]);
+    expect(codexCleanSummaryPasses(summary('{not json'))).toEqual([]);
+    expect(codexCleanSummaryPasses(summary(clean).replace('<!-- codex-pull-request-review-summary -->', ''))).toEqual([]);
   });
 
-  it('still accepts a legacy table row with the full SHA', () => {
-    expect(codexCleanSummaryShas(summary('{}', `\`${HEAD}\``))).toEqual([HEAD]);
+  it('no longer accepts a legacy table row, which carries no completion evidence of its own', () => {
+    expect(codexCleanSummaryPasses(summary('{}', undefined, `\`${HEAD}\``))).toEqual([]);
   });
 });
 

@@ -62,7 +62,10 @@ signing and network boundaries.
   `reconcileLocked(reservation, publicClient)`. Phases with different
   calldata (e.g. protocol fee and payee) each go in `calls: [{ hash, from, to,
   data, value }]`. Identity cannot be attached later; a hash without a binding
-  keeps the lock until committed.
+  keeps the lock until committed. If a phase may have broadcast without a
+  usable hash, pass `incomplete: true` (malformed or empty entries and
+  `SpendOutcome.incompleteEvidence` set it automatically): such a lock commits
+  on success evidence but is never released.
 - `sendToken()`/`sendNative()` require a chain-bound wallet client; string
   amounts for tokens outside the registry need `expectedDecimals`;
   over-precision amounts throw instead of truncating.

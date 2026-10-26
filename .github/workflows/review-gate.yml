@@ -17,9 +17,10 @@
 #      clean pass (Codex submits no review when it has no findings), the
 #      Codex bot's own review-summary comment reports, in its
 #      machine-readable `codex-review-state:v1` line, a `completed` code
-#      review of the full 40-char head SHA with no findings (or a legacy
-#      `Code Review | Completed | <full sha>` row), and was updated after the
-#      last base change. Short SHAs are never accepted. A dismissed Codex
+#      review of the full 40-char head SHA with no findings, and its
+#      `Code Review` row (same commit) gives a `Completed` time after the
+#      last base change. The comment's updated_at never dates the review.
+#      Short SHAs are never accepted. A dismissed Codex
 #      review on this head blocks the clean-summary fallback.
 #      Findings arrive as review threads, which the ruleset's
 #      thread-resolution rule blocks separately.
@@ -226,37 +227,48 @@ jobs:
               return !!login && CODEX_LOGINS.has(login);
             }
 
-            // BEGIN codexCleanSummaryShas
-            // Full head SHAs that a Codex review-summary comment reports as a
-            // COMPLETED code review with NO findings. Codex's visible table
-            // shows only a short SHA, so the authoritative source is its
-            // machine-readable state line:
-            //   <!-- codex-review-state:v1 {"code_review":{"commit_sha":"<40 hex>",
-            //        "status":"completed","has_any_findings":false,...}} -->
-            // A legacy table row carrying a full 40-char SHA is also accepted.
-            // Short SHAs are never accepted; unparseable state is ignored.
-            function codexCleanSummaryShas(body) {
+            // BEGIN codexCleanSummaryPasses
+            // Clean Codex passes reported by a review-summary comment, each as
+            // { sha, completedMs }: a COMPLETED code review with NO findings.
+            //  - sha: the full head SHA from the machine-readable state line
+            //      <!-- codex-review-state:v1 {"code_review":{"commit_sha":"<40 hex>",
+            //           "status":"completed","has_any_findings":false,...}} -->
+            //    (the visible table shows only a short SHA).
+            //  - completedMs: the review's own completion time, from the
+            //    `Code Review` row's `Completed <relative-time datetime=...>`
+            //    whose short SHA prefixes that commit. The comment's
+            //    updated_at is never used: any later edit of the dashboard
+            //    moves it.
+            // No completion time, a mismatched row, a short SHA or
+            // unparseable state means no evidence.
+            function codexCleanSummaryPasses(body) {
               const SUMMARY_MARKER = '<!-- codex-pull-request-review-summary -->';
               if (typeof body !== 'string' || !body.includes(SUMMARY_MARKER)) return [];
-              const out = [];
               const state = /<!--\s*codex-review-state:v1\s+([\s\S]*?)\s*-->/.exec(body);
-              if (state) {
-                try {
-                  const json = state[1].replace(/&#123;/g, '{').replace(/&#125;/g, '}');
-                  const review = JSON.parse(json)?.code_review;
-                  if (review && review.status === 'completed' &&
-                      review.has_any_findings === false && review.has_unresolved_findings === false &&
-                      typeof review.commit_sha === 'string' && /^[0-9a-f]{40}$/i.test(review.commit_sha)) {
-                    out.push(review.commit_sha.toLowerCase());
-                  }
-                } catch (_) { /* malformed state: no evidence */ }
-              }
-              const row = /^\|[^|\n]*\bCode Review\b[^|\n]*\|[^|\n]*\bCompleted\b[^|\n]*\|\s*`([0-9a-fA-F]{40})`\s*\|/gm;
+              if (!state) return [];
+              let sha = '';
+              try {
+                const json = state[1].replace(/&#123;/g, '{').replace(/&#125;/g, '}');
+                const review = JSON.parse(json)?.code_review;
+                if (review && review.status === 'completed' &&
+                    review.has_any_findings === false && review.has_unresolved_findings === false &&
+                    typeof review.commit_sha === 'string' && /^[0-9a-f]{40}$/i.test(review.commit_sha)) {
+                  sha = review.commit_sha.toLowerCase();
+                }
+              } catch (_) { /* malformed state: no evidence */ }
+              if (!sha) return [];
+              const row = /^\|[^|\n]*\bCode Review\b[^|\n]*\|([^|\n]*)\|\s*`([0-9a-fA-F]{7,40})`\s*\|/gm;
               let m;
-              while ((m = row.exec(body)) !== null) out.push(m[1].toLowerCase());
-              return out;
+              while ((m = row.exec(body)) !== null) {
+                const status = m[1];
+                if (!/\bCompleted\b/.test(status) || !sha.startsWith(m[2].toLowerCase())) continue;
+                const at = /<relative-time\s+datetime="([^"]+)"/.exec(status);
+                const completedMs = at ? Date.parse(at[1]) : NaN;
+                if (Number.isFinite(completedMs)) return [{ sha, completedMs }];
+              }
+              return [];
             }
-            // END codexCleanSummaryShas
+            // END codexCleanSummaryPasses
 
             function isCodexUser(user) {
               return !!user && user.type === 'Bot' && isCodexLogin(user.login);
@@ -604,10 +616,12 @@ jobs:
                 return isCodexUser(c.user) && /usage limits?/i.test(body);
               });
 
+              // Dated by the review's own completion time, which must post-date
+              // the base move; the comment's updated_at is not evidence.
               const cleanPassOnHead = comments.some(c => {
                 if (!isCodexUser(c.user)) return false;
-                if (!(Date.parse(c.updated_at || c.created_at || 0) > baseChangedMs)) return false;
-                return codexCleanSummaryShas(c.body || '').some(sha => sameSha(sha, headSha));
+                return codexCleanSummaryPasses(c.body || '').some(p =>
+                  sameSha(p.sha, headSha) && p.completedMs > baseChangedMs);
               });
               // Clean-summary fallback is only a no-review/no-findings result.
               // Any Codex review on this head — including a dismissed one —
