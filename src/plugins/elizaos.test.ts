@@ -76,10 +76,18 @@ beforeEach(() => {
     chain: { id: config.chain === 'arbitrum' ? 42161 : 8453 },
     walletClient: config.walletClient,
     contract: {
-      read: { remainingBudget: async () => [10n ** 18n, 10n ** 18n] },
+      read: {
+        remainingBudget: async () => [10n ** 18n, 10n ** 18n],
+        tokenContract: async () => ADDRESS_A,
+        tokenId: async () => 1n,
+      },
       write: { agentTransferToken: transfer },
     },
-    publicClient: { waitForTransactionReceipt: receipt, getTransaction: transaction },
+    publicClient: {
+      waitForTransactionReceipt: receipt,
+      getTransaction: transaction,
+      getCode: async () => '0x6080604052',
+    },
   }));
   transfer.mockReset().mockImplementation(async () => `0x${'ab'.repeat(32)}`);
   receipt.mockReset().mockResolvedValue({ status: 'success' });

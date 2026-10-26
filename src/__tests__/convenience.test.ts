@@ -160,10 +160,17 @@ describe('USDC environment spending controls', () => {
       chain: { id: chainId, name: 'Test chain' },
       walletClient: { account: { address: otherRecipient } },
       contract: {
-        read: { remainingBudget: vi.fn(async () => [10n ** 18n, 10n ** 18n]) },
+        read: {
+          remainingBudget: vi.fn(async () => [10n ** 18n, 10n ** 18n]),
+          tokenContract: vi.fn(async () => otherRecipient),
+          tokenId: vi.fn(async () => 1n),
+        },
         write: { agentTransferToken: transfer, setSpendPolicy: setPolicy },
       },
-      publicClient: { waitForTransactionReceipt: vi.fn(async () => ({ status: 'success' })) },
+      publicClient: {
+        waitForTransactionReceipt: vi.fn(async () => ({ status: 'success' })),
+        getCode: vi.fn(async () => '0x6080604052'),
+      },
     } as unknown as Parameters<typeof x402FromEnv>[0];
     return { wallet, transfer, setPolicy };
   }

@@ -28,7 +28,7 @@ import {
   x402DebitAmount,
   x402ProtocolFeeAmount,
 } from './fee.js';
-import { agentTransferToken, checkBudget } from '../index.js';
+import { submitAgentTransferToken, checkBudget } from '../index.js';
 import { AgentAccountV2Abi } from '../abi.js';
 import { parseNetworkChainId, resolveAssetAddress } from './multi-asset.js';
 import { toReplayableFetchArgs, withFailClosedRedirect } from './fetch-args.js';
@@ -1949,7 +1949,7 @@ export class X402Client {
 
   private async submitTransfer(transfer: PreparedTransfer, phase: PaymentPhase, intentKey?: string): Promise<Hash> {
     try {
-      const txHash = await agentTransferToken(this.wallet, {
+      const txHash = await submitAgentTransferToken(this.wallet, {
         token: transfer.token, to: transfer.to, amount: transfer.amount,
       });
       if (!EVM_TX_HASH.test(txHash)) throw new Error('submission returned no valid transaction hash');

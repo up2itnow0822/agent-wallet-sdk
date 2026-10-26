@@ -19,7 +19,7 @@ const { transfer, onChainBudget } = vi.hoisted(() => ({
 }));
 
 vi.mock('../../index.js', () => ({
-  agentTransferToken: (...args: unknown[]) => transfer(...args),
+  submitAgentTransferToken: (...args: unknown[]) => transfer(...args),
   checkBudget: (...args: unknown[]) => onChainBudget(...args),
 }));
 

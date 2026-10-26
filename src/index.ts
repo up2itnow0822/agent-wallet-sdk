@@ -3,6 +3,9 @@ import {
   http,
   getContract,
   parseEventLogs,
+  parseAbi,
+  isAddress,
+  keccak256,
   type Address,
   type Hash,
   type Hex,
@@ -28,11 +31,12 @@ import type {
   WalletHealth,
   ActivityEntry,
   BatchTransfer,
+  AgentTransferResult,
 } from './types.js';
 
 export type {
   SpendPolicy, BudgetStatus, PendingTx, ExecuteResult, AgentWalletConfig, QueuedEvent,
-  BudgetForecast, WalletHealth, ActivityEntry, BatchTransfer,
+  BudgetForecast, WalletHealth, ActivityEntry, BatchTransfer, AgentTransferResult,
 } from './types.js';
 export { AgentAccountV2Abi, AgentAccountFactoryV2Abi } from './abi.js';
 
@@ -104,6 +108,9 @@ export interface AgentWalletHandle {
   publicClient: PublicClient;
   walletClient: WalletClient;
   chain: Chain;
+  /** Deployment identity supplied at creation; checked before writes. */
+  deployment?: AgentWalletConfig['deployment'];
+  expectedCodeHash?: Hash;
 }
 
 /**
@@ -112,6 +119,13 @@ export interface AgentWalletHandle {
 export function createWallet(config: AgentWalletConfig & { walletClient: WalletClient }): AgentWalletHandle {
   const chain = CHAINS[config.chain];
   if (!chain) throw new Error(`Unsupported chain: ${config.chain}`);
+  if (typeof config.accountAddress !== 'string' || !isAddress(config.accountAddress, { strict: false })) {
+    throw new Error('createWallet: accountAddress is not a valid address');
+  }
+  const signerChainId = config.walletClient?.chain?.id;
+  if (signerChainId != null && signerChainId !== chain.id) {
+    throw new Error(`createWallet: walletClient chain ${signerChainId} differs from ${config.chain} (${chain.id})`);
+  }
 
   const publicClient: PublicClient = createPublicClient({
     chain,
@@ -130,10 +144,75 @@ export function createWallet(config: AgentWalletConfig & { walletClient: WalletC
     publicClient,
     walletClient: config.walletClient,
     chain,
+    ...(config.deployment ? { deployment: { ...config.deployment } } : {}),
+    ...(config.expectedCodeHash ? { expectedCodeHash: config.expectedCodeHash } : {}),
   };
 }
 
 type Wallet = ReturnType<typeof createWallet>;
+
+/** Thrown before signing when the configured account cannot be verified as an AgentAccountV2 deployment. */
+export class AgentWalletVerificationError extends Error {
+  readonly name = 'AgentWalletVerificationError';
+}
+
+const EIP7702_DELEGATION_PREFIX = '0xef0100';
+const FACTORY_GET_ADDRESS_ABI = parseAbi([
+  'function getAddress(address tokenContract, uint256 tokenId) view returns (address)',
+]);
+const verifiedWallets = new WeakMap<object, Promise<void>>();
+
+/**
+ * Verify, before any write, that `wallet.address` is a deployed AgentAccountV2
+ * on `wallet.chain`: valid address, signer/read chain agreement, nonempty
+ * non-delegated contract code, responsive account views, and — when supplied —
+ * the approved code hash and the trusted factory's CREATE2 address.
+ * Successful verification is cached per wallet handle; failures are retried.
+ */
+export async function verifyAgentWallet(wallet: Wallet): Promise<void> {
+  const cached = verifiedWallets.get(wallet);
+  if (cached) return cached;
+  const pending = (async () => {
+    const fail = (msg: string): never => { throw new AgentWalletVerificationError(`agent wallet ${wallet.address}: ${msg}`); };
+    if (typeof wallet.address !== 'string' || !isAddress(wallet.address, { strict: false })) fail('invalid address');
+    const signerChain = wallet.walletClient?.chain?.id;
+    if (signerChain != null && signerChain !== wallet.chain.id) {
+      fail(`signer chain ${signerChain} differs from wallet chain ${wallet.chain.id}`);
+    }
+    const readChain = wallet.publicClient?.chain?.id;
+    if (readChain != null && readChain !== wallet.chain.id) {
+      fail(`read client chain ${readChain} differs from wallet chain ${wallet.chain.id}`);
+    }
+    const code = await wallet.publicClient.getCode({ address: wallet.address });
+    if (!code || code === '0x') fail('no contract code at this address (EOA or undeployed)');
+    if (code!.toLowerCase().startsWith(EIP7702_DELEGATION_PREFIX)) fail('address is an EIP-7702 delegated EOA, not an AgentAccountV2');
+    if (wallet.expectedCodeHash && keccak256(code!).toLowerCase() !== wallet.expectedCodeHash.toLowerCase()) {
+      fail('runtime code hash does not match expectedCodeHash');
+    }
+    const [tokenContract, tokenId] = await Promise.all([
+      wallet.contract.read.tokenContract(),
+      wallet.contract.read.tokenId(),
+    ]).catch(err => fail(`does not answer AgentAccountV2 views: ${(err as Error).message}`)) as [Address, bigint];
+    if (wallet.deployment) {
+      const d = wallet.deployment;
+      if (tokenContract.toLowerCase() !== d.tokenContract.toLowerCase() || tokenId !== d.tokenId) {
+        fail('account token binding differs from the configured deployment');
+      }
+      const predicted = await wallet.publicClient.readContract({
+        address: d.factoryAddress,
+        abi: FACTORY_GET_ADDRESS_ABI,
+        functionName: 'getAddress',
+        args: [d.tokenContract, d.tokenId],
+      }) as Address;
+      if (predicted.toLowerCase() !== wallet.address.toLowerCase()) {
+        fail('factory CREATE2 address does not match accountAddress');
+      }
+    }
+  })();
+  verifiedWallets.set(wallet, pending);
+  pending.catch(() => verifiedWallets.delete(wallet));
+  return pending;
+}
 
 /** Submitted execution that reverted or could not be confirmed. Do not resubmit an unknown execution. */
 export class AgentExecutionError extends Error {
@@ -156,6 +235,7 @@ export async function setSpendPolicy(
   policy: SpendPolicy
 ): Promise<Hash> {
   const periodLength = policy.periodLength || 86400;
+  await verifyAgentWallet(wallet);
 
   const hash = await wallet.contract.write.setSpendPolicy([
     policy.token,
@@ -177,6 +257,8 @@ export async function agentExecute(
 ): Promise<ExecuteResult> {
   const value = params.value ?? 0n;
   const data = params.data ?? '0x';
+  if (typeof value !== 'bigint' || value < 0n) throw new Error('agentExecute: value must be a non-negative bigint');
+  await verifyAgentWallet(wallet);
 
   const hash = await wallet.contract.write.agentExecute([
     params.to,
@@ -184,7 +266,7 @@ export async function agentExecute(
     data,
   ], { value, account: wallet.walletClient.account!, chain: wallet.chain });
 
-  // Check the tx receipt for TransactionQueued vs TransactionExecuted events
+  // Classify only from positive evidence emitted by this wallet.
   const receipt = await wallet.publicClient.waitForTransactionReceipt({ hash }).catch(error => {
     throw new AgentExecutionError(hash, 'unknown', error);
   });
@@ -192,20 +274,19 @@ export async function agentExecute(
     throw new AgentExecutionError(hash, receipt.status === 'reverted' ? 'reverted' : 'unknown');
   }
 
-  const walletAddr = wallet.address.toLowerCase();
-  const queuedLog = parseEventLogs({
-    abi: AgentAccountV2Abi,
-    eventName: 'TransactionQueued',
-    logs: receipt.logs.filter(log => log.address.toLowerCase() === walletAddr),
-  })[0];
-
-  const wasExecuted = !queuedLog;
-
-  return {
-    executed: wasExecuted,
-    txHash: hash,
-    ...(queuedLog && { pendingTxId: queuedLog.args.txId }),
-  };
+  const walletLogs = receipt.logs.filter(log => log.address.toLowerCase() === wallet.address.toLowerCase());
+  const queuedLog = parseEventLogs({ abi: AgentAccountV2Abi, eventName: 'TransactionQueued', logs: walletLogs })
+    .find(log => log.args.to.toLowerCase() === params.to.toLowerCase());
+  if (queuedLog) {
+    return { executed: false, txHash: hash, pendingTxId: queuedLog.args.txId };
+  }
+  const executedLog = parseEventLogs({ abi: AgentAccountV2Abi, eventName: 'TransactionExecuted', logs: walletLogs })
+    .find(log => log.args.target.toLowerCase() === params.to.toLowerCase() && log.args.value === value);
+  if (executedLog) {
+    return { executed: true, txHash: hash };
+  }
+  // A successful outer receipt without either event is not execution evidence.
+  throw new AgentExecutionError(hash, 'unknown');
 }
 
 /**
@@ -264,6 +345,7 @@ export async function approveTransaction(
   wallet: Wallet,
   txId: bigint
 ): Promise<Hash> {
+  await verifyAgentWallet(wallet);
   return wallet.contract.write.approvePending([txId], { account: wallet.walletClient.account!, chain: wallet.chain });
 }
 
@@ -274,6 +356,7 @@ export async function cancelTransaction(
   wallet: Wallet,
   txId: bigint
 ): Promise<Hash> {
+  await verifyAgentWallet(wallet);
   return wallet.contract.write.cancelPending([txId], { account: wallet.walletClient.account!, chain: wallet.chain });
 }
 
@@ -285,21 +368,73 @@ export async function setOperator(
   operator: Address,
   authorized: boolean
 ): Promise<Hash> {
+  await verifyAgentWallet(wallet);
   return wallet.contract.write.setOperator([operator, authorized], { account: wallet.walletClient.account!, chain: wallet.chain });
 }
 
+const ERC20_TRANSFER_EVENT_ABI = parseAbi([
+  'event Transfer(address indexed from, address indexed to, uint256 value)',
+]);
+
 /**
- * Transfer ERC20 tokens as the agent, respecting spend limits.
+ * Submit-only primitive: sends agentTransferToken and returns the outer
+ * transaction hash. The hash is NOT settlement proof — the transfer may revert
+ * or be queued for owner approval. Prefer {@link agentTransferToken}.
  */
-export async function agentTransferToken(
+export async function submitAgentTransferToken(
   wallet: Wallet,
   params: { token: Address; to: Address; amount: bigint }
 ): Promise<Hash> {
+  if (typeof params.amount !== 'bigint' || params.amount <= 0n) {
+    throw new Error('agentTransferToken: amount must be a positive bigint');
+  }
+  await verifyAgentWallet(wallet);
   return wallet.contract.write.agentTransferToken([
     params.token,
     params.to,
     params.amount,
   ], { account: wallet.walletClient.account!, chain: wallet.chain });
+}
+
+/**
+ * Transfer ERC20 tokens as the agent, respecting spend limits, and classify
+ * the confirmed receipt. Returns `executed` only when the token emitted a
+ * matching Transfer(wallet → to, amount); `queued` when the wallet parked it
+ * for owner approval (no tokens moved — do not release goods or retry).
+ * Throws AgentExecutionError('reverted' | 'unknown') otherwise; never resubmit
+ * an unknown transfer — reconcile its hash.
+ */
+export async function agentTransferToken(
+  wallet: Wallet,
+  params: { token: Address; to: Address; amount: bigint }
+): Promise<AgentTransferResult> {
+  const hash = await submitAgentTransferToken(wallet, params);
+  const receipt = await wallet.publicClient.waitForTransactionReceipt({ hash }).catch(error => {
+    throw new AgentExecutionError(hash, 'unknown', error);
+  });
+  if (receipt.status !== 'success') {
+    throw new AgentExecutionError(hash, receipt.status === 'reverted' ? 'reverted' : 'unknown');
+  }
+  const walletAddr = wallet.address.toLowerCase();
+  const queuedLog = parseEventLogs({
+    abi: AgentAccountV2Abi,
+    eventName: 'TransactionQueued',
+    logs: receipt.logs.filter(log => log.address.toLowerCase() === walletAddr),
+  })[0];
+  if (queuedLog) {
+    return { status: 'queued', txHash: hash, pendingTxId: queuedLog.args.txId };
+  }
+  const transferred = parseEventLogs({
+    abi: ERC20_TRANSFER_EVENT_ABI,
+    eventName: 'Transfer',
+    logs: receipt.logs.filter(log => log.address.toLowerCase() === params.token.toLowerCase()),
+  }).some(log =>
+    log.args.from.toLowerCase() === walletAddr &&
+    log.args.to.toLowerCase() === params.to.toLowerCase() &&
+    log.args.value === params.amount,
+  );
+  if (transferred) return { status: 'executed', txHash: hash };
+  throw new AgentExecutionError(hash, 'unknown');
 }
 
 // ─── Factory: Deploy New Wallets ───
@@ -470,11 +605,7 @@ export async function batchAgentTransfer(
 ): Promise<Hash[]> {
   const hashes: Hash[] = [];
   for (const t of transfers) {
-    const hash = await wallet.contract.write.agentTransferToken(
-      [t.token, t.to, t.amount],
-      { account: wallet.walletClient.account!, chain: wallet.chain }
-    );
-    hashes.push(hash);
+    hashes.push(await submitAgentTransferToken(wallet, t));
   }
   return hashes;
 }

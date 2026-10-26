@@ -16,8 +16,9 @@ import {
   ERC8004Client,
   type UniversalAgentIdentity,
 } from 'agentwallet-sdk';
+import { isDirectRun } from './_example-safety.js';
 
-async function main() {
+export async function main() {
   // ── 1. Resolve any agent by UAID (works across all chains) ─────────────
 
   const resolver = new UAIDResolver();
@@ -109,4 +110,9 @@ async function main() {
   }
 }
 
-main().catch(console.error);
+if (isDirectRun(import.meta.url)) {
+  main().catch((err) => {
+    console.error(err);
+    process.exitCode = 1;
+  });
+}

@@ -2,135 +2,122 @@
  * Micropayment Agent Example — Agent-to-Agent API Payments
  *
  * Demonstrates an agent paying other agents for API calls:
- *   - $5/tx limit, $50/day budget
+ *   - $5/tx limit, $50/day budget (must already be installed on-chain by the owner)
  *   - Pay-per-call for AI inference, data feeds, compute
- *   - Automatic queuing when budget exhausted
+ *   - Queued (over-limit) payments are reported as NOT paid
+ *
+ * Safety: runs on Base Sepolia by default. Base mainnet requires
+ * AGENT_EXAMPLE_NETWORK=base and AGENT_EXAMPLE_LIVE_ACK (see _example-safety.ts).
+ * Nothing runs on import; execute this file directly to run it.
+ *
+ * Env: AGENT_PRIVATE_KEY, AGENT_WALLET, RPC_URL (optional),
+ *      AGENT_EXAMPLE_PAYEES (optional JSON {serviceId: address}).
  */
 
-import { createWalletClient, http, parseUnits, type Address } from 'viem';
+import { createWalletClient, http, parseUnits, isAddress, type Address } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
-import { base } from 'viem/chains';
 import {
   createWallet,
   agentTransferToken,
   checkBudget,
   onTransactionQueued,
+  type AgentWalletHandle,
 } from '../src/index.js';
+import {
+  assertInstalledSpendPolicy,
+  isDirectRun,
+  requireEnv,
+  resolveExampleNetwork,
+} from './_example-safety.js';
 
-// ─── Config ───
-const AGENT_PRIVATE_KEY = process.env.AGENT_PRIVATE_KEY as `0x${string}`;
-const WALLET_ADDRESS = process.env.AGENT_WALLET as Address;
-const USDC = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' as Address;
-
-const LIMITS = {
+export const LIMITS = {
   perTx: parseUnits('5', 6),    // $5 max per API call
   perDay: parseUnits('50', 6),  // $50 daily budget
 };
 
-// Simulated agent service registry
-const AGENT_SERVICES: Record<string, { wallet: Address; priceUsd: number; name: string }> = {
-  'sentiment-v2': {
-    wallet: '0x1111111111111111111111111111111111111111' as Address,
-    priceUsd: 0.50,
-    name: 'Sentiment Analysis Agent',
-  },
-  'price-oracle': {
-    wallet: '0x2222222222222222222222222222222222222222' as Address,
-    priceUsd: 0.10,
-    name: 'Price Oracle Agent',
-  },
-  'research-deep': {
-    wallet: '0x3333333333333333333333333333333333333333' as Address,
-    priceUsd: 2.00,
-    name: 'Deep Research Agent',
-  },
+// Placeholder service registry (testnet payees). Override with AGENT_EXAMPLE_PAYEES.
+const DEFAULT_SERVICES: Record<string, { wallet: Address; priceUsd: string; name: string }> = {
+  'sentiment-v2': { wallet: '0x1111111111111111111111111111111111111111', priceUsd: '0.50', name: 'Sentiment Analysis Agent' },
+  'price-oracle': { wallet: '0x2222222222222222222222222222222222222222', priceUsd: '0.10', name: 'Price Oracle Agent' },
+  'research-deep': { wallet: '0x3333333333333333333333333333333333333333', priceUsd: '2.00', name: 'Deep Research Agent' },
 };
 
-/**
- * Pay an agent for an API call, then call their endpoint.
- */
-async function callAgentAPI(
-  wallet: ReturnType<typeof createWallet>,
-  serviceId: string,
-  payload: any
-): Promise<{ paid: boolean; response: string }> {
-  const service = AGENT_SERVICES[serviceId];
-  if (!service) throw new Error(`Unknown service: ${serviceId}`);
-
-  const amount = parseUnits(service.priceUsd.toString(), 6);
-  console.log(`  💸 Paying ${service.name}: $${service.priceUsd}`);
-
-  // Pay the agent's wallet
-  const hash = await agentTransferToken(wallet, {
-    token: USDC,
-    to: service.wallet,
-    amount,
-  });
-
-  console.log(`  📝 Payment tx: ${hash}`);
-
-  // In production: include tx hash as proof-of-payment in API call
-  // const response = await fetch(service.endpoint, {
-  //   headers: { 'X-Payment-Tx': hash },
-  //   body: JSON.stringify(payload),
-  // });
-
-  return {
-    paid: true,
-    response: `[Simulated ${service.name} response for ${JSON.stringify(payload)}]`,
-  };
+function loadServices(): typeof DEFAULT_SERVICES {
+  const raw = process.env.AGENT_EXAMPLE_PAYEES;
+  if (!raw) return DEFAULT_SERVICES;
+  const overrides = JSON.parse(raw) as Record<string, string>;
+  const services = { ...DEFAULT_SERVICES };
+  for (const [id, address] of Object.entries(overrides)) {
+    if (!services[id] || !isAddress(address)) throw new Error(`Invalid payee override for ${id}`);
+    services[id] = { ...services[id], wallet: address };
+  }
+  return services;
 }
 
-async function main() {
-  const agentAccount = privateKeyToAccount(AGENT_PRIVATE_KEY);
+/**
+ * Pay an agent for an API call. Returns paid=true only when the transfer
+ * executed on-chain; a queued transfer moved no tokens.
+ */
+export async function payForAgentAPI(
+  wallet: AgentWalletHandle,
+  usdc: Address,
+  serviceId: string,
+  services = loadServices(),
+): Promise<{ paid: boolean; txHash: `0x${string}`; pendingTxId?: bigint }> {
+  const service = services[serviceId];
+  if (!service) throw new Error(`Unknown service: ${serviceId}`);
+
+  const amount = parseUnits(service.priceUsd, 6);
+  console.log(`  💸 Paying ${service.name}: $${service.priceUsd}`);
+
+  const result = await agentTransferToken(wallet, { token: usdc, to: service.wallet, amount });
+  if (result.status === 'queued') {
+    console.log(`  ⏸️  Queued for owner approval (txId ${result.pendingTxId}); NOT paid`);
+    return { paid: false, txHash: result.txHash, pendingTxId: result.pendingTxId };
+  }
+  console.log(`  📝 Payment executed: ${result.txHash}`);
+  // In production: call the service with the executed tx hash as proof-of-payment.
+  return { paid: true, txHash: result.txHash };
+}
+
+export async function main(): Promise<void> {
+  const network = resolveExampleNetwork();
+  const agentAccount = privateKeyToAccount(requireEnv('AGENT_PRIVATE_KEY') as `0x${string}`);
   const walletClient = createWalletClient({
     account: agentAccount,
-    chain: base,
+    chain: network.chain,
     transport: http(process.env.RPC_URL),
   });
 
   const wallet = createWallet({
-    accountAddress: WALLET_ADDRESS,
-    chain: 'base',
+    accountAddress: requireEnv('AGENT_WALLET') as Address,
+    chain: network.chainKey,
     rpcUrl: process.env.RPC_URL,
     walletClient,
   });
 
-  console.log(`🤖 Micropayment agent online: ${wallet.address}`);
-  console.log(`   Limits: $${Number(LIMITS.perTx) / 1e6}/tx, $${Number(LIMITS.perDay) / 1e6}/day\n`);
+  console.log(`🤖 Micropayment agent on ${network.chainKey}${network.live ? ' (LIVE FUNDS)' : ''}: ${wallet.address}`);
+  await assertInstalledSpendPolicy(wallet, network.usdc, LIMITS);
 
-  // Alert on queued transactions
   const unwatch = onTransactionQueued(wallet, (event) => {
-    console.log(`\n🚨 Budget exceeded! Transaction queued (ID: ${event.txId})`);
-    console.log(`   Amount: $${Number(event.amount) / 1e6} — awaiting owner approval`);
+    console.log(`\n🚨 Transaction queued (ID: ${event.txId}) — awaiting owner approval`);
   });
 
-  // Simulate a research workflow that calls multiple agent APIs
-  console.log('📋 Starting research workflow...\n');
-
-  // Step 1: Get sentiment data
-  console.log('Step 1: Sentiment analysis');
-  const sentiment = await callAgentAPI(wallet, 'sentiment-v2', { topic: 'BTC', timeframe: '24h' });
-  console.log(`  ✅ ${sentiment.response}\n`);
-
-  // Step 2: Get price data
-  console.log('Step 2: Price oracle');
-  const price = await callAgentAPI(wallet, 'price-oracle', { asset: 'BTC' });
-  console.log(`  ✅ ${price.response}\n`);
-
-  // Step 3: Deep research (more expensive)
-  console.log('Step 3: Deep research');
-  const research = await callAgentAPI(wallet, 'research-deep', {
-    query: 'BTC macro outlook Q1 2026',
-  });
-  console.log(`  ✅ ${research.response}\n`);
-
-  // Check remaining budget
-  const budget = await checkBudget(wallet, USDC);
-  console.log(`💰 Remaining budget: $${Number(budget.remainingInPeriod) / 1e6} / $50`);
-  console.log(`   Total spent this session: $${50 - Number(budget.remainingInPeriod) / 1e6}`);
-
-  unwatch();
+  try {
+    for (const serviceId of ['sentiment-v2', 'price-oracle', 'research-deep']) {
+      const outcome = await payForAgentAPI(wallet, network.usdc, serviceId);
+      if (!outcome.paid) break; // stop the workflow; do not retry a queued payment
+    }
+    const budget = await checkBudget(wallet, network.usdc);
+    console.log(`💰 Remaining on-chain budget: ${budget.remainingInPeriod} base units`);
+  } finally {
+    unwatch();
+  }
 }
 
-main().catch(console.error);
+if (isDirectRun(import.meta.url)) {
+  main().catch((err) => {
+    console.error(err);
+    process.exitCode = 1;
+  });
+}

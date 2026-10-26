@@ -14,38 +14,44 @@
 
 import { createWalletClient, http, type Address } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
-import { base } from 'viem/chains';
 import {
   createWallet,
   createX402Client,
   createX402Fetch,
+  type AgentWalletHandle,
   type X402TransactionLog,
 } from '../src/index.js';
+import { isDirectRun, requireEnv, resolveExampleNetwork } from './_example-safety.js';
 
-// ─── Config ───
+// Safety: Base Sepolia by default; Base mainnet requires AGENT_EXAMPLE_NETWORK=base
+// and AGENT_EXAMPLE_LIVE_ACK. Nothing runs (or signs) on import.
 
-const AGENT_KEY = process.env.AGENT_PRIVATE_KEY as `0x${string}`;
-const AGENT_ACCOUNT = process.env.AGENT_ACCOUNT_ADDRESS as Address;
-const RPC_URL = process.env.BASE_RPC_URL ?? 'https://mainnet.base.org';
+// ─── Setup (lazy: no key is read and no client is created on import) ───
 
-// ─── Setup ───
+let cachedWallet: AgentWalletHandle | undefined;
 
-const walletClient = createWalletClient({
-  account: privateKeyToAccount(AGENT_KEY),
-  chain: base,
-  transport: http(RPC_URL),
-});
-
-const wallet = createWallet({
-  accountAddress: AGENT_ACCOUNT,
-  chain: 'base',
-  rpcUrl: RPC_URL,
-  walletClient,
-});
+export function exampleWallet(): AgentWalletHandle {
+  if (cachedWallet) return cachedWallet;
+  const network = resolveExampleNetwork();
+  const rpcUrl = process.env.RPC_URL;
+  const walletClient = createWalletClient({
+    account: privateKeyToAccount(requireEnv('AGENT_PRIVATE_KEY') as `0x${string}`),
+    chain: network.chain,
+    transport: http(rpcUrl),
+  });
+  cachedWallet = createWallet({
+    accountAddress: requireEnv('AGENT_ACCOUNT_ADDRESS') as Address,
+    chain: network.chainKey,
+    rpcUrl,
+    walletClient,
+  });
+  return cachedWallet;
+}
 
 // ─── Example 1: Basic x402 Client ───
 
-async function basicUsage() {
+export async function basicUsage() {
+  const wallet = exampleWallet();
   // Agent automatically pays for API access
   const client = createX402Client(wallet, {
     globalPerRequestMax: 1_000_000n,   // Max $1 USDC per request
@@ -68,7 +74,8 @@ async function basicUsage() {
 
 // ─── Example 2: Drop-in Fetch Replacement ───
 
-async function fetchReplacement() {
+export async function fetchReplacement() {
+  const wallet = exampleWallet();
   // Works as a drop-in replacement for fetch()
   const x402Fetch = createX402Fetch(wallet, {
     globalPerRequestMax: 5_000_000n, // Max $5 per request
@@ -80,7 +87,8 @@ async function fetchReplacement() {
 
 // ─── Example 3: Service-Level Budgets ───
 
-async function serviceBudgets() {
+export async function serviceBudgets() {
+  const wallet = exampleWallet();
   const client = createX402Client(wallet, {
     globalDailyLimit: 50_000_000n, // $50/day total
     serviceBudgets: [
@@ -112,7 +120,7 @@ async function serviceBudgets() {
 
 // ─── Run ───
 
-async function main() {
+export async function main() {
   console.log('=== x402 Payment Examples ===\n');
 
   try {
@@ -134,4 +142,9 @@ async function main() {
   }
 }
 
-main().catch(console.error);
+if (isDirectRun(import.meta.url)) {
+  main().catch((err) => {
+    console.error(err);
+    process.exitCode = 1;
+  });
+}
