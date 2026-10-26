@@ -366,32 +366,41 @@ export class StellarX402Adapter {
     const expected = typeof hash === 'string' ? hash.toLowerCase() : '';
     if (!STELLAR_TX_HASH.test(expected)) return { status: 'unknown', hash: String(hash), reason: 'invalid transaction hash' };
     try {
+      // Network checks bracket every read: evidence counts only if the Horizon
+      // served the configured network both before and after it was read, so a
+      // load balancer that switches networks mid-lookup yields `unknown`.
       await this.assertHorizonNetwork(this.confirmationHorizonUrl);
-      const res = await boundedFetch(`${this.confirmationHorizonUrl}/transactions/${expected}`, {
-        headers: { Accept: 'application/json' },
-      }, { timeoutMs: this.timeoutMs, maxBytes: STELLAR_HORIZON_MAX_BYTES, fetchImpl: this.fetchImpl });
-      if (res.status === 404) {
-        const latest = await this.ledgerCloseTime('desc');
-        const oldest = await this.ledgerCloseTime('asc');
-        if (latest === undefined || oldest === undefined) {
-          return { status: 'unknown', hash: expected, reason: 'Horizon ledger bounds are unreadable' };
-        }
-        return { status: 'not_found', hash: expected, latestLedgerClosedAt: latest, oldestLedgerClosedAt: oldest };
-      }
-      if (!res.ok) return { status: 'unknown', hash: expected, reason: `transaction lookup returned ${res.status}` };
-      const tx = safeJson(res.text) as { hash?: unknown; ledger?: unknown; successful?: unknown } | undefined;
-      if (!tx || typeof tx.hash !== 'string' || tx.hash.toLowerCase() !== expected) {
-        return { status: 'unknown', hash: expected, reason: 'lookup does not reference this transaction' };
-      }
-      if (typeof tx.ledger !== 'number' || !Number.isSafeInteger(tx.ledger) || tx.ledger <= 0) {
-        return { status: 'unknown', hash: expected, reason: 'lookup lacks a ledger' };
-      }
-      if (tx.successful === true) return { status: 'successful', hash: expected, ledger: tx.ledger };
-      if (tx.successful === false) return { status: 'failed', hash: expected, ledger: tx.ledger };
-      return { status: 'unknown', hash: expected, reason: 'lookup lacks an explicit successful flag' };
+      const evidence = await this.readTransactionEvidence(expected);
+      if (evidence.status !== 'unknown') await this.assertHorizonNetwork(this.confirmationHorizonUrl);
+      return evidence;
     } catch (err) {
       return { status: 'unknown', hash: expected, reason: `lookup failed: ${(err as Error).message}` };
     }
+  }
+
+  private async readTransactionEvidence(expected: string): Promise<StellarTransactionLookup> {
+    const res = await boundedFetch(`${this.confirmationHorizonUrl}/transactions/${expected}`, {
+      headers: { Accept: 'application/json' },
+    }, { timeoutMs: this.timeoutMs, maxBytes: STELLAR_HORIZON_MAX_BYTES, fetchImpl: this.fetchImpl });
+    if (res.status === 404) {
+      const latest = await this.ledgerCloseTime('desc');
+      const oldest = await this.ledgerCloseTime('asc');
+      if (latest === undefined || oldest === undefined) {
+        return { status: 'unknown', hash: expected, reason: 'Horizon ledger bounds are unreadable' };
+      }
+      return { status: 'not_found', hash: expected, latestLedgerClosedAt: latest, oldestLedgerClosedAt: oldest };
+    }
+    if (!res.ok) return { status: 'unknown', hash: expected, reason: `transaction lookup returned ${res.status}` };
+    const tx = safeJson(res.text) as { hash?: unknown; ledger?: unknown; successful?: unknown } | undefined;
+    if (!tx || typeof tx.hash !== 'string' || tx.hash.toLowerCase() !== expected) {
+      return { status: 'unknown', hash: expected, reason: 'lookup does not reference this transaction' };
+    }
+    if (typeof tx.ledger !== 'number' || !Number.isSafeInteger(tx.ledger) || tx.ledger <= 0) {
+      return { status: 'unknown', hash: expected, reason: 'lookup lacks a ledger' };
+    }
+    if (tx.successful === true) return { status: 'successful', hash: expected, ledger: tx.ledger };
+    if (tx.successful === false) return { status: 'failed', hash: expected, ledger: tx.ledger };
+    return { status: 'unknown', hash: expected, reason: 'lookup lacks an explicit successful flag' };
   }
 
   /** Close time (unix s) of the newest ('desc') or oldest retained ('asc') ledger. */

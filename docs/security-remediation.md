@@ -98,7 +98,10 @@ signing and network boundaries.
   `resumeEVMToSolana(error.recovery)`. A Solana→EVM `MINT_UNCONFIRMED` /
   `MINT_SUBMISSION_UNKNOWN` error is resumed with
   `resumeSolanaToEVM(walletClient, error.mintRecovery)`, which never mints
-  while the retained transaction is unresolved.
+  while the retained transaction is unresolved; a recovery without a
+  `mintTxHash` mints again only with `{ originalSubmissionReconciled: true }`.
+- Custom wallet/ERC-8004 read clients must implement `getChainId()`; the RPC
+  endpoint must serve the configured chain.
 
 ### Version note
 

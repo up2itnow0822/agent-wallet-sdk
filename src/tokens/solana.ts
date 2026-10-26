@@ -390,6 +390,8 @@ export class SolanaWallet {
       })
     );
 
+    // Re-check immediately before signing (no awaits between this and send).
+    await this.assertCluster(connection);
     const signature = await sendAndConfirmTransaction(connection, transaction, [keypair]);
     return { signature };
   }
@@ -493,6 +495,9 @@ export class SolanaWallet {
     const { Transaction, sendAndConfirmTransaction } = await loadSolanaWeb3();
     const transaction = new Transaction().add(...instructions);
 
+    // Re-check immediately before signing: the mint and recipient-account
+    // reads above are awaits during which the endpoint could change clusters.
+    await this.assertCluster(connection);
     const signature = await sendAndConfirmTransaction(connection, transaction, [keypair]);
     return { signature };
   }

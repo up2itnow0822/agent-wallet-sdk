@@ -602,13 +602,25 @@ function solanaToEvmTerms(toChain: EVMBridgeChain, recipient: Address) {
  * attested bytes against the recovery's chain and recipient, then resolves a
  * retained `mintTxHash` BEFORE any new write: a successful receipt (with the
  * nonce consumed) returns the result; a pending or unreadable one throws
- * MINT_UNCONFIRMED again without submitting; only a reverted one (or no
- * retained hash) proceeds to the usedNonces check and a new receiveMessage.
+ * MINT_UNCONFIRMED again without submitting; only a reverted one proceeds to
+ * the usedNonces check and a new receiveMessage. A recovery without a hash
+ * (MINT_SUBMISSION_UNKNOWN) mints again only with
+ * `originalSubmissionReconciled: true`.
  */
 export async function resumeSolanaToEVM(
   walletClient: WalletClient,
   recovery: SolanaMintRecovery,
-  options: { evmRpcUrl?: string } = {},
+  options: {
+    evmRpcUrl?: string;
+    /**
+     * Required to mint again from a recovery WITHOUT `mintTxHash`
+     * (MINT_SUBMISSION_UNKNOWN): the earlier receiveMessage may have been
+     * broadcast without returning a hash and may still be pending. Set it only
+     * after reconciling that submission (e.g. no pending transaction from this
+     * account). A consumed nonce is always reported as MINT_ALREADY_RECEIVED.
+     */
+    originalSubmissionReconciled?: boolean;
+  } = {},
 ): Promise<SolanaToEVMResult> {
   const startMs = Date.now();
   if (!walletClient.account) {
@@ -641,6 +653,7 @@ export async function resumeSolanaToEVM(
     decoded,
     startMs,
     priorMintTxHash: recovery.mintTxHash,
+    holdUnreconciled: recovery.mintTxHash === undefined && options.originalSubmissionReconciled !== true,
   });
 }
 
@@ -655,6 +668,8 @@ async function mintAttested(
     decoded: ReturnType<typeof assertBurnTerms>;
     startMs: number;
     priorMintTxHash?: Hash;
+    /** Hashless ambiguous submission not yet reconciled: never write. */
+    holdUnreconciled?: boolean;
   },
 ): Promise<SolanaToEVMResult> {
   const { toChain, evmRpcUrl, recipient, attested, decoded, startMs } = ctx;
@@ -721,6 +736,9 @@ async function mintAttested(
   // Reconcile the nonce first: a used nonce means the mint already happened.
   if (await readUsedNonce() !== 0n) {
     throw fail('MINT_ALREADY_RECEIVED', `CCTP nonce ${decoded.nonce} was already received on ${toChain}; do not resubmit.`);
+  }
+  if (ctx.holdUnreconciled) {
+    throw fail('MINT_SUBMISSION_UNKNOWN', `the earlier receiveMessage on ${toChain} has no known hash and may still be pending; nonce ${decoded.nonce} is not yet consumed. Reconcile that submission, then call resumeSolanaToEVM with { originalSubmissionReconciled: true }.`);
   }
 
   let mintTxHash: Hash;

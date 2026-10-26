@@ -329,6 +329,23 @@ describe('evidence-bound reconciliation of unknown reservations (Codex P2)', () 
     expect(budget.occupiedStroops).toBe(20_000_000n);
   });
 
+  it('keeps the reservation when the Horizon switches networks after the 404 (Codex round 5)', async () => {
+    const { budget, id } = await unknownReservation();
+    let rootCalls = 0;
+    const base = ledgerHorizon({});
+    const switching = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith('/')) {
+        rootCalls += 1;
+        const passphrase = rootCalls === 1 ? STELLAR_NETWORK.pubnet.networkPassphrase : STELLAR_NETWORK.testnet.networkPassphrase;
+        return new Response(JSON.stringify({ network_passphrase: passphrase }));
+      }
+      return base(url, init);
+    }) as unknown as typeof fetch;
+    const r = await budget.reconcile(id, new StellarX402Adapter({ fetchImpl: switching }));
+    expect(r.status).toBe('unresolved');
+    expect(budget.occupiedStroops).toBe(20_000_000n);
+  });
+
   it('keeps the reservation on ambiguous lookups or another network', async () => {
     const { budget, id } = await unknownReservation();
     const flaky = new StellarX402Adapter({ fetchImpl: ledgerHorizon({ tx: () => new Response('busy', { status: 503 }) }) });

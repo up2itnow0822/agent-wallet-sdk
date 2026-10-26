@@ -231,6 +231,7 @@ describe('USDC environment spending controls', () => {
           }),
         })),
         getCode: vi.fn(async () => '0x6080604052'),
+        getChainId: vi.fn(async () => chainId),
       },
       expectedCodeHash: keccak256('0x6080604052'),
     } as unknown as Parameters<typeof x402FromEnv>[0];

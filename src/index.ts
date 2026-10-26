@@ -236,6 +236,12 @@ export async function verifyAgentWallet(wallet: Wallet): Promise<void> {
     if ((readChain !== undefined && readChain !== null) && readChain !== wallet.chain.id) {
       fail(`read client chain ${readChain} differs from wallet chain ${wallet.chain.id}`);
     }
+    // `publicClient.chain` is static config: prove the read RPC endpoint itself
+    // serves the wallet chain before trusting any deployment evidence from it.
+    const rpcChain = await wallet.publicClient.getChainId();
+    if (rpcChain !== wallet.chain.id) {
+      fail(`read RPC serves chain ${rpcChain}, not the wallet chain ${wallet.chain.id}`);
+    }
     const code = await wallet.publicClient.getCode({ address: wallet.address });
     if (!code || code === '0x') fail('no contract code at this address (EOA or undeployed)');
     if (code!.toLowerCase().startsWith(EIP7702_DELEGATION_PREFIX)) fail('address is an EIP-7702 delegated EOA, not an AgentAccountV2');

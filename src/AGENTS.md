@@ -62,11 +62,13 @@
   `cancel()`.
 - Token transfers pin decimals (registry or caller `expectedDecimals`) and
   bind signer/read/requested chains; Solana re-checks the genesis-hash cluster
-  before every signed transfer (never cached) and uses `TransferChecked`.
+  before every signed transfer (never cached), again immediately before
+  signing, and uses `TransferChecked`.
   Amounts never truncate.
 - Every AgentAccountV2 write first passes `verifyAgentWallet`, which requires
   a deployment identity (`deployment` or `expectedCodeHash`) unless the caller
-  explicitly sets `allowUnverifiedDeployment`. Every verification failure
+  explicitly sets `allowUnverifiedDeployment`, and requires the read RPC's
+  `getChainId()` to equal the wallet chain. Every verification failure
   (RPC errors included) is an `AgentWalletVerificationError`
   (`src/wallet-verification-error.ts`): a definite pre-broadcast failure, so
   x402 releases its reservation. Execution is classified only from wallet
@@ -86,17 +88,21 @@
   carry frozen recovery; `usedNonces` is checked before `receiveMessage`;
   reported recipients/amounts come from attested bytes. Resume paths
   (`resumeEVMToSolana`, `resumeSolanaToEVM`) re-validate the recovery and
-  resolve any retained transaction before another burn or mint.
+  resolve any retained transaction before another burn or mint; a hashless
+  ambiguous mint stays held until the caller passes
+  `originalSubmissionReconciled`.
 - The package has one entry point (`dist/index.js`): every public module API,
   including the EVM↔Solana bridge and both resume functions,
   is re-exported from `src/index.ts`.
 - UAID registration and UAID builders default to the chain's own
   `KNOWN_REGISTRY_ADDRESSES` identity registry (the one `verify()` trusts).
-- UAID `verify()` returns `verified` only after on-chain ERC-8004 checks;
+- UAID `verify()` returns `verified` only after on-chain ERC-8004 checks
+  (`readAgentBinding` first proves the RPC serves the UAID chain);
   broker claims are `brokerAttested`. The resolution cache is a bounded LRU.
 - Stellar auto-pay requires a spend policy reserved before signing; Horizon
   must report the configured network, re-checked (never cached) before every
-  build, submission and lookup; success needs the signed-XDR hash,
+  build, submission and lookup, and after every reconciliation read; success
+  needs the signed-XDR hash,
   `successful === true` and a ledger confirmation. An unknown reservation is
   freed only by `StellarSpendBudget.reconcile()` evidence for its recorded
   hash: included-but-failed, or not found after its `maxTime` on a Horizon

@@ -5,6 +5,7 @@ const rpc = vi.hoisted(() => ({
   readContract: vi.fn(),
   getLogs: vi.fn(),
   getBlockNumber: vi.fn(),
+  getChainId: vi.fn(),
 }));
 
 // Keep viem's real getContract adapter: ownership tests exercise readContract.
@@ -39,6 +40,7 @@ type ResolverContext = { signal: AbortSignal; maxBytes: number };
 beforeEach(() => {
   vi.clearAllMocks();
   rpc.getBlockNumber.mockResolvedValue(BLOCK);
+  rpc.getChainId.mockResolvedValue(8453);
   rpc.getLogs.mockResolvedValue([]);
   rpc.readContract.mockImplementation(async ({ functionName }: ReadRequest) => {
     if (functionName === 'ownerOf') return OWNER;
@@ -265,5 +267,19 @@ describe('ERC-8004 current owner lookup', () => {
     discover([registered(42n, 1n)]);
     const mixedCaseOwner = `0x${OWNER.slice(2).toUpperCase()}` as Address;
     expect((await new ERC8004Client({ chain: 'base' }).lookupAgentByOwner(mixedCaseOwner))?.agentId).toBe(42n);
+  });
+});
+
+describe('readAgentBinding is bound to the RPC endpoint chain (Codex round 5)', () => {
+  it('reads the binding when the endpoint serves the configured chain', async () => {
+    const binding = await new ERC8004Client({ chain: 'base' }).readAgentBinding(7n);
+    expect(binding).toMatchObject({ owner: OWNER, agentWallet: WALLET, blockNumber: BLOCK });
+  });
+
+  it('refuses an endpoint for another chain before any registry read', async () => {
+    rpc.getChainId.mockResolvedValue(1); // same registry address exists on Ethereum
+    await expect(new ERC8004Client({ chain: 'base' }).readAgentBinding(7n)).rejects.toThrow(/RPC serves chain 1/);
+    expect(rpc.getBlockNumber).not.toHaveBeenCalled();
+    expect(rpc.readContract).not.toHaveBeenCalled();
   });
 });

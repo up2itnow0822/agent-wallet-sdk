@@ -365,6 +365,12 @@ export class ERC8004Client {
    * metadata fetch). Used to independently verify broker-supplied identity.
    */
   async readAgentBinding(agentId: bigint): Promise<{ owner: Address; agentWallet: Address; agentURI: string; blockNumber: bigint }> {
+    // The identity registry address is shared across chains: prove the RPC
+    // endpoint (not just the client config) serves this client's chain.
+    const rpcChainId = await this.publicClient.getChainId();
+    if (rpcChainId !== this.chain.id) {
+      throw new Error(`ERC8004Client: RPC serves chain ${rpcChainId}, not ${this.config.chain} (${this.chain.id})`);
+    }
     const blockNumber = await this.publicClient.getBlockNumber();
     const contract = this.getReadContract();
     const [owner, agentWallet, agentURI] = await Promise.all([

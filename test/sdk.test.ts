@@ -9,12 +9,15 @@ const mockWatchEvent = vi.fn().mockReturnValue(() => {});
 const mockGetContractEvents = vi.fn().mockResolvedValue([]);
 const MOCK_CODE = '0x608060405234801561001057600080fd5b50' as const;
 const mockGetCode = vi.fn().mockResolvedValue(MOCK_CODE);
+/** Read RPC chain id; defaults to the chain the client was created for. */
+const mockGetChainId = vi.fn(async (configured?: number) => configured);
 
 vi.mock('viem', async () => {
   const actual = await vi.importActual('viem');
   return {
     ...actual,
-    createPublicClient: () => ({
+    createPublicClient: (opts: { chain?: { id: number } }) => ({
+      getChainId: (...args: any[]) => mockGetChainId(opts?.chain?.id, ...args),
       waitForTransactionReceipt: (...args: any[]) => mockWaitForReceipt(...args),
       watchContractEvent: (...args: any[]) => mockWatchEvent(...args),
       getContractEvents: (...args: any[]) => mockGetContractEvents(...args),
@@ -452,6 +455,17 @@ describe('agentTransferToken', () => {
       await expect(agentExecute(makeWallet(), { to: OPERATOR, value: 1n }))
         .rejects.toMatchObject({ executionStatus: 'unknown', txHash: TX_HASH });
     });
+  });
+
+  it('refuses to verify (or write) when the read RPC serves another chain (Codex round 5)', async () => {
+    mockWriteFns.agentTransferToken = vi.fn().mockResolvedValue(TX_HASH);
+    mockGetCode.mockClear();
+    mockGetChainId.mockResolvedValueOnce(1);
+    const err = await agentTransferToken(makeWallet(), { token: TOKEN, to: OPERATOR, amount: 1n }).catch((e) => e);
+    expect(err).toBeInstanceOf(AgentWalletVerificationError);
+    expect(err.message).toMatch(/read RPC serves chain 1/);
+    expect(mockGetCode).not.toHaveBeenCalled();
+    expect(mockWriteFns.agentTransferToken).not.toHaveBeenCalled();
   });
 
   it('reports an RPC failure during pre-write verification as a typed verification error, without writing', async () => {

@@ -95,6 +95,7 @@ beforeEach(() => {
       waitForTransactionReceipt: receipt,
       getTransaction: transaction,
       getCode: async () => '0x6080604052',
+      getChainId: async () => (config.chain === 'arbitrum' ? 42161 : 8453),
     },
     expectedCodeHash: keccak256('0x6080604052'),
   }));

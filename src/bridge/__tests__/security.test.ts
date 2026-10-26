@@ -345,6 +345,30 @@ describe('Solana→EVM receive binding and mint ambiguity (findings 22, 24)', ()
       expect(h.receiveMessage).toHaveBeenCalledTimes(1);
     });
 
+    it('keeps a hashless ambiguous mint locked until the caller reconciles it (Codex round 5)', async () => {
+      const msg = source(EVM_ME, 5_000_000n);
+      circle(attestedFor(msg, 1_000n));
+      h.receiveMessage.mockRejectedValue(new Error('socket hang up'));
+      const err = await receiveFromSolanaOnEVM(walletClient, params(msg), { toChain: 'arbitrum' }).catch((e) => e);
+      expect(err.code).toBe('MINT_SUBMISSION_UNKNOWN');
+      expect(err.mintRecovery.mintTxHash).toBeUndefined();
+      h.receiveMessage.mockReset().mockResolvedValue(MINT_TX);
+      h.receipt.mockReset().mockResolvedValue({ status: 'success', logs: [] });
+
+      const held = await resumeSolanaToEVM(walletClient, err.mintRecovery).catch((e) => e);
+      expect(held.code).toBe('MINT_SUBMISSION_UNKNOWN');
+      expect(h.receiveMessage).not.toHaveBeenCalled();
+
+      h.usedNonces.mockResolvedValueOnce(1n);
+      const done = await resumeSolanaToEVM(walletClient, err.mintRecovery).catch((e) => e);
+      expect(done.code).toBe('MINT_ALREADY_RECEIVED');
+      expect(h.receiveMessage).not.toHaveBeenCalled();
+
+      const r = await resumeSolanaToEVM(walletClient, err.mintRecovery, { originalSubmissionReconciled: true });
+      expect(r.mintTxHash).toBe(MINT_TX);
+      expect(h.receiveMessage).toHaveBeenCalledTimes(1);
+    });
+
     it('rejects a tampered recovery before any read or write', async () => {
       const recovery = await unconfirmed();
       const err1 = await resumeSolanaToEVM(walletClient, { ...recovery, recipient: EVM_OTHER }).catch((e) => e);

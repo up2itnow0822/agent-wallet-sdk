@@ -153,7 +153,17 @@ describe('Solana SPL scale and cluster binding (finding 1)', () => {
     await expect(wallet.sendSol('recipient', '1')).rejects.toThrow(/genesis/);
     await expect(wallet.sendSplToken('recipient', '1', SOLANA_TOKENS.USDC)).rejects.toThrow(/genesis/);
     expect(solana.sent).toHaveLength(1);
-    expect(solana.genesis).toHaveBeenCalledTimes(3);
+    expect(solana.genesis).toHaveBeenCalledTimes(4); // two checks for the successful send
+  });
+
+  it('re-checks the cluster after the mint/recipient reads, immediately before signing (Codex round 5)', async () => {
+    const wallet = createSolanaWallet({ keypairBytes: new Uint8Array(64) });
+    // Correct cluster at the first check; the endpoint switches during the reads.
+    solana.genesis
+      .mockResolvedValueOnce('5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d')
+      .mockResolvedValue('EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG');
+    await expect(wallet.sendSplToken('recipient', '1', SOLANA_TOKENS.USDC)).rejects.toThrow(/genesis/);
+    expect(solana.sent).toHaveLength(0);
   });
 
   it('accepts an explicitly configured devnet cluster', async () => {
