@@ -28,7 +28,6 @@ export {
   STELLAR_NETWORK,
   STELLAR_USDC,
   STELLAR_RECONCILE_HISTORY_MARGIN_S,
-  STELLAR_DETERMINISTIC_REJECTIONS,
 } from './chains/stellar/index.js';
 export type {
   StellarNetwork,

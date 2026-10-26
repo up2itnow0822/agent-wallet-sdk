@@ -71,21 +71,6 @@ const STELLAR_TX_HASH = /^[0-9a-f]{64}$/;
  */
 export const STELLAR_RECONCILE_HISTORY_MARGIN_S = 3600;
 
-/**
- * Transaction result codes that depend only on the signed envelope (not on
- * ledger state or time that a retry could change), so the same bytes can
- * never have been applied by another submission. Every other rejection code
- * is resolved against the ledger before the reservation is released.
- */
-export const STELLAR_DETERMINISTIC_REJECTIONS: ReadonlySet<string> = new Set([
-  'tx_malformed',
-  'tx_missing_operation',
-  'tx_bad_auth',
-  'tx_bad_auth_extra',
-  'tx_not_supported',
-  'tx_too_early',
-]);
-
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export type StellarNetwork = 'pubnet' | 'testnet';
@@ -327,22 +312,17 @@ export class StellarX402Adapter {
     }
 
     if (!res.ok) {
+      // No submit response releases a reservation. A result code is the
+      // endpoint's claim, not ledger evidence: it may follow an applied proxy
+      // retry (tx_bad_seq), describe bytes that become valid later
+      // (tx_too_early; account signer or protocol changes for tx_bad_auth*,
+      // tx_not_supported) or be false. The ledger decides: applied → paid,
+      // included-but-failed → rejected, absent → unknown until reconcile()
+      // proves the envelope expired unapplied.
       const body = safeJson(res.text);
       const resultCodes = (body as { extras?: { result_codes?: unknown } } | undefined)?.extras?.result_codes;
-      if (res.status >= 400 && res.status < 500 && resultCodes) {
-        const code = (resultCodes as { transaction?: unknown }).transaction;
-        const detail = `${res.status} ${JSON.stringify(resultCodes).slice(0, 200)}`;
-        if (typeof code === 'string' && STELLAR_DETERMINISTIC_REJECTIONS.has(code)) {
-          // A property of the envelope itself: no earlier or retried
-          // submission of these exact bytes could have been applied.
-          throw new StellarTransactionRejectedError(`Stellar transaction rejected: ${detail}`, expectedHash);
-        }
-        // Anything else (tx_bad_seq after a proxy retry, tx_too_late,
-        // fee-market codes, an untrusted endpoint) may follow an applied
-        // submission: decide from the ledger, never from the 4xx body.
-        return this.confirmOrUnknown(expectedHash, `Horizon returned ${detail}; outcome unknown`);
-      }
-      return this.confirmOrUnknown(expectedHash, `Horizon returned ${res.status}; outcome unknown`);
+      const detail = resultCodes ? `${res.status} ${JSON.stringify(resultCodes).slice(0, 200)}` : `${res.status}`;
+      return this.confirmOrUnknown(expectedHash, `Horizon returned ${detail}; outcome unknown`);
     }
 
     const result = safeJson(res.text) as { hash?: unknown; ledger?: unknown; successful?: unknown } | undefined;

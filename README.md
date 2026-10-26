@@ -91,6 +91,13 @@ npm install @solana/web3.js @solana/spl-token
 `@solana/web3.js` supports native SOL operations. Install
 `@solana/spl-token` as well when using SPL-token balance or transfer helpers.
 
+Stellar x402 payments (`StellarX402Adapter`, `stellarX402Pay`) use an optional
+peer dependency, version 14 or later:
+
+```bash
+npm install @stellar/stellar-sdk
+```
+
 ## Connect to an existing smart wallet
 
 The SDK requires a viem wallet client. This budget-reading example also

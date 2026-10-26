@@ -118,3 +118,89 @@ describe('review-gate reads base-move time from the real activity payload (Codex
     expect(latestBaseMoveMs({ message: 'Not Found' }, REAL[0].after)).toBe(Infinity);
   });
 });
+
+describe('review-gate binds a retained waiver check to its PR/base snapshot (Codex round 9)', () => {
+  const src = readFileSync(join(WF, 'review-gate.yml'), 'utf8');
+  const fn = /\/\/ BEGIN waiverBinding\n([\s\S]*?)\/\/ END waiverBinding/.exec(src)?.[1];
+  type Binding = { prNumber: number; headSha: string; baseRef: string; baseSha: string; labelEventId: number };
+  type Want = Binding & { baseChangedMs: number; labelEventMs: number };
+  // eslint-disable-next-line @typescript-eslint/no-implied-eval
+  const { waiverMarker, waiverCheckQualifies } = new Function(`${fn}\nreturn { waiverMarker, waiverCheckQualifies };`)() as {
+    waiverMarker: (b: Binding) => string;
+    waiverCheckQualifies: (run: unknown, want: Want) => boolean;
+  };
+
+  // Field names from real payloads: GET .../commits/{sha}/check-runs (review-gate on edd1f50)
+  // and the PR #92 timeline `labeled` event for codex-waived (id 33531149763).
+  const binding: Binding = {
+    prNumber: 92,
+    headSha: '2ca206c77fd55d9b8ccf560377806acead0f9cc6',
+    baseRef: 'main',
+    baseSha: '8a8b3a4a62b384d618b58a894fdec0640480ad50',
+    labelEventId: 33531149763,
+  };
+  const want: Want = {
+    ...binding,
+    baseChangedMs: Date.parse('2026-10-17T17:00:00Z'),
+    labelEventMs: Date.parse('2026-10-17T17:08:57Z'),
+  };
+  const run = (over: Record<string, unknown> = {}, summary = `Label applied. ${waiverMarker(binding)}`) => ({
+    app: { slug: 'github-actions' },
+    status: 'completed',
+    conclusion: 'success',
+    completed_at: '2026-10-17T17:09:30Z',
+    output: { title: 'Codex waived', summary },
+    ...over,
+  });
+
+  it('is wired into headHasWaiverCheck and every waiver verdict', () => {
+    expect(fn).toBeTruthy();
+    expect(src).toMatch(/runs\.some\(r => waiverCheckQualifies\(r, want\)\)/);
+    expect(src.match(/title: 'Codex waived',\n\s+summary: [^\n]*\n(?:[^\n]*\n){0,3}?[^\n]*waiverMarker\(/g)).toHaveLength(2);
+  });
+
+  it('accepts the check published for the current label event, PR, head and base', () => {
+    expect(waiverCheckQualifies(run(), want)).toBe(true);
+  });
+
+  it('rejects a check that completed before the latest base move', () => {
+    // The Codex scenario: the pre-base check survives on the unchanged head;
+    // the label is re-applied after the base move but its check never lands.
+    const moved = { ...want, baseChangedMs: Date.parse('2026-10-17T18:00:00Z'), labelEventMs: Date.parse('2026-10-17T18:05:00Z') };
+    expect(waiverCheckQualifies(run(), moved)).toBe(false);
+    expect(waiverCheckQualifies(run({ completed_at: '2026-10-17T17:00:00Z' }), want)).toBe(false);
+  });
+
+  it('rejects a check that predates the current label event', () => {
+    expect(waiverCheckQualifies(run({ completed_at: '2026-10-17T17:08:00Z' }), want)).toBe(false);
+  });
+
+  it.each([
+    ['an earlier label event', { labelEventId: 33531149000 }],
+    ['another PR', { prNumber: 93 }],
+    ['another head', { headSha: 'f'.repeat(40) }],
+    ['another base ref', { baseRef: 'release' }],
+    ['another base tip', { baseSha: 'c'.repeat(40) }],
+  ])('rejects a marker for %s', (_label, change) => {
+    expect(waiverCheckQualifies(run({}, `ok ${waiverMarker({ ...binding, ...change })}`), want)).toBe(false);
+  });
+
+  it('rejects legacy, foreign, failed or malformed checks', () => {
+    expect(waiverCheckQualifies(run({}, 'Waiver previously recorded for head.'), want)).toBe(false);
+    expect(waiverCheckQualifies(run({ app: { slug: 'some-app' } }), want)).toBe(false);
+    expect(waiverCheckQualifies(run({ conclusion: 'failure' }), want)).toBe(false);
+    expect(waiverCheckQualifies(run({ output: { title: 'Codex clean', summary: waiverMarker(binding) } }), want)).toBe(false);
+    expect(waiverCheckQualifies(run({ completed_at: null }), want)).toBe(false);
+    expect(waiverCheckQualifies(run({}, '<!-- review-gate-waiver:v1 {not json} -->'), want)).toBe(false);
+    expect(waiverCheckQualifies(run(), { ...want, labelEventId: Number.NaN })).toBe(false);
+    expect(waiverCheckQualifies(null, want)).toBe(false);
+  });
+
+  it('cannot be ended early by a base ref containing comment syntax', () => {
+    const odd = { ...binding, baseRef: 'x-->"}<!--y' };
+    const marker = waiverMarker(odd);
+    expect(marker).not.toMatch(/-->[\s\S]*-->/);
+    expect(waiverCheckQualifies(run({}, `ok ${marker}`), { ...want, baseRef: odd.baseRef })).toBe(true);
+    expect(waiverCheckQualifies(run({}, `ok ${marker}`), want)).toBe(false);
+  });
+});

@@ -670,7 +670,7 @@ export async function resumeSolanaToEVM(
   });
 }
 
-/** True only when `hash` is a call of receiveMessage(message, attestation) on `transmitter`. */
+/** True only when the body returned for `hash` is that hash's receiveMessage(message, attestation) on `transmitter`. */
 async function retainedMintMatches(
   client: PublicClient,
   hash: Hash,
@@ -679,7 +679,8 @@ async function retainedMintMatches(
 ): Promise<boolean> {
   try {
     const tx = await client.getTransaction({ hash });
-    if (!tx || typeof tx.to !== 'string' || tx.to.toLowerCase() !== transmitter.toLowerCase()) return false;
+    if (!tx || typeof tx.hash !== 'string' || tx.hash.toLowerCase() !== hash.toLowerCase()) return false;
+    if (typeof tx.to !== 'string' || tx.to.toLowerCase() !== transmitter.toLowerCase()) return false;
     const call = decodeFunctionData({ abi: MessageTransmitterV2Abi, data: tx.input });
     if (call.functionName !== 'receiveMessage') return false;
     const [message, attestation] = call.args as readonly [Hex, Hex];
@@ -753,6 +754,10 @@ async function mintAttested(
       priorReceipt = await destPublicClient.getTransactionReceipt({ hash: prior });
     } catch (err) {
       throw fail('MINT_UNCONFIRMED', `earlier receiveMessage ${prior} on ${toChain} is not yet confirmed (${err instanceof Error ? err.message : String(err)}); nothing was resubmitted.`, prior);
+    }
+    // A receipt is evidence only for the hash it names.
+    if (typeof priorReceipt?.transactionHash !== 'string' || priorReceipt.transactionHash.toLowerCase() !== prior.toLowerCase()) {
+      throw fail('MINT_UNCONFIRMED', `the receipt returned for ${prior} on ${toChain} is not bound to that hash; nothing was resubmitted.`, prior);
     }
     if (priorReceipt?.status === 'success') {
       // A retained hash is evidence only if it is THIS message's mint:

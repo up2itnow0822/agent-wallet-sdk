@@ -83,7 +83,8 @@
   successful outer receipt alone is never payment proof.
 - `SpendingPolicy` snapshots intents once (`snapshotPaymentIntent`). A locked
   reservation is released only by `reconcileLocked` against the submission
-  identity and call binding recorded once at lock time; multi-phase
+  identity and call binding recorded once at lock time; the receipt and the
+  transaction body must both name the requested hash. Multi-phase
   submissions bind each hash to its own call (`calls`). There is no caller
   override and no later hash attachment.
 - CCTP: attestations are always bound to a known source message; burn terms
@@ -93,9 +94,9 @@
   carry frozen recovery; `usedNonces` is checked before `receiveMessage`;
   reported recipients/amounts come from attested bytes. Resume paths
   (`resumeEVMToSolana`, `resumeSolanaToEVM`) re-validate the recovery and
-  resolve any retained transaction (bound to this message's
-  `receiveMessage` call) before another burn or mint; a hashless
-  ambiguous mint stays held until the caller passes
+  resolve any retained transaction (receipt and body bound to the retained
+  hash and to this message's `receiveMessage` call) before another burn or
+  mint; a hashless ambiguous mint stays held until the caller passes
   `originalSubmissionReconciled`.
 - The package has one entry point (`dist/index.js`): every public module API,
   including the EVM↔Solana bridge, both resume functions and the Stellar x402
@@ -110,14 +111,15 @@
 - Stellar auto-pay requires a spend policy reserved before signing; Horizon
   must report the configured network, re-checked (never cached) before every
   build, submission and lookup, and after every reconciliation read; success
-  needs the signed-XDR hash,
-  `successful === true` and a ledger confirmation. A 4xx rejection releases
-  the reservation only for envelope-deterministic codes
-  (`STELLAR_DETERMINISTIC_REJECTIONS`); any other code is decided from the
-  ledger. Reconciliation requires the recorded network. An unknown reservation is
-  freed only by `StellarSpendBudget.reconcile()` evidence for its recorded
-  hash: included-but-failed, or not found after its `maxTime` on a Horizon
-  whose history covers the validity window.
+  needs the signed-XDR hash, `successful === true` and a ledger confirmation.
+  No submit response or result code releases a reservation: every non-2xx is
+  decided from the ledger (applied → paid, included-but-failed → rejected and
+  released, absent → unknown). Reconciliation requires the recorded network.
+  An unknown reservation is freed only by `StellarSpendBudget.reconcile()`
+  evidence for its recorded hash: included-but-failed, or not found after its
+  `maxTime` on a Horizon whose history covers the validity window.
+  `@stellar/stellar-sdk` is an optional peer (>= 14, smoke-tested on 14, 16
+  and 17 against a fake Horizon).
 - Swaps require a caller `minAmountOut`, a chain-bound wallet client and a
   read client whose RPC `getChainId()` equals the configured chain. Explicit
   unknown chains throw.

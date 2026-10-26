@@ -417,14 +417,57 @@ describe('4xx rejections are decided from the ledger (Codex round 8)', () => {
     expect(budget.unresolved()).toHaveLength(0);
   });
 
-  it('releases only for envelope-deterministic codes', async () => {
-    const { impl } = horizon({ submit: rejected('tx_bad_auth') });
+  it('commits a 4xx-coded submission when the ledger shows it applied', async () => {
+    const { impl } = horizon({ submit: rejected('tx_bad_auth') }); // confirm: successful
+    const budget = new StellarSpendBudget('5');
+    const r = await stellarX402Pay({
+      responseHeaders: headers('stellar:pubnet', '1'), sourcePublicKey: SRC, sign: signer,
+      policy: { maxPerPayment: '5', budget }, adapter: { fetchImpl: impl },
+    });
+    expect(r.successful).toBe(true);
+    expect(budget.occupiedStroops).toBe(10_000_000n);
+  });
+
+  it('releases a 4xx-coded submission only when the ledger shows it failed', async () => {
+    const { impl } = horizon({
+      submit: rejected('tx_bad_auth'),
+      confirm: () => new Response(JSON.stringify({ hash: HASH, ledger: 9, successful: false })),
+    });
     const budget = new StellarSpendBudget('5');
     await expect(stellarX402Pay({
       responseHeaders: headers('stellar:pubnet', '1'), sourcePublicKey: SRC, sign: signer,
       policy: { maxPerPayment: '5', budget }, adapter: { fetchImpl: impl },
-    })).rejects.toThrow(/rejected/);
+    })).rejects.toThrow(/included but failed/);
     expect(budget.occupiedStroops).toBe(0n);
+  });
+});
+
+describe('no Horizon result code releases a reservation on its own (Codex round 9)', () => {
+  const rejected = (code: string) => () => new Response(JSON.stringify({ extras: { result_codes: { transaction: code } } }), { status: 400 });
+  // tx_too_early: the same signed bytes become valid later. The others can be
+  // reported falsely by a forwarding or untrusted endpoint, or change with
+  // account signers / protocol version within the envelope's time bounds.
+  it.each(['tx_too_early', 'tx_bad_auth', 'tx_bad_auth_extra', 'tx_not_supported', 'tx_malformed', 'tx_missing_operation'])(
+    'keeps the reservation for %s until the ledger decides',
+    async (code) => {
+      const { impl } = horizon({ submit: rejected(code), confirm: () => new Response('{}', { status: 404 }) });
+      const budget = new StellarSpendBudget('5');
+      await expect(stellarX402Pay({
+        responseHeaders: headers('stellar:pubnet', '1'), sourcePublicKey: SRC, sign: signer,
+        policy: { maxPerPayment: '5', budget }, adapter: { fetchImpl: impl },
+      })).rejects.toBeInstanceOf(StellarSubmissionUnknownError);
+      expect(budget.occupiedStroops).toBe(10_000_000n);
+      expect(budget.unresolved()).toEqual([
+        expect.objectContaining({ hash: HASH, chainId: 'stellar:pubnet', maxTime: 1_700_000_300 }),
+      ]);
+    },
+  );
+
+  it('does not export a release allowlist', async () => {
+    const root = await import('../../src/index.js') as Record<string, unknown>;
+    const x402 = await import('../../src/x402/index.js') as Record<string, unknown>;
+    expect(root.STELLAR_DETERMINISTIC_REJECTIONS).toBeUndefined();
+    expect(x402.STELLAR_DETERMINISTIC_REJECTIONS).toBeUndefined();
   });
 });
 

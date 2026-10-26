@@ -332,10 +332,16 @@ function bindingFor(submission: SubmissionIdentity, hash: string): Omit<Submissi
   return { from: submission.from, to: submission.to, data: submission.data, value: submission.value };
 }
 
+/**
+ * True only when `tx` is the body of `hash` (an RPC can return another
+ * transaction with the same from/to/input) and carries the recorded call.
+ */
 function callMatches(
+  hash: string,
   expected: Omit<SubmissionCall, 'hash'>,
-  tx: { from?: string; to?: string | null; input?: string; value?: bigint },
+  tx: { hash?: string; from?: string; to?: string | null; input?: string; value?: bigint },
 ): boolean {
+  if (typeof tx.hash !== 'string' || tx.hash.toLowerCase() !== hash.toLowerCase()) return false;
   if ((tx.from ?? '').toLowerCase() !== expected.from) return false;
   if ((tx.to ?? '').toLowerCase() !== expected.to) return false;
   if ((tx.input ?? '').toLowerCase() !== expected.data) return false;
@@ -602,7 +608,7 @@ export class SpendingPolicy {
           }
           const tx = await client.getTransaction({ hash: hash as `0x${string}` });
           const binding = bindingFor(submission, hash);
-          if (!tx || !binding || !callMatches(binding, tx)) {
+          if (!tx || !binding || !callMatches(hash, binding, tx)) {
             return { status: 'unresolved', reason: `transaction ${hash} does not match the recorded call` };
           }
         }

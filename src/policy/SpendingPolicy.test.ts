@@ -534,7 +534,7 @@ describe('SpendingPolicy reserve/commit/release', () => {
     const reconciled = await policy.reconcileLocked(first.reservation!, {
       getChainId: async () => 8453,
       getTransactionReceipt: async ({ hash }) => ({ transactionHash: hash, status: 'reverted' }),
-      getTransaction: async () => ({ from: call.from, to: call.to, input: call.data }),
+      getTransaction: async ({ hash }) => ({ hash, from: call.from, to: call.to, input: call.data }),
     });
     expect(reconciled.status).toBe('released');
     const retry = await policy.reserveApprovedDraft(draft.draftId!);
@@ -688,10 +688,13 @@ describe('SpendingPolicy locked reconciliation (finding 8)', () => {
   const HASH_A = ('0x' + 'a'.repeat(64)) as `0x${string}`;
   const HASH_B = ('0x' + 'b'.repeat(64)) as `0x${string}`;
   const CALL = { from: '0x' + '1'.repeat(40), to: '0x' + '2'.repeat(40), data: '0xa9059cbb' };
-  const client = (status: string | number, chainId = 8453, echo?: string, tx = { from: CALL.from, to: CALL.to, input: CALL.data }) => ({
+  const client = (
+    status: string | number, chainId = 8453, echo?: string,
+    tx: { hash?: string; from?: string; to: string; input: string } = { from: CALL.from, to: CALL.to, input: CALL.data },
+  ) => ({
     getChainId: async () => chainId,
     getTransactionReceipt: async ({ hash }: { hash: string }) => ({ transactionHash: echo ?? hash, status }),
-    getTransaction: async () => tx,
+    getTransaction: async ({ hash }: { hash: string }) => ({ hash, ...tx }),
   });
 
   async function lockedPolicy(hashes: string[] = [HASH_A]) {
@@ -761,7 +764,7 @@ describe('SpendingPolicy locked reconciliation (finding 8)', () => {
     const txFor = (map: Record<string, { from: string; to: string; input: string }>) => ({
       getChainId: async () => 8453,
       getTransactionReceipt: async ({ hash }: { hash: string }) => ({ transactionHash: hash, status: 'reverted' }),
-      getTransaction: async ({ hash }: { hash: string }) => map[hash.toLowerCase()],
+      getTransaction: async ({ hash }: { hash: string }) => (map[hash.toLowerCase()] ? { hash, ...map[hash.toLowerCase()] } : undefined),
     });
     const honest = { [HASH_A]: { from: CALL.from, to: CALL.to, input: '0xfee0' }, [HASH_B]: { from: CALL.from, to: CALL.to, input: '0xbee0' } };
 
@@ -805,8 +808,36 @@ describe('SpendingPolicy locked reconciliation (finding 8)', () => {
     policy.lock(r.reservation!, { chainId: 8453, txHashes: [HASH_A], to: '0x' + '1'.repeat(40), data: '0xabcd' });
     const c = {
       ...client('reverted'),
-      getTransaction: async () => ({ to: '0x' + '2'.repeat(40), input: '0xabcd' }),
+      getTransaction: async ({ hash }: { hash: string }) => ({ hash, to: '0x' + '2'.repeat(40), input: '0xabcd' }),
     };
     expect((await policy.reconcileLocked(r.reservation!, c)).status).toBe('unresolved');
+  });
+
+  describe('the returned transaction body must be the requested hash (Codex round 9)', () => {
+    it.each([
+      ['a different hash', HASH_B],
+      ['no hash', undefined],
+      ['a malformed hash', 'not-a-hash'],
+    ])('refuses to release when getTransaction returns %s with a matching call', async (_label, returned) => {
+      const { policy, reservation } = await lockedPolicy();
+      const c = { ...client('reverted'), getTransaction: async () => ({ hash: returned, from: CALL.from, to: CALL.to, input: CALL.data }) };
+      const res = await policy.reconcileLocked(reservation, c);
+      expect(res.status).toBe('unresolved');
+      expect(res.reason).toMatch(/does not match the recorded call/);
+      expect(policy.getHeldAmount()).toBe(80);
+    });
+
+    it('refuses to commit on a substituted body too', async () => {
+      const { policy, reservation } = await lockedPolicy();
+      const c = { ...client('success'), getTransaction: async () => ({ hash: HASH_B, from: CALL.from, to: CALL.to, input: CALL.data }) };
+      expect((await policy.reconcileLocked(reservation, c)).status).toBe('unresolved');
+      expect(policy.getReservation(reservation.reservationId)?.status).toBe('locked');
+    });
+
+    it('accepts the requested hash in any case', async () => {
+      const { policy, reservation } = await lockedPolicy();
+      const c = { ...client('reverted'), getTransaction: async ({ hash }: { hash: string }) => ({ hash: hash.toUpperCase().replace('0X', '0x'), from: CALL.from, to: CALL.to, input: CALL.data }) };
+      expect((await policy.reconcileLocked(reservation, c)).status).toBe('released');
+    });
   });
 });

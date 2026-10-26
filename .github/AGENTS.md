@@ -17,6 +17,10 @@ Maintainers own verification and merge-gate workflows for the SDK.
   SHA (repository activity log, `after` + `timestamp`, parsed by
   `latestBaseMoveMs`; unknown means fail closed). Its only `push` trigger is
   the protected `main` branch.
+- A retained "Codex waived" check counts only when its summary marker
+  (`waiverMarker`: PR, head, base ref, base tip, label event id) names the
+  current snapshot and it completed after both the base move and the current
+  label event (`waiverCheckQualifies`). Title-only checks never qualify.
 - A clean Codex pass (no review object) is proven only by the Codex bot's
   summary `codex-review-state:v1` line: `completed`, no findings, full head
   SHA (`codexCleanSummaryShas`). Gate parsers live between `// BEGIN name`

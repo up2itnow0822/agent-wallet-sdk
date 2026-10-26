@@ -344,13 +344,14 @@ describe('Solana→EVM receive binding and mint ambiguity (findings 22, 24)', ()
     });
 
     const mintCall = (recovery: { attestedMessage: Hex; attestation: Hex }) => ({
+      hash: MINT_TX,
       to: MESSAGE_TRANSMITTER_V2.arbitrum,
       input: encodeFunctionData({ abi: MessageTransmitterV2Abi, functionName: 'receiveMessage', args: [recovery.attestedMessage, recovery.attestation] }),
     });
 
     it('returns the retained mint once it succeeded and the nonce is consumed', async () => {
       const recovery = await unconfirmed();
-      h.priorReceipt.mockResolvedValue({ status: 'success' });
+      h.priorReceipt.mockResolvedValue({ transactionHash: MINT_TX, status: 'success' });
       h.priorTx.mockResolvedValue(mintCall(recovery));
       h.usedNonces.mockResolvedValue(1n);
       const r = await resumeSolanaToEVM(walletClient, recovery);
@@ -360,12 +361,12 @@ describe('Solana→EVM receive binding and mint ambiguity (findings 22, 24)', ()
 
     it('refuses a retained hash that is not this message\'s receiveMessage (Codex round 8)', async () => {
       const recovery = await unconfirmed();
-      h.priorReceipt.mockResolvedValue({ status: 'success' });
+      h.priorReceipt.mockResolvedValue({ transactionHash: MINT_TX, status: 'success' });
       h.usedNonces.mockResolvedValue(1n); // consumed by someone else, e.g. a relayer
       for (const tx of [
         { ...mintCall(recovery), to: EVM_OTHER },
         mintCall({ ...recovery, attestation: ('0x' + 'cd'.repeat(65)) as Hex }),
-        { to: MESSAGE_TRANSMITTER_V2.arbitrum, input: '0xdeadbeef' as Hex },
+        { hash: MINT_TX, to: MESSAGE_TRANSMITTER_V2.arbitrum, input: '0xdeadbeef' as Hex },
       ]) {
         h.priorTx.mockResolvedValueOnce(tx);
         const err = await resumeSolanaToEVM(walletClient, recovery).catch((e) => e);
@@ -374,9 +375,49 @@ describe('Solana→EVM receive binding and mint ambiguity (findings 22, 24)', ()
       expect(h.receiveMessage).not.toHaveBeenCalled();
     });
 
+    describe('retained-mint evidence must be for the retained hash (Codex round 9)', () => {
+      const OTHER_TX = ('0x' + 'e4'.repeat(32)) as Hex;
+
+      it.each([
+        ['a different hash', OTHER_TX],
+        ['no hash', undefined],
+      ])('refuses a successful receipt bound to %s', async (_label, transactionHash) => {
+        const recovery = await unconfirmed();
+        h.priorReceipt.mockResolvedValue({ transactionHash, status: 'success' });
+        h.priorTx.mockResolvedValue(mintCall(recovery));
+        h.usedNonces.mockResolvedValue(1n);
+        const err = await resumeSolanaToEVM(walletClient, recovery).catch((e) => e);
+        expect(err.code).toBe('MINT_UNCONFIRMED');
+        expect(h.receiveMessage).not.toHaveBeenCalled();
+      });
+
+      it.each([
+        ['a different hash', OTHER_TX],
+        ['no hash', undefined],
+      ])('refuses a receiveMessage body bound to %s', async (_label, hash) => {
+        const recovery = await unconfirmed();
+        h.priorReceipt.mockResolvedValue({ transactionHash: MINT_TX, status: 'success' });
+        h.priorTx.mockResolvedValue({ ...mintCall(recovery), hash });
+        h.usedNonces.mockResolvedValue(1n);
+        const err = await resumeSolanaToEVM(walletClient, recovery).catch((e) => e);
+        expect(err.code).toBe('MINT_UNCONFIRMED');
+        expect(h.receiveMessage).not.toHaveBeenCalled();
+      });
+
+      it('does not treat another hash\'s revert as the retained mint reverting', async () => {
+        const recovery = await unconfirmed();
+        h.priorReceipt.mockResolvedValue({ transactionHash: OTHER_TX, status: 'reverted' });
+        h.receiveMessage.mockResolvedValue(('0x' + 'c2'.repeat(32)) as Hex);
+        const err = await resumeSolanaToEVM(walletClient, recovery).catch((e) => e);
+        expect(err.code).toBe('MINT_UNCONFIRMED');
+        expect(err.mintRecovery.mintTxHash).toBe(MINT_TX);
+        expect(h.receiveMessage).not.toHaveBeenCalled();
+      });
+    });
+
     it('refuses a "successful" retained tx whose nonce was never consumed', async () => {
       const recovery = await unconfirmed();
-      h.priorReceipt.mockResolvedValue({ status: 'success' });
+      h.priorReceipt.mockResolvedValue({ transactionHash: MINT_TX, status: 'success' });
       h.priorTx.mockResolvedValue(mintCall(recovery));
       h.usedNonces.mockResolvedValue(0n);
       const err = await resumeSolanaToEVM(walletClient, recovery).catch((e) => e);
@@ -387,7 +428,7 @@ describe('Solana→EVM receive binding and mint ambiguity (findings 22, 24)', ()
     it('mints again only after the retained tx reverted and the nonce is unused', async () => {
       const recovery = await unconfirmed();
       const NEW_TX = ('0x' + 'c2'.repeat(32)) as Hex;
-      h.priorReceipt.mockResolvedValue({ status: 'reverted' });
+      h.priorReceipt.mockResolvedValue({ transactionHash: MINT_TX, status: 'reverted' });
       h.receiveMessage.mockResolvedValue(NEW_TX);
       h.receipt.mockReset().mockResolvedValue({ status: 'success', logs: [] });
       const r = await resumeSolanaToEVM(walletClient, recovery);

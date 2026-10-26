@@ -27,10 +27,13 @@
 #      allow-listed actor (WAIVER_ACTORS) applied `codex-waived` while this
 #      exact head SHA was current AND after the last base retarget. The
 #      labeled event publishes a "Codex waived" review-gate check on that
-#      SHA; later evaluations honor the waiver only if that check exists on
-#      the current head AND the label's current LabeledEvent (server time,
-#      allow-listed actor) post-dates the last base change. Any push
-#      produces a new head with no waiver; re-apply the label to waive again.
+#      SHA carrying a waiver marker (PR, head, base ref, base tip, label
+#      event id). Later evaluations honor the waiver only if the label's
+#      current LabeledEvent (server time, allow-listed actor) post-dates the
+#      last base change AND a retained check on the head names that exact
+#      PR/head/base/base tip/label event and completed after both the base
+#      move and that label event. Any push produces a new head with no
+#      waiver; re-apply the label to waive again.
 #
 # A check run belongs to a commit, not a PR, so the verdict for a SHA is
 # success only if EVERY open PR whose head is that SHA passes. Open PRs
@@ -304,10 +307,6 @@ jobs:
               core.info(`${sha.slice(0, 7)} -> ${verdict.conclusion}: ${verdict.title}`);
             }
 
-            // Server time at which the base branch moved to its CURRENT SHA,
-            // from the repository activity log. Evidence must be newer than
-            // this, so every base SHA change invalidates earlier review
-            // evidence. If the move cannot be found, fail closed with "now".
             // The CURRENT tip of the base branch. pr.base.sha can lag behind
             // the branch until the PR is synchronized, so read the branch.
             async function baseTipSha(pr) {
@@ -347,8 +346,7 @@ jobs:
             }
             // END latestBaseMoveMs
 
-            async function baseShaSinceMs(pr) {
-              const baseSha = await baseTipSha(pr);
+            async function baseShaSinceMs(pr, baseSha) {
               const baseRef = pr.base && pr.base.ref;
               if (!baseSha || !baseRef) return Number.POSITIVE_INFINITY;
               try {
@@ -366,8 +364,8 @@ jobs:
             }
 
             // One timeline read: server-side time of the most recent base
-            // retarget or base SHA move, and the latest labeled/unlabeled
-            // event for the waiver label.
+            // retarget or base SHA move, the base tip it was measured for, and
+            // the latest labeled/unlabeled event for the waiver label.
             async function timelineFacts(prNumber, pr) {
               const events = await github.paginate(github.rest.issues.listEventsForTimeline, {
                 owner: context.repo.owner,
@@ -386,14 +384,53 @@ jobs:
                   lastWaiverEvent = e;
                 }
               }
-              if (pr) baseChangedMs = Math.max(baseChangedMs, await baseShaSinceMs(pr));
-              return { baseChangedMs, lastWaiverEvent };
+              let baseSha = '';
+              if (pr) {
+                baseSha = await baseTipSha(pr);
+                baseChangedMs = Math.max(baseChangedMs, await baseShaSinceMs(pr, baseSha));
+              }
+              return { baseChangedMs, baseSha, lastWaiverEvent };
             }
 
+            // BEGIN waiverBinding
+            // Machine-readable binding carried in a "Codex waived" check's
+            // summary: PR, head, base ref, base tip and the waiver label event
+            // that produced it. '<' and '>' are escaped so no ref name can end
+            // the HTML comment early.
+            function waiverMarker(b) {
+              const json = JSON.stringify({
+                pr: b.prNumber, head: b.headSha, base: b.baseRef, baseSha: b.baseSha, labelEvent: b.labelEventId,
+              }).replace(/[<>]/g, c => (c === '<' ? '\\u003c' : '\\u003e'));
+              return `<!-- review-gate-waiver:v1 ${json} -->`;
+            }
+            // A retained waiver check counts only for the exact snapshot its
+            // marker names, and only if it completed (server time) after the
+            // last base move and no earlier than the current label event.
+            function waiverCheckQualifies(run, want) {
+              if (!run || !run.app || run.app.slug !== 'github-actions') return false;
+              if (run.conclusion !== 'success' || !run.output || run.output.title !== 'Codex waived') return false;
+              if (!want || !Number.isSafeInteger(want.labelEventId)) return false;
+              const completedMs = Date.parse(run.completed_at || '');
+              if (!Number.isFinite(completedMs)) return false;
+              if (!(completedMs > want.baseChangedMs) || !(completedMs >= want.labelEventMs)) return false;
+              const m = /<!-- review-gate-waiver:v1 (\{[^<>]*\}) -->/.exec(String(run.output.summary || ''));
+              if (!m) return false;
+              let b;
+              try { b = JSON.parse(m[1]); } catch (_) { return false; }
+              const sha = s => (typeof s === 'string' && /^[0-9a-f]{40}$/i.test(s) ? s.toLowerCase() : '');
+              return !!b && b.pr === want.prNumber &&
+                !!sha(b.head) && sha(b.head) === sha(want.headSha) &&
+                typeof b.base === 'string' && b.base === want.baseRef &&
+                !!sha(b.baseSha) && sha(b.baseSha) === sha(want.baseSha) &&
+                b.labelEvent === want.labelEventId;
+            }
+            // END waiverBinding
+
             // A "Codex waived" review-gate check already published by this
-            // workflow (github-actions) on this exact head SHA. filter 'all'
-            // so a newer failure from an overlapping run cannot hide it.
-            async function headHasWaiverCheck(headSha) {
+            // workflow (github-actions) on this exact head SHA for this exact
+            // PR/base/label snapshot. filter 'all' so a newer failure from an
+            // overlapping run cannot hide it.
+            async function headHasWaiverCheck(headSha, want) {
               const runs = await github.paginate(github.rest.checks.listForRef, {
                 owner: context.repo.owner,
                 repo: context.repo.repo,
@@ -402,11 +439,7 @@ jobs:
                 filter: 'all',
                 per_page: 100,
               });
-              return runs.some(r =>
-                r.app && r.app.slug === 'github-actions' &&
-                r.conclusion === 'success' &&
-                r.output && r.output.title === 'Codex waived'
-              );
+              return runs.some(r => waiverCheckQualifies(r, want));
             }
 
             async function resolvePrNumbers() {
@@ -473,7 +506,7 @@ jobs:
               }
               const labels = (pr.labels || []).map(l => l.name);
 
-              const { baseChangedMs, lastWaiverEvent } = await timelineFacts(prNumber, pr);
+              const { baseChangedMs, baseSha, lastWaiverEvent } = await timelineFacts(prNumber, pr);
               if (!Number.isFinite(baseChangedMs)) {
                 return {
                   prNumber, headSha,
@@ -489,6 +522,9 @@ jobs:
                 lastWaiverEvent.actor &&
                 WAIVER_ACTORS.has(lastWaiverEvent.actor.login) &&
                 Date.parse(lastWaiverEvent.created_at || 0) > baseChangedMs;
+              const waiverBinding = waiverAfterBase ? {
+                prNumber, headSha, baseRef: pr.base.ref, baseSha, labelEventId: lastWaiverEvent.id,
+              } : null;
 
               if (labels.includes(WAIVE_LABEL)) {
                 const payload = context.payload;
@@ -511,17 +547,21 @@ jobs:
                     title: 'Codex waived',
                     summary: `Label \`${WAIVE_LABEL}\` applied by @${sender} on head \`${headSha}\` ` +
                       `for base \`${pr.base.ref}\`. The waiver covers this SHA and base only; ` +
-                      'any new push or retarget needs a new review or waiver.',
+                      'any new push or retarget needs a new review or waiver. ' +
+                      waiverMarker(waiverBinding),
                   };
                 }
                 if (freshWaiver) {
                   core.warning(`Label ${WAIVE_LABEL} on #${prNumber} applied by ${sender || 'unknown'}; not an allow-listed waiver actor, ignoring.`);
-                } else if (waiverAfterBase && await headHasWaiverCheck(headSha)) {
+                } else if (waiverAfterBase && await headHasWaiverCheck(headSha, {
+                  ...waiverBinding, baseChangedMs, labelEventMs: Date.parse(lastWaiverEvent.created_at || ''),
+                })) {
                   return {
                     prNumber, headSha,
                     conclusion: 'success',
                     title: 'Codex waived',
-                    summary: `Waiver previously recorded for head \`${headSha}\` on base \`${pr.base.ref}\`.`,
+                    summary: `Waiver previously recorded for head \`${headSha}\` on base \`${pr.base.ref}\`. ` +
+                      waiverMarker(waiverBinding),
                   };
                 } else {
                   core.warning(`Label ${WAIVE_LABEL} on #${prNumber} is not a this-PR labeled event after the current base on head ${headSha}; re-apply it to waive this head.`);
