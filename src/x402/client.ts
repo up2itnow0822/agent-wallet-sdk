@@ -33,6 +33,7 @@ import { AgentAccountV2Abi } from '../abi.js';
 import { parseNetworkChainId, resolveAssetAddress } from './multi-asset.js';
 import { toReplayableFetchArgs, withFailClosedRedirect } from './fetch-args.js';
 import { readBoundedText } from '../net/bounded-fetch.js';
+import { AgentWalletVerificationError } from '../wallet-verification-error.js';
 
 /**
  * keccak256("TransactionQueued(uint256,address,uint256,address,uint256)").
@@ -1853,6 +1854,7 @@ export class X402Client {
     intent: { key: string; termsFingerprint: string },
     token: Address,
     feeAmount: bigint,
+    req: X402PaymentRequirements,
   ): Promise<void> {
     const recordedFee = this.feePhases.get(intent.key);
     if (recordedFee && recordedFee.termsFingerprint !== intent.termsFingerprint) {
@@ -1880,7 +1882,15 @@ export class X402Client {
       transfer: this.prepareTransfer(token, X402_PROTOCOL_FEE_COLLECTOR, feeAmount),
     };
     this.feePhases.set(intent.key, pending);
-    pending.txHash = await this.submitTransfer(pending.transfer!, 'fee', intent.key);
+    try {
+      pending.txHash = await this.submitTransfer(pending.transfer!, 'fee', intent.key, req);
+    } catch (error) {
+      // A definite pre-broadcast failure leaves no fee phase to reconcile.
+      if (error instanceof X402PaymentError && this.feePhases.get(intent.key) === pending) {
+        this.feePhases.delete(intent.key);
+      }
+      throw error;
+    }
     await this.confirmProtocolFeePhase(pending, intent.key);
   }
 
@@ -1976,11 +1986,11 @@ export class X402Client {
           req,
         );
       }
-      await this.settleProtocolFeePhase(intent, resolvedAddress, feeAmount);
+      await this.settleProtocolFeePhase(intent, resolvedAddress, feeAmount, req);
     }
 
     // Execute the ERC20 transfer via AgentWallet (full amount to payee)
-    const txHash = await this.submitTransfer(payeeTransfer, 'payee', intent?.key);
+    const txHash = await this.submitTransfer(payeeTransfer, 'payee', intent?.key, req);
 
     return { txHash };
   }
@@ -1992,7 +2002,12 @@ export class X402Client {
     return Object.freeze({ token, to, amount, input });
   }
 
-  private async submitTransfer(transfer: PreparedTransfer, phase: PaymentPhase, intentKey?: string): Promise<Hash> {
+  private async submitTransfer(
+    transfer: PreparedTransfer,
+    phase: PaymentPhase,
+    intentKey: string | undefined,
+    req: X402PaymentRequirements,
+  ): Promise<Hash> {
     try {
       const txHash = await submitAgentTransferToken(this.wallet, {
         token: transfer.token, to: transfer.to, amount: transfer.amount,
@@ -2000,6 +2015,13 @@ export class X402Client {
       if (!EVM_TX_HASH.test(txHash)) throw new Error('submission returned no valid transaction hash');
       return txHash;
     } catch (cause) {
+      if (cause instanceof AgentWalletVerificationError) {
+        // Verification runs before any write: a definite non-broadcast failure,
+        // so the reservation is released rather than held as unknown.
+        throw new X402PaymentError(
+          `x402 ${phase} not submitted: ${cause.message}`, req, cause,
+        );
+      }
       throw new X402SettlementUnknownError(undefined,
         `x402 ${phase} submission outcome unknown: ${cause instanceof Error ? cause.message : String(cause)}; explicit on-chain reconciliation required`,
         { phase, intentKey, transfer, cause },

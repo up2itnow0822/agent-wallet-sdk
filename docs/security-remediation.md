@@ -59,14 +59,18 @@ signing and network boundaries.
   submitted phase and the call binding once, at lock time —
   `lock(reservation, { chainId, txHashes, from, to, data, value })` or
   `applyOutcome(reservation, outcome, { from, to, data, value })` — then call
-  `reconcileLocked(reservation, publicClient)`. Identity cannot be attached
-  later; a lock without the binding stays locked until committed.
+  `reconcileLocked(reservation, publicClient)`. Phases with different
+  calldata (e.g. protocol fee and payee) each go in `calls: [{ hash, from, to,
+  data, value }]`. Identity cannot be attached later; a hash without a binding
+  keeps the lock until committed.
 - `sendToken()`/`sendNative()` require a chain-bound wallet client; string
   amounts for tokens outside the registry need `expectedDecimals`;
   over-precision amounts throw instead of truncating.
 - `SolanaWallet` verifies the RPC cluster (default `mainnet-beta`). Set
   `cluster: 'devnet'` (or `expectedGenesisHash`) for other clusters.
   `sendSplToken()` needs `expectedDecimals` for unlisted mints.
+- An unknown `stellarX402Pay()` reservation is freed or committed only by
+  `budget.reconcile(id, adapter)`, from ledger evidence for the recorded hash.
 - `SwapModule.swap()` requires `minAmountOut` from an independent source.
 - `UAIDResolver.verify()` returns `verified: true` only after on-chain ERC-8004
   verification; configure `rpcUrls`/`onChainLookup`. Broker claims are in

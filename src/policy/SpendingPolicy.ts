@@ -85,17 +85,36 @@ export interface SpendReservation {
  * Immutable identity of the on-chain submission(s) behind a locked reservation.
  * Recorded once at lock time; reconciliation can only use these exact hashes.
  * Record EVERY submitted phase (e.g. protocol fee and payee) — release requires
- * all recorded hashes to have reverted. Without the call binding
- * (`from` = the signing wallet, `to`, `data`) a lock can never be released by
- * reconciliation; it stays locked until committed.
+ * all recorded hashes to have reverted. Phases with different calldata each
+ * need their own binding in `calls`. A hash with no call binding
+ * (`from` = the signing wallet, `to`, `data`) can never be released by
+ * reconciliation; the lock stays until committed.
  */
 export interface SubmissionIdentity {
   chainId?: number;
   txHashes: readonly string[];
-  /** Call binding checked against every fetched transaction (required for reconciliation). */
+  /**
+   * Default call binding, checked against every recorded hash that has no
+   * entry in `calls` (required for reconciliation of those hashes).
+   */
   from?: string;
   to?: string;
   data?: string;
+  value?: bigint;
+  /**
+   * Per-hash call bindings for multi-phase submissions whose phases differ in
+   * calldata (e.g. protocol fee and payee). Each entry's hash is recorded as
+   * a submission hash; reconciliation checks each hash against its own call.
+   */
+  calls?: readonly SubmissionCall[];
+}
+
+/** Call binding of one submitted transaction. */
+export interface SubmissionCall {
+  hash: string;
+  from: string;
+  to: string;
+  data: string;
   value?: bigint;
 }
 
@@ -259,8 +278,32 @@ export function debitAmountForPolicy(principal: number, includeProtocolFee: bool
   };
 }
 
+function freezeCall(call: SubmissionCall): SubmissionCall | undefined {
+  if (!call || !isEvmTxHash(call.hash)) return undefined;
+  if (typeof call.from !== 'string' || typeof call.to !== 'string' || typeof call.data !== 'string') return undefined;
+  const frozen: SubmissionCall = {
+    hash: call.hash.toLowerCase(),
+    from: call.from.toLowerCase(),
+    to: call.to.toLowerCase(),
+    data: call.data.toLowerCase(),
+  };
+  if (typeof call.value === 'bigint') frozen.value = call.value;
+  return Object.freeze(frozen);
+}
+
 function freezeSubmission(submission: SubmissionIdentity): SubmissionIdentity {
-  const hashes = Array.from(submission.txHashes ?? []).filter(isEvmTxHash);
+  // One binding per hash. Two different bindings for one hash make that hash
+  // unprovable (recorded with a binding that can never match), never a
+  // silent fallback to the default binding.
+  const byHash = new Map<string, SubmissionCall>();
+  for (const call of Array.from(submission.calls ?? [])) {
+    const frozenCall = freezeCall(call);
+    if (!frozenCall) continue;
+    const prior = byHash.get(frozenCall.hash);
+    byHash.set(frozenCall.hash, prior && !sameCall(prior, frozenCall) ? CONFLICTING_CALL(frozenCall.hash) : (prior ?? frozenCall));
+  }
+  const calls = [...byHash.values()];
+  const hashes = [...Array.from(submission.txHashes ?? []), ...calls.map((c) => c.hash)].filter(isEvmTxHash);
   const chainId = submission.chainId;
   const frozen: SubmissionIdentity = {
     txHashes: Object.freeze([...new Set(hashes.map((h) => h.toLowerCase()))]),
@@ -270,16 +313,32 @@ function freezeSubmission(submission: SubmissionIdentity): SubmissionIdentity {
   if (typeof submission.to === 'string') frozen.to = submission.to.toLowerCase();
   if (typeof submission.data === 'string') frozen.data = submission.data.toLowerCase();
   if (typeof submission.value === 'bigint') frozen.value = submission.value;
+  if (calls.length > 0) frozen.calls = Object.freeze(calls);
   return Object.freeze(frozen);
 }
 
+/** A binding no transaction can match (empty sender/target/calldata). */
+const CONFLICTING_CALL = (hash: string): SubmissionCall => Object.freeze({ hash, from: '', to: '', data: '' });
+
+function sameCall(a: SubmissionCall, b: SubmissionCall): boolean {
+  return a.from === b.from && a.to === b.to && a.data === b.data && a.value === b.value;
+}
+
+/** The binding a recorded hash must match: its own call, else the default binding. */
+function bindingFor(submission: SubmissionIdentity, hash: string): Omit<SubmissionCall, 'hash'> | undefined {
+  const own = submission.calls?.find((c) => c.hash === hash.toLowerCase());
+  if (own) return own.from && own.to && own.data ? own : undefined;
+  if (!submission.from || !submission.to || !submission.data) return undefined;
+  return { from: submission.from, to: submission.to, data: submission.data, value: submission.value };
+}
+
 function callMatches(
-  expected: SubmissionIdentity,
+  expected: Omit<SubmissionCall, 'hash'>,
   tx: { from?: string; to?: string | null; input?: string; value?: bigint },
 ): boolean {
-  if (expected.from && (tx.from ?? '').toLowerCase() !== expected.from) return false;
-  if (expected.to && (tx.to ?? '').toLowerCase() !== expected.to) return false;
-  if (expected.data && (tx.input ?? '').toLowerCase() !== expected.data) return false;
+  if ((tx.from ?? '').toLowerCase() !== expected.from) return false;
+  if ((tx.to ?? '').toLowerCase() !== expected.to) return false;
+  if ((tx.input ?? '').toLowerCase() !== expected.data) return false;
   if (expected.value !== undefined && tx.value !== expected.value) return false;
   return true;
 }
@@ -477,7 +536,7 @@ export class SpendingPolicy {
     reservation: SpendReservation | string,
     outcome: SpendOutcome,
     /** Call binding of the submission (wallet sender, target, calldata, value). Required for later reconciliation. */
-    call?: Pick<SubmissionIdentity, 'from' | 'to' | 'data' | 'value'>,
+    call?: Pick<SubmissionIdentity, 'from' | 'to' | 'data' | 'value' | 'calls'>,
   ): boolean {
     if (outcome.status === 'settled') {
       return this.commit(reservation);
@@ -518,10 +577,11 @@ export class SpendingPolicy {
     if (submission.chainId === undefined || submission.chainId === null) {
       return { status: 'unresolved', reason: 'submission chain was not recorded' };
     }
-    if (!submission.from || !submission.to || !submission.data) {
+    const unbound = submission.txHashes.find((hash) => !bindingFor(submission, hash));
+    if (unbound) {
       return {
         status: 'unresolved',
-        reason: 'no call binding (from, to, data) was recorded at lock time; reconciliation cannot prove these hashes belong to this payment',
+        reason: `no call binding (from, to, data) was recorded at lock time for ${unbound}; reconciliation cannot prove it belongs to this payment`,
       };
     }
     try {
@@ -541,7 +601,8 @@ export class SpendingPolicy {
             return { status: 'unresolved', reason: 'call binding requires getTransaction' };
           }
           const tx = await client.getTransaction({ hash: hash as `0x${string}` });
-          if (!tx || !callMatches(submission, tx)) {
+          const binding = bindingFor(submission, hash);
+          if (!tx || !binding || !callMatches(binding, tx)) {
             return { status: 'unresolved', reason: `transaction ${hash} does not match the recorded call` };
           }
         }

@@ -219,7 +219,6 @@ export class SolanaWallet {
   // Lazily loaded modules and connection
   private _connection: any = null;
   private _keypair: any = null;
-  private _clusterVerified = false;
 
   constructor(config: SolanaWalletConfig = {}) {
     this.rpcUrl = config.rpcUrl ?? 'https://api.mainnet-beta.solana.com';
@@ -246,9 +245,12 @@ export class SolanaWallet {
     return hash;
   }
 
-  /** Verify the RPC serves the configured cluster before any signed transfer. */
+  /**
+   * Verify the RPC serves the configured cluster before EVERY signed transfer.
+   * Never cached: the transaction signs over the blockhash this RPC returns,
+   * so an endpoint that later serves another cluster must be caught each time.
+   */
   private async assertCluster(connection: any): Promise<void> {
-    if (this._clusterVerified) return;
     const expected = this.expectedGenesisHash();
     let actual: unknown;
     try {
@@ -261,7 +263,6 @@ export class SolanaWallet {
         `Solana RPC genesis hash ${String(actual)} does not match the configured cluster (${expected})`,
       );
     }
-    this._clusterVerified = true;
   }
 
   private async getKeypair() {

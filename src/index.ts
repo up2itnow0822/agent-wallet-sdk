@@ -20,6 +20,7 @@ import {
   unichain, linea, sonic, worldchain,
 } from 'viem/chains';
 import { AgentAccountV2Abi, AgentAccountFactoryV2Abi } from './abi.js';
+import { AgentWalletVerificationError } from './wallet-verification-error.js';
 import type {
   AgentWalletConfig,
   SpendPolicy,
@@ -198,10 +199,7 @@ export function createWallet(config: AgentWalletConfig & { walletClient: WalletC
 
 type Wallet = ReturnType<typeof createWallet>;
 
-/** Thrown before signing when the configured account cannot be verified as an AgentAccountV2 deployment. */
-export class AgentWalletVerificationError extends Error {
-  readonly name = 'AgentWalletVerificationError';
-}
+export { AgentWalletVerificationError };
 
 const EIP7702_DELEGATION_PREFIX = '0xef0100';
 const FACTORY_GET_ADDRESS_ABI = parseAbi([
@@ -263,7 +261,13 @@ export async function verifyAgentWallet(wallet: Wallet): Promise<void> {
         fail('factory CREATE2 address does not match accountAddress');
       }
     }
-  })();
+  })().catch((err: unknown) => {
+    // Every failure here happens before any write: report it as a typed,
+    // definite pre-broadcast verification failure (RPC errors included).
+    if (err instanceof AgentWalletVerificationError) throw err;
+    throw new AgentWalletVerificationError(
+      `agent wallet ${wallet.address}: verification failed: ${err instanceof Error ? err.message : String(err)}`, err);
+  });
   verifiedWallets.set(wallet, pending);
   pending.catch(() => verifiedWallets.delete(wallet));
   return pending;
@@ -331,7 +335,7 @@ export async function agentExecute(
 
   const walletLogs = receipt.logs.filter(log => log.address.toLowerCase() === wallet.address.toLowerCase());
   const queuedLog = parseEventLogs({ abi: AgentAccountV2Abi, eventName: 'TransactionQueued', logs: walletLogs })
-    .find(log => log.args.to.toLowerCase() === params.to.toLowerCase());
+    .find(log => log.args.to.toLowerCase() === params.to.toLowerCase() && log.args.value === value);
   if (queuedLog) {
     return { executed: false, txHash: hash, pendingTxId: queuedLog.args.txId };
   }
@@ -471,11 +475,19 @@ export async function agentTransferToken(
     throw new AgentExecutionError(hash, receipt.status === 'reverted' ? 'reverted' : 'unknown');
   }
   const walletAddr = wallet.address.toLowerCase();
+  // Only a queued entry for THIS transfer (recipient, token, amount, no
+  // native value) means "queued"; an unrelated queued event must not mask a
+  // matching Transfer or be reported as this payment's state.
   const queuedLog = parseEventLogs({
     abi: AgentAccountV2Abi,
     eventName: 'TransactionQueued',
     logs: receipt.logs.filter(log => log.address.toLowerCase() === walletAddr),
-  })[0];
+  }).find(log =>
+    log.args.to.toLowerCase() === params.to.toLowerCase() &&
+    log.args.token.toLowerCase() === params.token.toLowerCase() &&
+    log.args.amount === params.amount &&
+    log.args.value === 0n,
+  );
   if (queuedLog) {
     return { status: 'queued', txHash: hash, pendingTxId: queuedLog.args.txId };
   }
@@ -858,6 +870,7 @@ export type {
   AuditEntry,
   DraftEntry,
   SubmissionIdentity,
+  SubmissionCall,
   ReconciliationClient,
   ReconcileResult,
   ReconcileStatus,

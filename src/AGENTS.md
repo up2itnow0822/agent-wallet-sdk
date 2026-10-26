@@ -61,17 +61,22 @@
   (one deadline over request + body, byte cap); never await a tee'd clone's
   `cancel()`.
 - Token transfers pin decimals (registry or caller `expectedDecimals`) and
-  bind signer/read/requested chains; Solana signs only after the genesis-hash
-  cluster check and uses `TransferChecked`. Amounts never truncate.
+  bind signer/read/requested chains; Solana re-checks the genesis-hash cluster
+  before every signed transfer (never cached) and uses `TransferChecked`.
+  Amounts never truncate.
 - Every AgentAccountV2 write first passes `verifyAgentWallet`, which requires
   a deployment identity (`deployment` or `expectedCodeHash`) unless the caller
-  explicitly sets `allowUnverifiedDeployment`. Execution is
-  classified only from matching wallet events (`TransactionExecuted` /
-  `TransactionQueued`) or, for `agentTransferToken`, a matching ERC-20
-  `Transfer`; anything else is `unknown`.
+  explicitly sets `allowUnverifiedDeployment`. Every verification failure
+  (RPC errors included) is an `AgentWalletVerificationError`
+  (`src/wallet-verification-error.ts`): a definite pre-broadcast failure, so
+  x402 releases its reservation. Execution is classified only from wallet
+  events matching the requested call (`TransactionExecuted`, or
+  `TransactionQueued` matching recipient/value and, for `agentTransferToken`,
+  token/amount) or a matching ERC-20 `Transfer`; anything else is `unknown`.
 - `SpendingPolicy` snapshots intents once (`snapshotPaymentIntent`). A locked
   reservation is released only by `reconcileLocked` against the submission
-  identity and call binding recorded once at lock time; there is no caller
+  identity and call binding recorded once at lock time; multi-phase
+  submissions bind each hash to its own call (`calls`). There is no caller
   override and no later hash attachment.
 - CCTP: attestations are always bound to a known source message; burn terms
   are checked from the transmitter-emitted `MessageSent`; post-hash failures
@@ -81,7 +86,10 @@
   broker claims are `brokerAttested`. The resolution cache is a bounded LRU.
 - Stellar auto-pay requires a spend policy reserved before signing; Horizon
   must report the configured network; success needs the signed-XDR hash,
-  `successful === true` and a ledger confirmation.
+  `successful === true` and a ledger confirmation. An unknown reservation is
+  freed only by `StellarSpendBudget.reconcile()` evidence for its recorded
+  hash: included-but-failed, or not found after its `maxTime` on a Horizon
+  whose history covers the validity window.
 - Swaps require a caller `minAmountOut`. Explicit unknown chains throw.
 - x402 binds origin+path+query, bounds the 402 body, binds explicit intents to
   the request fingerprint, and wrappers snapshot before the first hop.

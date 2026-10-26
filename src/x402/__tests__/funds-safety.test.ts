@@ -10,6 +10,7 @@ import {
 import { X402_PROTOCOL_FEE_COLLECTOR } from '../fee.js';
 import { createX402Fetch, wrapWithX402 } from '../middleware.js';
 import { parseNetworkChainId } from '../multi-asset.js';
+import { AgentWalletVerificationError } from '../../wallet-verification-error.js';
 
 const URL = 'https://merchant.example/purchase';
 const TOKEN = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
@@ -341,6 +342,33 @@ describe('x402 funds-safety regressions', () => {
     expect(client.budgetTracker.getReservedSummary().global).toBe(0n);
     expect((await client.fetch(URL)).status).toBe(200);
     expect(debits).toHaveLength(2);
+  });
+
+  it('releases the reservation when wallet verification fails before any write (Codex P2)', async () => {
+    const { wallet, debits } = setup();
+    merchant(challenge(false));
+    transfer.mockImplementationOnce(async () => {
+      throw new AgentWalletVerificationError('agent wallet: deployment identity required');
+    });
+    const client = new X402Client(wallet);
+    const err = await client.fetch(URL).catch((e) => e);
+    expect(err).toMatchObject({ name: 'X402PaymentError' });
+    expect(err).not.toBeInstanceOf(X402SettlementUnknownError);
+    expect(err.cause).toBeInstanceOf(AgentWalletVerificationError);
+    expect(debits).toEqual([]);
+    expect(client.budgetTracker.getReservedSummary().global).toBe(0n);
+    // Nothing is left to reconcile: a corrected wallet can pay the same intent.
+    expect((await client.fetch(URL)).status).toBe(200);
+    expect(debits).toHaveLength(2);
+  });
+
+  it('still holds the reservation for an unclassified submission error', async () => {
+    const { wallet } = setup();
+    merchant(challenge(false));
+    transfer.mockImplementationOnce(async () => { throw new Error('socket hang up'); });
+    const client = new X402Client(wallet);
+    await expect(client.fetch(URL)).rejects.toBeInstanceOf(X402SettlementUnknownError);
+    expect(client.budgetTracker.getReservedSummary().global).toBeGreaterThan(0n);
   });
 
   it('retains an unmatched receipt instead of trusting its reverted status to release the fee', async () => {

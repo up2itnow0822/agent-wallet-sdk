@@ -64,6 +64,12 @@ export const STELLAR_HORIZON_MAX_BYTES = 256 * 1024;
 const STELLAR_ACCOUNT_ID = /^G[A-Z2-7]{55}$/;
 const STELLAR_AMOUNT = /^(?:0|[1-9]\d{0,11})(?:\.\d{1,7})?$/;
 const STELLAR_TX_HASH = /^[0-9a-f]{64}$/;
+/**
+ * Reconciliation releases a "not found" transaction only when the Horizon's
+ * retained history starts at least this long before the transaction's
+ * maxTime, so the whole window in which it could have applied is covered.
+ */
+export const STELLAR_RECONCILE_HISTORY_MARGIN_S = 3600;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -119,6 +125,20 @@ export class StellarSubmissionUnknownError extends Error {
 /** Thrown before signing when a Stellar payment violates the safety policy. */
 export class StellarPaymentPolicyError extends Error {
   readonly name = 'StellarPaymentPolicyError';
+}
+
+/** Ledger evidence for one transaction hash, read from the confirmation Horizon. */
+export type StellarTransactionLookup =
+  | { status: 'successful'; hash: string; ledger: number }
+  | { status: 'failed'; hash: string; ledger: number }
+  /** Horizon answered 404; the bounds are the close times (unix s) of its newest and oldest retained ledgers. */
+  | { status: 'not_found'; hash: string; latestLedgerClosedAt: number; oldestLedgerClosedAt: number }
+  | { status: 'unknown'; hash: string; reason: string };
+
+/** Outcome of reconciling an unknown Stellar reservation against ledger evidence. */
+export interface StellarReconcileResult {
+  status: 'committed' | 'released' | 'unresolved';
+  reason?: string;
 }
 
 /** Definite non-payment: Horizon rejected the envelope, or it was included but its operation failed. */
@@ -317,15 +337,75 @@ export class StellarX402Adapter {
 
   /** Network-bound transaction hash (hex) of an XDR envelope; excludes signatures. */
   async transactionHash(xdr: string, label = 'XDR'): Promise<string> {
+    return (await this.transactionIdentity(xdr, label)).hash;
+  }
+
+  /**
+   * Hash plus the envelope's upper time bound (unix seconds; undefined when
+   * the envelope has none). After maxTime the transaction can never apply.
+   */
+  async transactionIdentity(xdr: string, label = 'XDR'): Promise<{ hash: string; maxTime?: number }> {
     const StellarSdk = await loadStellarSdk();
     try {
       const tx = StellarSdk.TransactionBuilder.fromXDR(xdr, STELLAR_NETWORK[this.network].networkPassphrase);
       const hash = Buffer.from(tx.hash()).toString('hex').toLowerCase();
       if (!STELLAR_TX_HASH.test(hash)) throw new Error('unexpected transaction hash format');
-      return hash;
+      const rawMax = tx.timeBounds?.maxTime;
+      const maxTime = typeof rawMax === 'string' && /^\d{1,15}$/.test(rawMax) ? Number(rawMax) : undefined;
+      return maxTime && maxTime > 0 ? { hash, maxTime } : { hash };
     } catch (err) {
       throw new StellarPaymentPolicyError(`${label} is not a valid ${this.network} transaction: ${(err as Error).message}`);
     }
+  }
+
+  /**
+   * Read ledger evidence for a transaction hash from the confirmation Horizon
+   * (after verifying it serves this network). Only an explicit 404 counts as
+   * "not found"; every other failure is "unknown".
+   */
+  async lookupTransaction(hash: string): Promise<StellarTransactionLookup> {
+    const expected = typeof hash === 'string' ? hash.toLowerCase() : '';
+    if (!STELLAR_TX_HASH.test(expected)) return { status: 'unknown', hash: String(hash), reason: 'invalid transaction hash' };
+    try {
+      await this.assertHorizonNetwork(this.confirmationHorizonUrl);
+      const res = await boundedFetch(`${this.confirmationHorizonUrl}/transactions/${expected}`, {
+        headers: { Accept: 'application/json' },
+      }, { timeoutMs: this.timeoutMs, maxBytes: STELLAR_HORIZON_MAX_BYTES, fetchImpl: this.fetchImpl });
+      if (res.status === 404) {
+        const latest = await this.ledgerCloseTime('desc');
+        const oldest = await this.ledgerCloseTime('asc');
+        if (latest === undefined || oldest === undefined) {
+          return { status: 'unknown', hash: expected, reason: 'Horizon ledger bounds are unreadable' };
+        }
+        return { status: 'not_found', hash: expected, latestLedgerClosedAt: latest, oldestLedgerClosedAt: oldest };
+      }
+      if (!res.ok) return { status: 'unknown', hash: expected, reason: `transaction lookup returned ${res.status}` };
+      const tx = safeJson(res.text) as { hash?: unknown; ledger?: unknown; successful?: unknown } | undefined;
+      if (!tx || typeof tx.hash !== 'string' || tx.hash.toLowerCase() !== expected) {
+        return { status: 'unknown', hash: expected, reason: 'lookup does not reference this transaction' };
+      }
+      if (typeof tx.ledger !== 'number' || !Number.isSafeInteger(tx.ledger) || tx.ledger <= 0) {
+        return { status: 'unknown', hash: expected, reason: 'lookup lacks a ledger' };
+      }
+      if (tx.successful === true) return { status: 'successful', hash: expected, ledger: tx.ledger };
+      if (tx.successful === false) return { status: 'failed', hash: expected, ledger: tx.ledger };
+      return { status: 'unknown', hash: expected, reason: 'lookup lacks an explicit successful flag' };
+    } catch (err) {
+      return { status: 'unknown', hash: expected, reason: `lookup failed: ${(err as Error).message}` };
+    }
+  }
+
+  /** Close time (unix s) of the newest ('desc') or oldest retained ('asc') ledger. */
+  private async ledgerCloseTime(order: 'asc' | 'desc'): Promise<number | undefined> {
+    const res = await boundedFetch(`${this.confirmationHorizonUrl}/ledgers?order=${order}&limit=1`, {
+      headers: { Accept: 'application/json' },
+    }, { timeoutMs: this.timeoutMs, maxBytes: STELLAR_HORIZON_MAX_BYTES, fetchImpl: this.fetchImpl });
+    if (!res.ok) return undefined;
+    const body = safeJson(res.text) as { _embedded?: { records?: Array<{ closed_at?: unknown }> } } | undefined;
+    const closedAt = body?._embedded?.records?.[0]?.closed_at;
+    if (typeof closedAt !== 'string') return undefined;
+    const ms = Date.parse(closedAt);
+    return Number.isFinite(ms) ? Math.floor(ms / 1000) : undefined;
   }
 
   /** Read the transaction back and require it to be successful in a ledger. */
@@ -416,7 +496,9 @@ type StellarReservationState = 'held' | 'committed' | 'released' | 'unknown';
  */
 export class StellarSpendBudget {
   private readonly limit: bigint;
-  private readonly reservations = new Map<string, { stroops: bigint; state: StellarReservationState; hash?: string }>();
+  private readonly reservations = new Map<string, {
+    stroops: bigint; state: StellarReservationState; hash?: string; chainId?: string; maxTime?: number;
+  }>();
   private seq = 0;
 
   constructor(maxTotal: string) {
@@ -451,16 +533,74 @@ export class StellarSpendBudget {
     if (r && r.state === 'held') r.state = 'released';
   }
 
-  markUnknown(id: string, hash?: string): void {
+  /**
+   * Mark a held reservation whose submission outcome is unknown. Record the
+   * signed transaction's hash, chain id and maxTime so {@link reconcile} can
+   * later bind ledger evidence to exactly this submission.
+   */
+  markUnknown(id: string, hash?: string, evidence: { chainId?: string; maxTime?: number } = {}): void {
     const r = this.reservations.get(id);
-    if (r && r.state === 'held') { r.state = 'unknown'; r.hash = hash; }
+    if (r && r.state === 'held') {
+      r.state = 'unknown';
+      r.hash = typeof hash === 'string' && STELLAR_TX_HASH.test(hash.toLowerCase()) ? hash.toLowerCase() : undefined;
+      if (typeof evidence.chainId === 'string') r.chainId = evidence.chainId;
+      if (typeof evidence.maxTime === 'number' && Number.isSafeInteger(evidence.maxTime) && evidence.maxTime > 0) {
+        r.maxTime = evidence.maxTime;
+      }
+    }
   }
 
   /** Pending (unknown) reservations that need on-chain reconciliation. */
-  unresolved(): Array<{ id: string; hash?: string; stroops: bigint }> {
+  unresolved(): Array<{ id: string; hash?: string; stroops: bigint; chainId?: string; maxTime?: number }> {
     return [...this.reservations.entries()]
       .filter(([, r]) => r.state === 'unknown')
-      .map(([id, r]) => ({ id, hash: r.hash, stroops: r.stroops }));
+      .map(([id, r]) => ({ id, hash: r.hash, stroops: r.stroops, chainId: r.chainId, maxTime: r.maxTime }));
+  }
+
+  /**
+   * Reconcile an unknown reservation using ONLY the hash recorded when it was
+   * marked unknown, read through an adapter for the recorded network:
+   * included and successful → committed; included and failed → released;
+   * not found after its maxTime, on a Horizon whose retained history covers
+   * the whole window it could have applied in → released (it can never
+   * apply). Anything else stays unresolved and keeps its capacity.
+   */
+  async reconcile(id: string, adapter: StellarX402Adapter): Promise<StellarReconcileResult> {
+    const r = this.reservations.get(id);
+    if (!r || r.state !== 'unknown') return { status: 'unresolved', reason: 'reservation is not unknown' };
+    if (!r.hash) return { status: 'unresolved', reason: 'no transaction hash was recorded for this reservation' };
+    if (!(adapter instanceof StellarX402Adapter)) return { status: 'unresolved', reason: 'a StellarX402Adapter is required' };
+    if (r.chainId && adapter.chainId !== r.chainId) {
+      return { status: 'unresolved', reason: `adapter network ${adapter.chainId} differs from submission network ${r.chainId}` };
+    }
+    const hash = r.hash;
+    const evidence = await adapter.lookupTransaction(hash);
+    // Re-check after the await: only a still-unknown record for the same hash moves.
+    if (r.state !== 'unknown' || r.hash !== hash) return { status: 'unresolved', reason: 'reservation changed during reconciliation' };
+    if (evidence.hash !== hash) return { status: 'unresolved', reason: 'evidence does not reference the recorded transaction' };
+    switch (evidence.status) {
+      case 'successful':
+        r.state = 'committed';
+        return { status: 'committed' };
+      case 'failed':
+        r.state = 'released';
+        return { status: 'released', reason: `transaction ${hash} was included in ledger ${evidence.ledger} but failed` };
+      case 'not_found': {
+        if (r.maxTime === undefined) {
+          return { status: 'unresolved', reason: 'not found, but no maxTime was recorded: it could still apply' };
+        }
+        if (!(evidence.latestLedgerClosedAt > r.maxTime)) {
+          return { status: 'unresolved', reason: 'not found yet; its time bound has not passed on the ledger' };
+        }
+        if (!(evidence.oldestLedgerClosedAt <= r.maxTime - STELLAR_RECONCILE_HISTORY_MARGIN_S)) {
+          return { status: 'unresolved', reason: 'Horizon history does not cover the window the transaction could have applied in' };
+        }
+        r.state = 'released';
+        return { status: 'released', reason: `transaction ${hash} was never applied and expired at ${r.maxTime}` };
+      }
+      default:
+        return { status: 'unresolved', reason: evidence.reason };
+    }
   }
 }
 
@@ -525,6 +665,7 @@ export async function stellarX402Pay(params: {
   const budget = policy.budget;
   const reservationId = budget.reserve(details.amount);
   let submitted = false;
+  let identity: { hash: string; maxTime?: number } | undefined;
   try {
     const xdr = await adapter.buildPaymentTransaction({
       destination: details.destination,
@@ -533,12 +674,12 @@ export async function stellarX402Pay(params: {
       resource: details.resource,
       network,
     });
-    const policyCheckedHash = await adapter.transactionHash(xdr, 'built XDR');
+    identity = await adapter.transactionIdentity(xdr, 'built XDR');
     const signedXdr = await params.sign(xdr);
     // submitTransaction refuses an altered envelope and verifies every Horizon
     // before the POST; only after that does the payment count as submitted.
     const result = await adapter.submitTransaction(signedXdr, {
-      expectedUnsignedHash: policyCheckedHash,
+      expectedUnsignedHash: identity.hash,
       onBeforeBroadcast: () => { submitted = true; },
     });
     budget.commit(reservationId, result.hash);
@@ -548,7 +689,9 @@ export async function stellarX402Pay(params: {
       // Nothing was broadcast, or Horizon/ledger definitively rejected it.
       budget.release(reservationId);
     } else {
-      budget.markUnknown(reservationId, err instanceof StellarSubmissionUnknownError ? err.expectedHash : undefined);
+      // A broadcast envelope always equals the policy-checked one (same hash
+      // and time bounds), so its identity is recorded for later reconciliation.
+      budget.markUnknown(reservationId, identity?.hash, { chainId: adapter.chainId, maxTime: identity?.maxTime });
     }
     throw err;
   }

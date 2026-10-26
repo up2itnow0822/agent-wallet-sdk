@@ -755,6 +755,50 @@ describe('SpendingPolicy locked reconciliation (finding 8)', () => {
     expect((await policy.reconcileLocked(r.reservation!, client('reverted'))).status).toBe('released');
   });
 
+  describe('multi-phase submissions bind each hash to its own call (Codex P2)', () => {
+    const FEE = { hash: HASH_A, from: CALL.from, to: CALL.to, data: '0xfee0' };
+    const PAYEE = { hash: HASH_B, from: CALL.from, to: CALL.to, data: '0xbee0' };
+    const txFor = (map: Record<string, { from: string; to: string; input: string }>) => ({
+      getChainId: async () => 8453,
+      getTransactionReceipt: async ({ hash }: { hash: string }) => ({ transactionHash: hash, status: 'reverted' }),
+      getTransaction: async ({ hash }: { hash: string }) => map[hash.toLowerCase()],
+    });
+    const honest = { [HASH_A]: { from: CALL.from, to: CALL.to, input: '0xfee0' }, [HASH_B]: { from: CALL.from, to: CALL.to, input: '0xbee0' } };
+
+    async function twoPhase(calls: Array<typeof FEE>) {
+      const policy = new SpendingPolicy({ rollingCap: { maxAmount: 100, windowMs: 86_400_000 } });
+      const r = await policy.reserve({ merchant: 'm', amount: 80 });
+      policy.applyOutcome(r.reservation!, { status: 'hold-unknown', retrySafe: false, txHashes: [], chainId: 8453 }, { calls });
+      return { policy, reservation: r.reservation! };
+    }
+
+    it('records every phase hash and releases when both differing-calldata phases reverted', async () => {
+      const { policy, reservation } = await twoPhase([FEE, PAYEE]);
+      expect(policy.getReservation(reservation.reservationId)?.submission?.txHashes).toEqual([HASH_A, HASH_B]);
+      expect((await policy.reconcileLocked(reservation, txFor(honest))).status).toBe('released');
+      expect(policy.getHeldAmount()).toBe(0);
+    });
+
+    it('refuses when a phase hash carries the other phase\'s calldata', async () => {
+      const { policy, reservation } = await twoPhase([FEE, PAYEE]);
+      const swapped = { [HASH_A]: honest[HASH_B], [HASH_B]: honest[HASH_A] };
+      expect((await policy.reconcileLocked(reservation, txFor(swapped))).status).toBe('unresolved');
+      expect(policy.getHeldAmount()).toBe(80);
+    });
+
+    it('makes a hash with conflicting bindings unprovable', async () => {
+      const { policy, reservation } = await twoPhase([FEE, { ...FEE, data: '0xbee0' }]);
+      expect((await policy.reconcileLocked(reservation, txFor(honest))).status).toBe('unresolved');
+      expect(policy.getHeldAmount()).toBe(80);
+    });
+
+    it('commits when any phase succeeded', async () => {
+      const { policy, reservation } = await twoPhase([FEE, PAYEE]);
+      const c = { ...txFor(honest), getTransactionReceipt: async ({ hash }: { hash: string }) => ({ transactionHash: hash, status: hash === HASH_B ? 'success' : 'reverted' }) };
+      expect((await policy.reconcileLocked(reservation, c)).status).toBe('committed');
+    });
+  });
+
   it('verifies the recorded call binding when present', async () => {
     const policy = new SpendingPolicy({});
     const r = await policy.reserve({ merchant: 'm', amount: 1 });
