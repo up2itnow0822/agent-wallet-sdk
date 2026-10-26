@@ -185,13 +185,19 @@ export async function verifySolanaUsdcTokenAccount(
   solanaPubkeyToBytes32(tokenAccount); // canonical base58, 32 bytes
   if (options.owner !== undefined) solanaPubkeyToBytes32(options.owner);
   const rpcUrl = options.rpcUrl ?? SOLANA_DEFAULT_RPC;
-  const genesis = await solanaRpc(rpcUrl, 'getGenesisHash', [], options);
-  if (genesis !== SOLANA_MAINNET_GENESIS_HASH) {
-    throw new Error(`Solana RPC is not mainnet-beta (genesis ${String(genesis)})`);
-  }
+  // The cluster check brackets the account read: a load-balanced RPC that
+  // switches clusters in between cannot vouch for the recipient on mainnet.
+  const assertMainnet = async (when: string) => {
+    const genesis = await solanaRpc(rpcUrl, 'getGenesisHash', [], options);
+    if (genesis !== SOLANA_MAINNET_GENESIS_HASH) {
+      throw new Error(`Solana RPC is not mainnet-beta ${when} (genesis ${String(genesis)})`);
+    }
+  };
+  await assertMainnet('before the recipient lookup');
   const result = await solanaRpc(rpcUrl, 'getAccountInfo', [tokenAccount, { encoding: 'jsonParsed', commitment: 'finalized' }], options) as {
     value?: { owner?: unknown; data?: { program?: unknown; parsed?: { type?: unknown; info?: Record<string, unknown> } } } | null;
   };
+  await assertMainnet('after the recipient lookup');
   const value = result?.value;
   if (!value) throw new Error(`Solana account ${tokenAccount} does not exist; create the recipient's USDC token account first`);
   if (value.owner !== SPL_TOKEN_PROGRAM_ID) throw new Error(`Solana account ${tokenAccount} is not an SPL Token program account`);
@@ -240,6 +246,7 @@ export interface SolanaBridgeRecovery {
   readonly mintRecipient: Hex;
   readonly burnToken: Address;
   readonly maxFee: bigint;
+  readonly minFinalityThreshold: number;
   readonly messageBytes?: Hex;
 }
 
@@ -388,6 +395,7 @@ export async function bridgeEVMToSolana(
     mintRecipient,
     burnToken: usdcAddress,
     maxFee,
+    minFinalityThreshold,
   });
   return completeEVMToSolana(recovery, publicClient, attestationApiUrl, startMs);
 }
@@ -435,6 +443,8 @@ async function completeEVMToSolana(
       burnToken: recovery.burnToken,
       mintRecipient: recovery.mintRecipient,
       amount: recovery.amount,
+      maxFee: recovery.maxFee,
+      minFinalityThreshold: recovery.minFinalityThreshold,
     });
   } catch (err: unknown) {
     if (err instanceof SolanaBridgeError && err.code === 'BURN_FAILED') throw err;
@@ -456,6 +466,8 @@ async function completeEVMToSolana(
       burnToken: recovery.burnToken,
       mintRecipient: recovery.mintRecipient,
       amount: recovery.amount,
+      maxFee: recovery.maxFee,
+      minFinalityThreshold: recovery.minFinalityThreshold,
     });
   } catch (err) {
     throw withRecovery('ATTESTATION_ERROR', `Attested message does not match the burn: ${(err as Error).message}.`, { messageBytes });

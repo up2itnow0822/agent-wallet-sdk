@@ -85,7 +85,9 @@
   submissions bind each hash to its own call (`calls`). There is no caller
   override and no later hash attachment.
 - CCTP: attestations are always bound to a known source message; burn terms
-  are checked from the transmitter-emitted `MessageSent`; post-hash failures
+  (domains, token, recipient, amount, maxFee, minFinalityThreshold) are
+  checked from the transmitter-emitted `MessageSent`; the Solana recipient
+  check brackets its account read with mainnet genesis checks; post-hash failures
   carry frozen recovery; `usedNonces` is checked before `receiveMessage`;
   reported recipients/amounts come from attested bytes. Resume paths
   (`resumeEVMToSolana`, `resumeSolanaToEVM`) re-validate the recovery and

@@ -222,6 +222,10 @@ export interface ExpectedBurnTerms {
   mintRecipient?: string;
   amount?: bigint;
   sender?: string;
+  /** Requested maximum fee (body maxFee): immutable once burned. */
+  maxFee?: bigint;
+  /** Requested minimum finality (header minFinalityThreshold): immutable once burned. */
+  minFinalityThreshold?: number;
 }
 
 /** Throw unless every supplied term matches the decoded message. */
@@ -236,6 +240,10 @@ export function assertBurnTerms(message: Hex, terms: ExpectedBurnTerms): Decoded
   if (terms.mintRecipient !== undefined && d.mintRecipient !== toBytes32(terms.mintRecipient)) mismatch('mintRecipient', d.mintRecipient, terms.mintRecipient);
   if (terms.amount !== undefined && d.amount !== terms.amount) mismatch('amount', d.amount, terms.amount);
   if (terms.sender !== undefined && d.sender !== toBytes32(terms.sender)) mismatch('sender', d.sender, terms.sender);
+  if (terms.maxFee !== undefined && d.maxFee !== terms.maxFee) mismatch('maxFee', d.maxFee, terms.maxFee);
+  if (terms.minFinalityThreshold !== undefined && d.minFinalityThreshold !== terms.minFinalityThreshold) {
+    mismatch('minFinalityThreshold', d.minFinalityThreshold, terms.minFinalityThreshold);
+  }
   return d;
 }
 

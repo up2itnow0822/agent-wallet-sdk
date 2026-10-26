@@ -286,6 +286,8 @@ export class BridgeModule {
           burnToken: usdcAddress,
           mintRecipient,
           amount,
+          maxFee,
+          minFinalityThreshold,
         });
       } catch (termsErr) {
         throw new BridgeError('BURN_UNCONFIRMED', `Burn ${burnTxHash} receipt does not match the requested burn: ${(termsErr as Error).message}. Verify on-chain before any action; never burn again.`);

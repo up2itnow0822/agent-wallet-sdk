@@ -30,6 +30,7 @@ all repaired with regression tests). See `docs/security-remediation.md`.
 - Review round 4 (Codex): new `resumeSolanaToEVM()` resolves a retained mint before any new `receiveMessage`; Stellar re-checks the Horizon network before every submission; `SwapModule` verifies the read client's RPC chain; runnable examples require a deployment identity; broker UAIDs compare EVM registry addresses case-insensitively.
 - Review round 5 (Codex): wallet verification and ERC-8004 binding reads require the read RPC's `getChainId()` to match; Solana re-checks the cluster immediately before signing; Stellar reconciliation re-checks the Horizon network after its reads; a hashless ambiguous Solana→EVM mint stays held until `originalSubmissionReconciled`.
 - Review round 6 (Codex): Solana signs over a blockhash fetched before the cluster check and submits raw bytes; wallet verification and ERC-8004 binding reads re-check the RPC chain after their reads; example policy checks reject sub-daily periods.
+- Review round 7 (Codex): burn-term checks cover `maxFee` and `minFinalityThreshold` (kept in EVM→Solana recovery); Solana recipient verification re-checks the cluster after the account read; the x402 example verifies the on-chain policy before paying.
 - CI: review-gate recognizes a clean Codex pass from the bot's machine-readable state line (full head SHA); previously a clean review could never satisfy the gate because the summary table shows only a short SHA.
 
 ---

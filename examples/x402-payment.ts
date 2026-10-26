@@ -25,7 +25,13 @@ import {
   type AgentWalletHandle,
   type X402TransactionLog,
 } from '../src/index.js';
-import { exampleDeploymentIdentity, isDirectRun, requireEnv, resolveExampleNetwork } from './_example-safety.js';
+import {
+  assertInstalledSpendPolicy,
+  exampleDeploymentIdentity,
+  isDirectRun,
+  requireEnv,
+  resolveExampleNetwork,
+} from './_example-safety.js';
 
 // Safety: Base Sepolia by default; Base mainnet requires AGENT_EXAMPLE_NETWORK=base
 // and AGENT_EXAMPLE_LIVE_ACK. Nothing runs (or signs) on import.
@@ -53,10 +59,21 @@ export function exampleWallet(): AgentWalletHandle {
   return cachedWallet;
 }
 
+/**
+ * The example wallet, after verifying that the owner installed an on-chain USDC
+ * policy no looser than this example's advertised limits. The in-memory x402
+ * budgets below are a convenience; the durable on-chain policy is the cap.
+ */
+export async function examplePolicyCheckedWallet(limits: { perTx: bigint; perDay: bigint }): Promise<AgentWalletHandle> {
+  const wallet = exampleWallet();
+  await assertInstalledSpendPolicy(wallet, resolveExampleNetwork().usdc, limits);
+  return wallet;
+}
+
 // ─── Example 1: Basic x402 Client ───
 
 export async function basicUsage() {
-  const wallet = exampleWallet();
+  const wallet = await examplePolicyCheckedWallet({ perTx: 1_000_000n, perDay: 10_000_000n });
   // Agent automatically pays for API access
   const client = createX402Client(wallet, {
     globalPerRequestMax: 1_000_000n,   // Max $1 USDC per request
@@ -80,10 +97,11 @@ export async function basicUsage() {
 // ─── Example 2: Drop-in Fetch Replacement ───
 
 export async function fetchReplacement() {
-  const wallet = exampleWallet();
+  const wallet = await examplePolicyCheckedWallet({ perTx: 5_000_000n, perDay: 50_000_000n });
   // Works as a drop-in replacement for fetch()
   const x402Fetch = createX402Fetch(wallet, {
     globalPerRequestMax: 5_000_000n, // Max $5 per request
+    globalDailyLimit: 50_000_000n,   // Max $50 per day
   });
 
   const response = await x402Fetch('https://api.example.com/premium-data');
@@ -93,7 +111,7 @@ export async function fetchReplacement() {
 // ─── Example 3: Service-Level Budgets ───
 
 export async function serviceBudgets() {
-  const wallet = exampleWallet();
+  const wallet = await examplePolicyCheckedWallet({ perTx: 1_000_000n, perDay: 50_000_000n });
   const client = createX402Client(wallet, {
     globalDailyLimit: 50_000_000n, // $50/day total
     serviceBudgets: [

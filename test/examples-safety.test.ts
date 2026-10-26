@@ -77,3 +77,15 @@ describe('runnable write examples carry a deployment identity (Codex round 4)', 
     expect(src).toMatch(/AGENT_WALLET_CODE_HASH/);
   });
 });
+
+describe('the x402 example verifies the on-chain policy before any payment (Codex round 7)', () => {
+  it('every payment flow obtains its wallet through the policy check', () => {
+    const src = readFileSync(join(__dirname, '..', 'examples', 'x402-payment.ts'), 'utf8');
+    for (const fn of ['basicUsage', 'fetchReplacement', 'serviceBudgets']) {
+      const body = new RegExp(`export async function ${fn}\\(\\) \\{\\n([\\s\\S]*?)\\n\\}`).exec(src)?.[1] ?? '';
+      expect(body, fn).toMatch(/await examplePolicyCheckedWallet\(\{ perTx: \d[\d_]*n, perDay: \d[\d_]*n \}\)/);
+      expect(body, fn).not.toMatch(/= exampleWallet\(\)/);
+    }
+    expect(src).toMatch(/await assertInstalledSpendPolicy\(wallet, resolveExampleNetwork\(\)\.usdc, limits\)/);
+  });
+});

@@ -51,7 +51,7 @@ const {
   SPL_TOKEN_PROGRAM_ID,
 } = await import('../solana.js');
 const { BridgeModule, BridgeError, MESSAGE_TRANSMITTER_V2, USDC_CONTRACT } = await import('../client.js');
-const { pollCircleAttestation, decodeCctpV2Message } = await import('../attestation.js');
+const { pollCircleAttestation, decodeCctpV2Message, assertBurnTerms } = await import('../attestation.js');
 const { CCTP_DOMAIN_IDS } = await import('../types.js');
 
 const BURN_TX = ('0x' + 'b1'.repeat(32)) as Hex;
@@ -68,11 +68,13 @@ const u32 = (n: number) => n.toString(16).padStart(8, '0');
 function buildMessage(p: {
   src: number; dst: number; nonce?: string; sender: string; burnToken: string;
   mintRecipient: string; amount: bigint; feeExecuted?: bigint;
+  /** Defaults match the SDK's request defaults (FINALITY_THRESHOLD.FAST = 0, maxFee 0). */
+  minFinality?: number; maxFee?: bigint;
 }): Hex {
   const header = u32(1) + u32(p.src) + u32(p.dst) + w32(p.nonce ?? '0') + w32(p.sender) +
-    w32('0x' + 'aa'.repeat(32)) + w32('0') + u32(1000) + u32(0);
+    w32('0x' + 'aa'.repeat(32)) + w32('0') + u32(p.minFinality ?? 0) + u32(0);
   const body = u32(1) + w32(p.burnToken) + w32(p.mintRecipient) + w32(p.amount.toString(16)) +
-    w32('0x' + 'ee'.repeat(20)) + w32('0') + w32((p.feeExecuted ?? 0n).toString(16)) + w32('0');
+    w32('0x' + 'ee'.repeat(20)) + w32((p.maxFee ?? 0n).toString(16)) + w32((p.feeExecuted ?? 0n).toString(16)) + w32('0');
   return ('0x' + header + body) as Hex;
 }
 
@@ -203,6 +205,27 @@ describe('EVM→Solana post-broadcast recovery (finding 5)', () => {
     expect(err.code).toBe('BURN_UNCONFIRMED');
     expect(err.message).toMatch(/mintRecipient/);
     expect(err.recovery.burnTxHash).toBe(BURN_TX);
+  });
+
+  it.each([
+    ['maxFee', { maxFee: 5_000n }],
+    ['minFinalityThreshold', { minFinality: 2000 }],
+  ])('rejects a burn whose %s differs from the request (Codex round 7)', async (field, override) => {
+    vi.stubGlobal('fetch', solanaRpcFetch());
+    h.depositForBurn.mockResolvedValue(BURN_TX);
+    const altered = buildMessage({
+      src: CCTP_DOMAIN_IDS.base, dst: 5, sender: '0x' + '28'.repeat(20),
+      burnToken: USDC_CONTRACT.base, mintRecipient: solanaPubkeyToBytes32(SOL_TOKEN_ACCOUNT), amount: 1_000_000n,
+      ...override,
+    });
+    h.receipt.mockResolvedValue({ status: 'success', logs: [{
+      address: MESSAGE_TRANSMITTER_V2.base, topics: [MESSAGE_SENT_TOPIC],
+      data: encodeAbiParameters([{ type: 'bytes' }], [altered]),
+    }] });
+    const err = await bridgeEVMToSolana(walletClient, 1_000_000n, { solanaRecipient: SOL_TOKEN_ACCOUNT }).catch((e) => e);
+    expect(err.code).toBe('BURN_UNCONFIRMED');
+    expect(err.message).toContain(field);
+    expect(err.recovery).toMatchObject({ maxFee: 0n, minFinalityThreshold: 0 });
   });
 
   it('ignores MessageSent logs from contracts other than the CCTP transmitter', async () => {
@@ -503,5 +526,41 @@ describe('review follow-ups', () => {
     }, { toChain: 'arbitrum' }).catch((e) => e);
     expect(err.code).toBe('MINT_FAILED');
     expect(h.receiveMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe('assertBurnTerms covers fee and finality (Codex round 7)', () => {
+  const msg = buildMessage({
+    src: 6, dst: 5, sender: '0x' + '28'.repeat(20), burnToken: '0x' + '33'.repeat(20),
+    mintRecipient: '0x' + '44'.repeat(32), amount: 10n, maxFee: 7n, minFinality: 1000,
+  });
+  it('accepts matching maxFee and minFinalityThreshold', () => {
+    expect(assertBurnTerms(msg, { maxFee: 7n, minFinalityThreshold: 1000 }).maxFee).toBe(7n);
+  });
+  it('rejects a larger fee or weaker finality', () => {
+    expect(() => assertBurnTerms(msg, { maxFee: 6n })).toThrow(/maxFee/);
+    expect(() => assertBurnTerms(msg, { minFinalityThreshold: 2000 })).toThrow(/minFinalityThreshold/);
+  });
+});
+
+describe('Solana recipient verification brackets the account read (Codex round 7)', () => {
+  afterEach(() => vi.unstubAllGlobals());
+  it('rejects a recipient read while the RPC switched clusters, before any approve or burn', async () => {
+    let genesisCalls = 0;
+    const base = solanaRpcFetch();
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      const req = JSON.parse(String(init?.body ?? '{}'));
+      if (req.method === 'getGenesisHash') {
+        genesisCalls += 1;
+        const genesis = genesisCalls === 1 ? SOLANA_MAINNET_GENESIS_HASH : 'EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG';
+        return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: genesis }), { status: 200 });
+      }
+      return base(url, init);
+    }));
+    await expect(verifySolanaUsdcTokenAccount(SOL_TOKEN_ACCOUNT)).rejects.toThrow(/after the recipient lookup/);
+    const err = await bridgeEVMToSolana(walletClient, 1_000_000n, { solanaRecipient: SOL_TOKEN_ACCOUNT }).catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(h.approve).not.toHaveBeenCalled();
+    expect(h.depositForBurn).not.toHaveBeenCalled();
   });
 });
