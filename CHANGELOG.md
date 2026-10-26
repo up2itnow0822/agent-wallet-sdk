@@ -26,6 +26,7 @@ all repaired with regression tests). See `docs/security-remediation.md`.
 - Examples default to Base Sepolia and never auto-run.
 - CI: actions pinned to commit SHAs; review-gate evidence bound to the base SHA.
 - Review round 1 (Codex): `SubmissionIdentity.calls` binds each multi-phase hash to its own call; `StellarSpendBudget.reconcile()` frees unknown Stellar reservations from ledger evidence; wallet-verification failures are typed pre-broadcast errors that release x402 reservations; queued events must match the requested transfer; the Solana cluster is re-checked before every transfer.
+- CI: review-gate recognizes a clean Codex pass from the bot's machine-readable state line (full head SHA); previously a clean review could never satisfy the gate because the summary table shows only a short SHA.
 
 ---
 

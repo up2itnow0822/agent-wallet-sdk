@@ -16,6 +16,11 @@ Maintainers own verification and merge-gate workflows for the SDK.
 - `review-gate` evidence must post-date the base branch's move to its current
   SHA (repository activity log; unknown means fail closed). Its only `push`
   trigger is the protected `main` branch.
+- A clean Codex pass (no review object) is proven only by the Codex bot's
+  summary `codex-review-state:v1` line: `completed`, no findings, full head
+  SHA (`codexCleanSummaryShas`, behavior-tested by extracting it from the
+  workflow). Codex's visible table shows a short SHA, which is never accepted.
+  Gate changes take effect only once merged to the default branch.
 - Live required-check rules are configured separately in GitHub. Do not claim
   a ruleset was changed solely because a workflow was edited.
 
