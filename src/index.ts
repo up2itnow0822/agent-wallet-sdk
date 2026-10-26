@@ -723,7 +723,7 @@ export {
 export type { TokenEntry, AddTokenParams } from './tokens/registry.js';
 
 // Token decimal normalization
-export { toRaw, toHuman, formatBalance, parseAmount } from './tokens/decimals.js';
+export { toRaw, toHuman, formatBalance, parseAmount, parseExactAmount, assertTokenDecimals, MAX_TOKEN_DECIMALS } from './tokens/decimals.js';
 export type { TokenInfo } from './tokens/decimals.js';
 
 // Multi-token EVM transfers (direct EOA/hot-wallet operations)
@@ -734,6 +734,7 @@ export {
   getNativeBalance,
   getBalances,
   encodeERC20Transfer,
+  TokenTransferSafetyError,
 } from './tokens/transfers.js';
 export type {
   TransferContext,
@@ -743,7 +744,7 @@ export type {
 } from './tokens/transfers.js';
 
 // Solana SPL token support (optional peer dependency: @solana/web3.js)
-export { SolanaWallet, createSolanaWallet, SOLANA_TOKENS, SOLANA_TOKEN_DECIMALS } from './tokens/solana.js';
+export { SolanaWallet, createSolanaWallet, SOLANA_TOKENS, SOLANA_TOKEN_DECIMALS, SOLANA_CLUSTER_GENESIS_HASHES, SolanaTransferSafetyError } from './tokens/solana.js';
 export type {
   SolanaWalletConfig,
   SolanaTokenInfo,
@@ -751,6 +752,8 @@ export type {
   SolBalanceResult,
   SplBalanceResult,
   SolanaTxResult,
+  SolanaCluster,
+  SendSplTokenOptions,
 } from './tokens/solana.js';
 
 // x402 multi-asset resolution (v6 additions)

@@ -20,7 +20,7 @@ import {
   zeroAddress,
 } from 'viem';
 import { getGlobalRegistry } from './registry.js';
-import { parseAmount, toHuman, formatBalance } from './decimals.js';
+import { parseExactAmount, assertTokenDecimals, toHuman, formatBalance } from './decimals.js';
 
 
 // ─── ERC20 ABI (minimal) ─────────────────────────────────────────────────────
@@ -46,6 +46,22 @@ export interface TransferOptions {
   gas?: bigint;
   /** Chain ID for multi-chain operations */
   chainId?: number;
+  /**
+   * Caller-pinned token decimals. Required when a human-readable string amount
+   * is sent for a token that is not in the registry for the bound chain.
+   * When the token IS in the registry this must match the registry value.
+   * RPC-reported decimals are only ever compared against a pinned value;
+   * they never choose the signed scale.
+   */
+  expectedDecimals?: number;
+}
+
+/** Thrown when a token transfer would sign with an unpinned or mismatched scale or chain. */
+export class TokenTransferSafetyError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'TokenTransferSafetyError';
+  }
 }
 
 export interface TokenBalanceResult {
@@ -94,22 +110,20 @@ export async function sendToken(
   tokenAddress: Address,
   options: TransferOptions = {},
 ): Promise<Hash> {
+  const chainId = resolveBoundChainId(ctx, options);
   let rawAmount: bigint;
 
   if (typeof amount === 'string') {
-    // Need decimals to parse string amount
-    let decimals: number;
-
-    // Try registry first
-    if (ctx.chainId != null) {
-      const entry = getGlobalRegistry().getTokenByAddress(tokenAddress, ctx.chainId);
-      decimals = entry?.decimals ?? await fetchTokenDecimals(ctx.publicClient, tokenAddress);
-    } else {
-      decimals = await fetchTokenDecimals(ctx.publicClient, tokenAddress);
+    const decimals = await resolvePinnedDecimals(ctx, tokenAddress, chainId, options);
+    try {
+      rawAmount = parseExactAmount(amount, decimals);
+    } catch (err) {
+      throw new TokenTransferSafetyError((err as Error).message);
     }
-
-    rawAmount = parseAmount(amount, decimals);
   } else {
+    if (typeof amount !== 'bigint' || amount <= 0n) {
+      throw new TokenTransferSafetyError('raw token amount must be a positive bigint');
+    }
     rawAmount = amount;
   }
 
@@ -124,8 +138,85 @@ export async function sendToken(
     account: ctx.account,
     to: tokenAddress,
     data,
+    ...(ctx.walletClient.chain ? { chain: ctx.walletClient.chain } : {}),
     ...buildGasOptions(options),
   });
+}
+
+/**
+ * Resolve the single chain a transfer is bound to and require that the signer,
+ * the read client and the caller all agree on it. Never inferred from RPC data.
+ */
+function resolveBoundChainId(ctx: TransferContext, options: TransferOptions): number | undefined {
+  const candidates: Array<[string, number | undefined]> = [
+    ['ctx.chainId', ctx.chainId],
+    ['options.chainId', options.chainId],
+    ['walletClient.chain.id', ctx.walletClient?.chain?.id],
+    ['publicClient.chain.id', ctx.publicClient?.chain?.id],
+  ];
+  let bound: number | undefined;
+  for (const [label, id] of candidates) {
+    if (id == null) continue;
+    if (!Number.isSafeInteger(id) || id <= 0) {
+      throw new TokenTransferSafetyError(`${label} is not a valid chain id`);
+    }
+    if (bound == null) bound = id;
+    else if (bound !== id) {
+      throw new TokenTransferSafetyError(
+        `chain mismatch: ${label}=${id} differs from bound chain ${bound}`,
+      );
+    }
+  }
+  return bound;
+}
+
+/**
+ * Choose the token scale for a human-readable amount from pinned sources only
+ * (the registry for the bound chain, or the caller's expectedDecimals). Any RPC
+ * decimals response is compared against the pinned scale and must match.
+ */
+async function resolvePinnedDecimals(
+  ctx: TransferContext,
+  tokenAddress: Address,
+  chainId: number | undefined,
+  options: TransferOptions,
+): Promise<number> {
+  const registryEntry =
+    chainId != null ? getGlobalRegistry().getTokenByAddress(tokenAddress, chainId) : undefined;
+  const expected =
+    options.expectedDecimals != null
+      ? assertTokenDecimals(options.expectedDecimals, 'expectedDecimals')
+      : undefined;
+
+  if (registryEntry) {
+    const registryDecimals = assertTokenDecimals(registryEntry.decimals, 'registry decimals');
+    if (expected != null && expected !== registryDecimals) {
+      throw new TokenTransferSafetyError(
+        `expectedDecimals ${expected} does not match registry decimals ${registryDecimals}`,
+      );
+    }
+    return registryDecimals;
+  }
+
+  if (expected == null) {
+    throw new TokenTransferSafetyError(
+      'string amounts for tokens outside the registry require options.expectedDecimals ' +
+        '(or pass a raw bigint amount); RPC-reported decimals are never trusted to choose the scale',
+    );
+  }
+
+  let reported: number;
+  try {
+    reported = assertTokenDecimals(await fetchTokenDecimals(ctx.publicClient, tokenAddress), 'RPC decimals');
+  } catch (err) {
+    throw new TokenTransferSafetyError(`could not verify token decimals: ${(err as Error).message}`);
+  }
+  if (reported !== expected) {
+    throw new TokenTransferSafetyError(
+      `RPC-reported decimals ${reported} do not match expectedDecimals ${expected}`,
+    );
+  }
+  return expected;
 }
 
 /**
@@ -142,13 +233,20 @@ export async function sendNative(
   amount: string | bigint,
   options: TransferOptions = {},
 ): Promise<Hash> {
-  const rawAmount = parseAmount(amount, 18);
+  resolveBoundChainId(ctx, options);
+  let rawAmount: bigint;
+  try {
+    rawAmount = parseExactAmount(amount, 18);
+  } catch (err) {
+    throw new TokenTransferSafetyError((err as Error).message);
+  }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return (ctx.walletClient as any).sendTransaction({
     account: ctx.account,
     to,
     value: rawAmount,
+    ...(ctx.walletClient.chain ? { chain: ctx.walletClient.chain } : {}),
     ...buildGasOptions(options),
   });
 }

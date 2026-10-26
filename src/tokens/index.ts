@@ -5,7 +5,7 @@
  */
 
 // Decimal normalization
-export { toRaw, toHuman, formatBalance, parseAmount } from './decimals.js';
+export { toRaw, toHuman, formatBalance, parseAmount, parseExactAmount, assertTokenDecimals, MAX_TOKEN_DECIMALS } from './decimals.js';
 export type { TokenInfo } from './decimals.js';
 
 // Token Registry
@@ -44,7 +44,7 @@ export type {
 } from './transfers.js';
 
 // Solana (optional)
-export { SolanaWallet, createSolanaWallet, SOLANA_TOKENS, SOLANA_TOKEN_DECIMALS } from './solana.js';
+export { SolanaWallet, createSolanaWallet, SOLANA_TOKENS, SOLANA_TOKEN_DECIMALS, SOLANA_CLUSTER_GENESIS_HASHES, SolanaTransferSafetyError } from './solana.js';
 export type {
   SolanaWalletConfig,
   SolanaTokenInfo,
@@ -52,4 +52,6 @@ export type {
   SolBalanceResult,
   SplBalanceResult,
   SolanaTxResult,
+  SolanaCluster,
+  SendSplTokenOptions,
 } from './solana.js';

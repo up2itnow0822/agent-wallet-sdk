@@ -125,3 +125,67 @@ describe('getNativeBalance (mocked)', () => {
     expect(result.decimals).toBe(18);
   });
 });
+
+describe('sendToken scale and chain binding (finding 4)', () => {
+  const ARBITRARY: Address = '0x1111111111111111111111111111111111111111';
+
+  function mkCtx(rpcDecimals: number, extra: Record<string, unknown> = {}) {
+    const sendTransaction = vi.fn().mockResolvedValue(FAKE_HASH);
+    const readContract = vi.fn().mockResolvedValue(rpcDecimals);
+    return {
+      sendTransaction,
+      readContract,
+      ctx: {
+        publicClient: { readContract } as any,
+        walletClient: { sendTransaction } as any,
+        account: ACCOUNT,
+        ...extra,
+      } as any,
+    };
+  }
+
+  it('never lets RPC decimals choose the scale for registry tokens', async () => {
+    const { sendToken } = await import('../transfers.js');
+    const { ctx, sendTransaction, readContract } = mkCtx(0, { chainId: 1 });
+    await sendToken(ctx, TO, '1', USDC_ETH);
+    expect(readContract).not.toHaveBeenCalled();
+    expect(sendTransaction.mock.calls[0][0].data.toLowerCase()).toContain('f4240'); // 1_000_000
+  });
+
+  it('rejects string amounts for arbitrary tokens without expectedDecimals, before signing', async () => {
+    const { sendToken } = await import('../transfers.js');
+    const { ctx, sendTransaction } = mkCtx(30);
+    await expect(sendToken(ctx, TO, '1', ARBITRARY)).rejects.toThrow(/expectedDecimals/);
+    expect(sendTransaction).not.toHaveBeenCalled();
+  });
+
+  it('rejects an RPC decimals response that differs from expectedDecimals', async () => {
+    const { sendToken } = await import('../transfers.js');
+    const { ctx, sendTransaction } = mkCtx(30);
+    await expect(sendToken(ctx, TO, '1', ARBITRARY, { expectedDecimals: 6 })).rejects.toThrow(/do not match/);
+    expect(sendTransaction).not.toHaveBeenCalled();
+  });
+
+  it('signs with the pinned scale when RPC agrees', async () => {
+    const { sendToken } = await import('../transfers.js');
+    const { ctx, sendTransaction } = mkCtx(6);
+    await sendToken(ctx, TO, '2.5', ARBITRARY, { expectedDecimals: 6 });
+    expect(sendTransaction.mock.calls[0][0].data.toLowerCase()).toContain('2625a0'); // 2_500_000
+  });
+
+  it('rejects signer/public/requested chain disagreement', async () => {
+    const { sendToken } = await import('../transfers.js');
+    const { ctx, sendTransaction } = mkCtx(6, { chainId: 8453 });
+    ctx.walletClient.chain = { id: 1 };
+    await expect(sendToken(ctx, TO, 1n, USDC_ETH)).rejects.toThrow(/chain mismatch/);
+    expect(sendTransaction).not.toHaveBeenCalled();
+  });
+
+  it('rejects over-precision and non-positive amounts instead of truncating', async () => {
+    const { sendToken } = await import('../transfers.js');
+    const { ctx, sendTransaction } = mkCtx(6, { chainId: 1 });
+    await expect(sendToken(ctx, TO, '1.0000001', USDC_ETH)).rejects.toThrow(/fractional digits/);
+    await expect(sendToken(ctx, TO, 0n, USDC_ETH)).rejects.toThrow(/positive/);
+    expect(sendTransaction).not.toHaveBeenCalled();
+  });
+});
