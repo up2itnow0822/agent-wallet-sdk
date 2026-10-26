@@ -615,6 +615,7 @@ export class SpendingPolicy {
         return { status: 'unresolved', reason: `client chain ${chainId} differs from submission chain ${submission.chainId}` };
       }
       let reverted = 0;
+      let succeeded = false;
       for (const hash of submission.txHashes) {
         const receipt = await client.getTransactionReceipt({ hash: hash as `0x${string}` });
         if (!receipt || typeof receipt.transactionHash !== 'string' ||
@@ -633,13 +634,23 @@ export class SpendingPolicy {
         }
         const st = receipt.status;
         if (st === 'success' || st === 1 || st === '0x1') {
-          // Re-check status after awaits: commit only from a still-locked record.
-          if (record.status !== 'locked') return { status: 'unresolved', reason: 'reservation changed' };
-          this.commit(record);
-          return { status: 'committed' };
+          succeeded = true;
+          break;
         }
         if (st === 'reverted' || st === 0 || st === '0x0') reverted += 1;
         else return { status: 'unresolved', reason: `unknown receipt status for ${hash}` };
+      }
+      // Evidence counts only if the endpoint still serves the recorded chain
+      // after every read (a load-balanced RPC can switch networks mid-way).
+      const chainAfter = await client.getChainId();
+      if (chainAfter !== submission.chainId) {
+        return { status: 'unresolved', reason: `client chain changed to ${chainAfter} during reconciliation (submission chain ${submission.chainId})` };
+      }
+      if (succeeded) {
+        // Re-check status after awaits: commit only from a still-locked record.
+        if (record.status !== 'locked') return { status: 'unresolved', reason: 'reservation changed' };
+        this.commit(record);
+        return { status: 'committed' };
       }
       if (reverted === submission.txHashes.length && submission.incomplete) {
         return {

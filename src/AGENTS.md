@@ -84,7 +84,8 @@
 - `SpendingPolicy` snapshots intents once (`snapshotPaymentIntent`). A locked
   reservation is released only by `reconcileLocked` against the submission
   identity and call binding recorded once at lock time; the receipt and the
-  transaction body must both name the requested hash. Multi-phase
+  transaction body must both name the requested hash, and the RPC must serve
+  the recorded chain before and after those reads. Multi-phase
   submissions bind each hash to its own call (`calls`). Evidence that dropped
   a phase (a malformed or empty hash or call, or
   `SpendOutcome.incompleteEvidence`) marks the lock `incomplete`: it can
@@ -101,10 +102,9 @@
   hash and to this message's `receiveMessage` call) before another burn or
   mint; a hashless ambiguous mint stays held until the caller passes
   `originalSubmissionReconciled`.
-- The package has one entry point (`dist/index.js`): every public module API,
-  including the EVM↔Solana bridge, both resume functions and the Stellar x402
-  adapter/budget,
-  is re-exported from `src/index.ts`.
+- The package has one entry point (`dist/index.js`): every value and type
+  exported by a submodule index that the root re-exports is also exported from
+  `src/index.ts` (`test/root-exports.test.ts` checks this with the compiler).
 - UAID registration and UAID builders default to the chain's own
   `KNOWN_REGISTRY_ADDRESSES` identity registry (the one `verify()` trusts).
 - UAID `verify()` returns `verified` only after on-chain ERC-8004 checks
@@ -124,8 +124,11 @@
   `@stellar/stellar-sdk` is an optional peer (>= 14, smoke-tested on 14, 16
   and 17 against a fake Horizon).
 - Swaps require a caller `minAmountOut`, a chain-bound wallet client and a
-  read client whose RPC `getChainId()` equals the configured chain. Explicit
-  unknown chains throw.
+  read client whose RPC `getChainId()` equals the configured chain, checked
+  before the reads and again after them, before every approve or swap write.
+  Explicit unknown chains throw.
+- Shipped code is runtime-neutral: no Node-only globals such as `Buffer`
+  (browsers and workers load the Stellar and x402 APIs).
 - Broker UAIDs match the requested UAID component-wise (protocol, uid,
   nativeId exact; EVM registry address case-insensitive).
 - x402 binds origin+path+query, bounds the 402 body and its nesting

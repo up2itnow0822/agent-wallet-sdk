@@ -871,6 +871,8 @@ export { SwapModule, attachSwap, calcProtocolFee, applySlippage, calcDeadline } 
 export { UniswapV3RouterAbi, UniswapV3QuoterV2Abi, ERC20Abi } from './swap/index.js';
 export { BASE_TOKENS, UNISWAP_V3_BASE, PROTOCOL_FEE_BPS, PROTOCOL_FEE_COLLECTOR, DEFAULT_SLIPPAGE_BPS } from './swap/index.js';
 export type { UniswapFeeTier, SwapQuote, SwapOptions, SwapResult, SwapModuleConfig } from './swap/index.js';
+export { ARBITRUM_TOKENS, OPTIMISM_TOKENS, POLYGON_TOKENS, UNISWAP_V3_ADDRESSES } from './swap/index.js';
+export type { SwapChain } from './swap/index.js';
 
 // ─── CCTP V2 Cross-Chain Bridge ─────────────────────────────────────────────
 export {
@@ -893,7 +895,14 @@ export {
   solanaPubkeyToBytes32,
   SolanaBridgeError,
   SOLANA_CCTP_DOMAIN,
+  SPL_TOKEN_PROGRAM_ID,
+  SOLANA_MAINNET_GENESIS_HASH,
+  SOLANA_USDC_MINT,
+  SOLANA_TOKEN_MESSENGER,
+  SOLANA_MESSAGE_TRANSMITTER,
+  SOLANA_DEFAULT_RPC,
 } from './bridge/index.js';
+export type { EVMBridgeChain, AttestationResponse, AttestationStatus } from './bridge/index.js';
 export type {
   EVMToSolanaOptions,
   EVMToSolanaResult,
@@ -906,7 +915,21 @@ export type {
   VerifySolanaUsdcAccountOptions,
 } from './bridge/index.js';
 
-// x402 already exported above from original index.ts
+// x402 already exported above from original index.ts; the rest of its public API:
+export {
+  x402SettlementReceiptIsQueued,
+  X402_TRANSACTION_QUEUED_TOPIC,
+  AbstractDelegatedFacilitatorAdapter,
+  ABSTRACT_CHAIN_IDS,
+  ABSTRACT_USDC,
+  ABSTRACT_ANVIL_FACILITATOR,
+  ABSTRACT_APPROVED_FACILITATORS,
+  ABSTRACT_TESTNET_APPROVED_FACILITATORS,
+  ABSTRACT_SUPPORTED_CHAINS,
+  getAbstractApprovedFacilitators,
+  assertAbstractFacilitatorApproved,
+} from './x402/index.js';
+export type { AbstractDelegatedPaymentConfig, DelegatedPaymentPermit, AbstractPaymentResult } from './x402/index.js';
 
 // ─── Spend outcomes — reserve → execute → settle | release | hold-unknown ───
 export {
