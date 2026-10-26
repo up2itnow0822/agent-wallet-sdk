@@ -10,7 +10,9 @@
 # Pass conditions (any one):
 #   1. A non-dismissed chatgpt-codex-connector[bot] (user.type == Bot) review
 #      exists with commit_id exactly equal to the 40-character head SHA,
-#      submitted after the PR's most recent base-branch change; or, for a
+#      submitted after the PR's most recent base change — a retarget OR the
+#      base branch moving to its current SHA (read from the repository
+#      activity log; unknown => fail closed); or, for a
 #      clean pass (Codex submits no review when it has no findings), the
 #      Codex bot's own review-summary comment reports
 #      `Code Review | Completed | <full 40-char head sha>` and was updated
@@ -72,6 +74,10 @@ on:
     types: [created]
   check_suite:
     types: [completed]
+  # Base moves invalidate review evidence. Only the protected default branch
+  # triggers this, so the workflow definition that runs is the trusted one.
+  push:
+    branches: [main]
   schedule:
     - cron: "*/10 * * * *"
   workflow_dispatch:
@@ -105,13 +111,14 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'schedule' ||
       github.event_name == 'check_suite' ||
+      github.event_name == 'push' ||
       (github.event_name == 'issue_comment' && github.event.issue.pull_request != null)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Post pending review-gate
         id: pending
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         with:
           script: |
             const CHECK_NAME = 'review-gate';
@@ -168,6 +175,7 @@ jobs:
             if (shas.size === 0 &&
                 (context.eventName === 'schedule' ||
                  context.eventName === 'check_suite' ||
+                 context.eventName === 'push' ||
                  context.eventName === 'workflow_dispatch')) {
               const prs = await github.paginate(github.rest.pulls.list, {
                 owner: context.repo.owner,
@@ -193,7 +201,7 @@ jobs:
 
       - name: Evaluate and publish review-gate
         id: gate
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         env:
           PENDING_SHAS: ${{ steps.pending.outputs.shas }}
         with:
@@ -261,10 +269,37 @@ jobs:
               core.info(`${sha.slice(0, 7)} -> ${verdict.conclusion}: ${verdict.title}`);
             }
 
+            // Server time at which the base branch moved to its CURRENT SHA,
+            // from the repository activity log. Evidence must be newer than
+            // this, so every base SHA change invalidates earlier review
+            // evidence. If the move cannot be found, fail closed with "now".
+            async function baseShaSinceMs(pr) {
+              const baseSha = fullSha(pr.base && pr.base.sha);
+              const baseRef = pr.base && pr.base.ref;
+              if (!baseSha || !baseRef) return Date.now();
+              try {
+                const { data } = await github.request('GET /repos/{owner}/{repo}/activity', {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  ref: `refs/heads/${baseRef}`,
+                  per_page: 100,
+                });
+                const hit = (Array.isArray(data) ? data : [])
+                  .filter(a => sameSha(a.after, baseSha) && a.timestamp)
+                  .map(a => Date.parse(a.timestamp))
+                  .filter(Number.isFinite)
+                  .sort((x, y) => y - x)[0];
+                return hit === undefined ? Date.now() : hit;
+              } catch (err) {
+                core.warning(`base activity lookup failed (${err.message}); failing closed`);
+                return Date.now();
+              }
+            }
+
             // One timeline read: server-side time of the most recent base
-            // retarget (or 0) and the latest labeled/unlabeled event for the
-            // waiver label.
-            async function timelineFacts(prNumber) {
+            // retarget or base SHA move, and the latest labeled/unlabeled
+            // event for the waiver label.
+            async function timelineFacts(prNumber, pr) {
               const events = await github.paginate(github.rest.issues.listEventsForTimeline, {
                 owner: context.repo.owner,
                 repo: context.repo.repo,
@@ -282,6 +317,7 @@ jobs:
                   lastWaiverEvent = e;
                 }
               }
+              if (pr) baseChangedMs = Math.max(baseChangedMs, await baseShaSinceMs(pr));
               return { baseChangedMs, lastWaiverEvent };
             }
 
@@ -347,8 +383,8 @@ jobs:
                 repo: context.repo.repo,
                 pull_number: prNumber,
               });
-              const { baseChangedMs } = await timelineFacts(prNumber);
-              return `${fullSha(pr.head.sha)}|${pr.base.ref}|${baseChangedMs}`;
+              const { baseChangedMs } = await timelineFacts(prNumber, pr);
+              return `${fullSha(pr.head.sha)}|${pr.base.ref}|${fullSha(pr.base.sha)}|${baseChangedMs}`;
             }
 
             async function evaluate(prNumber) {
@@ -368,7 +404,7 @@ jobs:
               }
               const labels = (pr.labels || []).map(l => l.name);
 
-              const { baseChangedMs, lastWaiverEvent } = await timelineFacts(prNumber);
+              const { baseChangedMs, lastWaiverEvent } = await timelineFacts(prNumber, pr);
               const waiverAfterBase =
                 lastWaiverEvent &&
                 lastWaiverEvent.event === 'labeled' &&
@@ -605,7 +641,7 @@ jobs:
 
       - name: Complete review-gate as failed after an error
         if: failure()
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         env:
           PENDING_SHAS: ${{ steps.pending.outputs.shas }}
         with:
