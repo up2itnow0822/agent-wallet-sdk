@@ -1,4 +1,4 @@
-## [8.0.0] — Unreleased
+## [8.0.0] — 2026-10-26
 
 Security release for the October 25, 2026 assessment of 7.0.0 (29 findings,
 all repaired with regression tests). See `docs/security-remediation.md`.
@@ -20,7 +20,8 @@ all repaired with regression tests). See `docs/security-remediation.md`.
 
 ### Fixed
 - Bridge: bounded Circle polling, receipt-bound attestations, burn-term checks, Solana recipient verification, frozen recovery and `resumeEVMToSolana()`, mint ambiguity codes and `usedNonces` reconciliation, recipient/amount derived from attested bytes.
-- x402: bounded 402 body parsing, explicit intents bound to the request fingerprint, `wrapWithX402` snapshots before the first hop.
+- x402: bounded 402 body parsing, explicit intents bound to the request fingerprint, `wrapWithX402` snapshots before the first hop. Challenges nested deeper than `X402_MAX_CHALLENGE_DEPTH` (32) are never paid; the earlier guard relied on the engine's stack limit, and on Node 26 a deep challenge was paid and then failed while attaching the proof.
+- Package: compiled tests and test helpers are no longer published.
 - Stellar: exact chain matching, configured Horizon with network check, bounded I/O, verified settlement, spend budget.
 - UAID: strict broker schema, bounded broker I/O, bounded LRU cache.
 - Examples default to Base Sepolia and never auto-run.

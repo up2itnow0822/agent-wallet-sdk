@@ -55,6 +55,7 @@ export {
   X402PaidRequestError,
   encodeX402PaymentHeader,
   decodeX402PaymentHeader,
+  X402_MAX_CHALLENGE_DEPTH,
   createX402Client,
   createX402Fetch,
   wrapWithX402,

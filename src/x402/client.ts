@@ -59,6 +59,26 @@ const MAX_PAYMENT_REQUIRED_BODY_BYTES = 64 * 1024;
 const X402_CHALLENGE_BODY_TIMEOUT_MS = 10_000;
 /** Maximum payment options accepted from one challenge. */
 const MAX_PAYMENT_OPTIONS = 16;
+/**
+ * Deepest JSON nesting accepted in a 402 challenge (the challenge object is
+ * depth 1; an option's `extra` object is depth 4). Deeper challenges are never
+ * paid. The bound is explicit because recursion limits differ by JS engine:
+ * a depth that one runtime refuses on re-serialization another accepts and
+ * then overflows on after the transfer, while attaching the payment proof.
+ */
+export const X402_MAX_CHALLENGE_DEPTH = 32;
+
+/** True when `value` nests objects/arrays deeper than `max` (iterative; no recursion). */
+function exceedsJsonDepth(value: unknown, max: number): boolean {
+  const stack: Array<[unknown, number]> = [[value, 1]];
+  while (stack.length > 0) {
+    const [node, depth] = stack.pop()!;
+    if (node === null || typeof node !== 'object') continue;
+    if (depth > max) return true;
+    for (const child of Array.isArray(node) ? node : Object.values(node)) stack.push([child, depth + 1]);
+  }
+  return false;
+}
 const MAX_UINT256 = (1n << 256n) - 1n;
 const EVM_TX_HASH = /^0x[0-9a-fA-F]{64}$/;
 
@@ -1765,6 +1785,7 @@ export class X402Client {
    */
   private isValidPaymentRequired(value: unknown): value is X402PaymentRequired {
     if (!value || typeof value !== 'object') return false;
+    if (exceedsJsonDepth(value, X402_MAX_CHALLENGE_DEPTH)) return false;
     const candidate = value as X402PaymentRequired;
     if (candidate.x402Version !== 1) return false;
     if (!candidate.resource || typeof candidate.resource.url !== 'string') return false;

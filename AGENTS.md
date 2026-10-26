@@ -18,7 +18,9 @@
   in default tests.
 - Keep npm metadata, README install commands, GitHub releases, and package
   behavior consistent. Every lazily imported package is a dependency or an
-  optional peer with a tested `>=` floor (`test/package-peers.test.ts`).
+  optional peer with a tested `>=` floor (`test/package-peers.test.ts`). The
+  tarball ships the built library only, never compiled tests
+  (`test/package-contents.test.ts`).
 - Treat generated `dist/`, coverage, and dependency folders as build outputs.
 - Changes to `main` land only through a pull request. The required deployment
   policy is green `build` and `verify` checks, with every review thread
