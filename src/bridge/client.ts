@@ -14,7 +14,7 @@
  */
 // BridgeModule — CCTP V2 cross-chain USDC bridge for AgentWallet
 // Non-custodial: all signing is done locally via the agent's WalletClient.
-import { attestationUrl, parseAttestationResponse, isDefinitelyNotBroadcast, BURN_SUBMISSION_UNKNOWN_HINT, type CctpAttestedMessage, type CircleV2MessagesResponse } from './attestation.js';
+import { pollCircleAttestation, assertBurnTerms, decodeCctpV2Message, isDefinitelyNotBroadcast, BURN_SUBMISSION_UNKNOWN_HINT, type CctpAttestedMessage } from './attestation.js';
 import {
   createPublicClient,
   http,
@@ -160,8 +160,31 @@ export class BridgeModule {
    *   (Before 6.3.2 this took a message hash, which Circle V2 cannot look up — see #44.)
    * @returns the attested message and attestation; pass both to mint().
    */
-  async waitForAttestation(burnTxHash: Hash, apiUrl: string = CIRCLE_ATTESTATION_API): Promise<CctpAttestedMessage> {
-    return this.pollForAttestation(burnTxHash, this.fromChain, apiUrl);
+  async waitForAttestation(
+    burnTxHash: Hash,
+    apiUrl: string = CIRCLE_ATTESTATION_API,
+    options: { expectedMessage?: Hex } = {},
+  ): Promise<CctpAttestedMessage> {
+    // Bind the lookup to the source message emitted by THIS burn: decode the
+    // known receipt rather than accepting whatever single message Circle returns.
+    let receipt: TransactionReceipt;
+    try {
+      receipt = await this.publicClient.waitForTransactionReceipt({ hash: burnTxHash });
+    } catch (err) {
+      throw new BridgeError('BURN_UNCONFIRMED', `Could not read burn receipt ${burnTxHash}: ${(err as Error).message}. Retry waitForAttestation with the same hash; never burn again.`);
+    }
+    if (receipt.status !== 'success') {
+      throw new BridgeError('BURN_FAILED', `burn transaction ${burnTxHash} did not succeed; nothing to attest.`);
+    }
+    const { messageBytes } = this.extractMessageSent(receipt);
+    if (options.expectedMessage && options.expectedMessage.toLowerCase() !== messageBytes.toLowerCase()) {
+      throw new BridgeError('ATTESTATION_ERROR', 'expectedMessage does not match the MessageSent bytes of this burn transaction.');
+    }
+    const decoded = decodeCctpV2Message(messageBytes);
+    if (decoded.sourceDomain !== CCTP_DOMAIN_IDS[this.fromChain]) {
+      throw new BridgeError('ATTESTATION_ERROR', `burn message source domain ${decoded.sourceDomain} is not ${this.fromChain}.`);
+    }
+    return this.pollForAttestation(burnTxHash, this.fromChain, apiUrl, messageBytes);
   }
 
   async mint(messageBytes: Hex, attestation: Hex, toChain: EVMBridgeChain, destinationRpcUrl?: string): Promise<Hash> {
@@ -253,6 +276,17 @@ export class BridgeModule {
         throw new BridgeError('BURN_FAILED', `depositForBurn transaction reverted (tx: ${burnTxHash}).`);
       }
       extracted = this.extractMessageSent(receipt);
+      try {
+        assertBurnTerms(extracted.messageBytes, {
+          sourceDomain: CCTP_DOMAIN_IDS[this.fromChain],
+          destinationDomain,
+          burnToken: usdcAddress,
+          mintRecipient,
+          amount,
+        });
+      } catch (termsErr) {
+        throw new BridgeError('BURN_UNCONFIRMED', `Burn ${burnTxHash} receipt does not match the requested burn: ${(termsErr as Error).message}. Verify on-chain before any action; never burn again.`);
+      }
     } catch (err: unknown) {
       if (err instanceof BridgeError && err.code === 'BURN_FAILED') throw err;
       // Burn was submitted: it may have burned USDC. Keep the tx hash so the
@@ -268,7 +302,9 @@ export class BridgeModule {
 
   private extractMessageSent(receipt: TransactionReceipt): { messageBytes: Hex; messageHash: Hex; nonce: bigint } {
     const MESSAGE_SENT_TOPIC = '0x8c5261668696ce22758910d05bab8f186d6eb247ceac2af2e82c7dc17669b036';
+    const transmitter = MESSAGE_TRANSMITTER_V2[this.fromChain].toLowerCase();
     for (const log of receipt.logs) {
+      if (log.address?.toLowerCase() !== transmitter) continue;
       if (log.topics[0]?.toLowerCase() === MESSAGE_SENT_TOPIC.toLowerCase()) {
         const rawData = log.data;
         if (rawData.length < 130) continue;
@@ -287,32 +323,17 @@ export class BridgeModule {
     throw new BridgeError('BURN_FAILED', 'Could not find MessageSent event in burn transaction receipt.');
   }
 
-  private async pollForAttestation(burnTxHash: Hash, fromChain: EVMBridgeChain, apiUrl: string, expectedMessage?: Hex): Promise<CctpAttestedMessage> {
-    const sourceDomain = CCTP_DOMAIN_IDS[fromChain];
-    const url = attestationUrl(apiUrl, sourceDomain, burnTxHash);
-    const fail = (m: string): never => { throw new BridgeError('ATTESTATION_ERROR', `Circle attestation failed: ${m}.`); };
-
-    for (let attempt = 0; attempt < MAX_ATTESTATION_POLLS; attempt++) {
-      let body: CircleV2MessagesResponse;
-      try {
-        const res = await fetch(url, { headers: { Accept: 'application/json' } });
-        if (!res.ok) {
-          if (res.status === 404) { await this.sleep(ATTESTATION_POLL_INTERVAL_MS); continue; }
-          const text = await res.text().catch(() => '');
-          throw new BridgeError('ATTESTATION_ERROR', `Circle API returned HTTP ${res.status}: ${text}.`);
-        }
-        body = await res.json() as CircleV2MessagesResponse;
-      } catch (err: unknown) {
-        if (err instanceof BridgeError) throw err;
-        const msg = err instanceof Error ? err.message : String(err);
-        throw new BridgeError('ATTESTATION_ERROR', `Failed to reach Circle IRIS API: ${msg}.`);
-      }
-      const r = parseAttestationResponse(body, fail, expectedMessage);
-      if (r !== 'pending') return r;
-      await this.sleep(ATTESTATION_POLL_INTERVAL_MS);
-    }
-    throw new BridgeError('ATTESTATION_TIMEOUT',
-      `Attestation not received after ${MAX_ATTESTATION_POLLS} attempts. Burn tx: ${burnTxHash} (source domain ${sourceDomain}). Funds are not lost: call waitForAttestation(burnTxHash) then mint() to recover.`);
+  private async pollForAttestation(burnTxHash: Hash, fromChain: EVMBridgeChain, apiUrl: string, expectedMessage: Hex): Promise<CctpAttestedMessage> {
+    return pollCircleAttestation({
+      burnTx: burnTxHash,
+      sourceDomain: CCTP_DOMAIN_IDS[fromChain],
+      apiUrl,
+      expectedMessage,
+      maxPolls: MAX_ATTESTATION_POLLS,
+      intervalMs: ATTESTATION_POLL_INTERVAL_MS,
+      sleep: (ms) => this.sleep(ms),
+      makeError: (code, message) => new BridgeError(code, message),
+    });
   }
 
   private async receiveMessage(messageBytes: Hex, attestation: Hex, toChain: EVMBridgeChain, destinationRpcUrl?: string): Promise<Hash> {
@@ -327,12 +348,25 @@ export class BridgeModule {
       client: { public: destPublicClient, wallet: this.walletClient },
     });
 
+    const decoded = decodeCctpV2Message(messageBytes);
+    if (decoded.destinationDomain !== CCTP_DOMAIN_IDS[toChain]) {
+      throw new BridgeError('MINT_FAILED', `attested message targets domain ${decoded.destinationDomain}, not ${toChain}.`);
+    }
+    // Reconcile the nonce before (re)submitting: a used nonce means the mint already happened.
+    const used = await transmitter.read.usedNonces([decoded.nonce]).catch(() => undefined) as bigint | undefined;
+    if (typeof used === 'bigint' && used !== 0n) {
+      throw new BridgeError('MINT_ALREADY_RECEIVED', `CCTP message nonce ${decoded.nonce} was already received on ${toChain}; do not resubmit.`);
+    }
+
     let mintTxHash: Hash;
     try {
       mintTxHash = await transmitter.write.receiveMessage([messageBytes, attestation], { account, chain: destChain });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      throw new BridgeError('MINT_FAILED', `CCTP receiveMessage failed on ${toChain}: ${msg}.`);
+      if (isDefinitelyNotBroadcast(err)) {
+        throw new BridgeError('MINT_FAILED', `CCTP receiveMessage was not submitted on ${toChain}: ${msg}.`);
+      }
+      throw new BridgeError('MINT_SUBMISSION_UNKNOWN', `CCTP receiveMessage on ${toChain} outcome unknown: ${msg}. Check usedNonces(${decoded.nonce}) and recent transactions before retrying.`);
     }
 
     let mintReceipt;

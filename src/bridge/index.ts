@@ -13,7 +13,8 @@ export {
   TOKEN_MESSENGER_V2, MESSAGE_TRANSMITTER_V2, FINALITY_THRESHOLD,
 } from './client.js';
 export type { BridgeRecovery } from './client.js';
-export type { CctpAttestedMessage, AttestationSelector } from './attestation.js';
+export type { CctpAttestedMessage, AttestationSelector, DecodedCctpV2Message, ExpectedBurnTerms } from './attestation.js';
+export { decodeCctpV2Message, assertBurnTerms } from './attestation.js';
 export type {
   BridgeChain, EVMBridgeChain, BridgeOptions, BurnResult, BridgeResult, AttestationResponse, AttestationStatus,
 } from './types.js';
@@ -22,8 +23,13 @@ export { TokenMessengerV2Abi, MessageTransmitterV2Abi, ERC20BridgeAbi } from './
 // ─── Solana Bridge (optional — requires @solana/web3.js for full Solana-side execution) ───
 export {
   bridgeEVMToSolana,
+  resumeEVMToSolana,
   receiveFromSolanaOnEVM,
+  verifySolanaUsdcTokenAccount,
   bytes32ToSolanaPubkey,
+  solanaPubkeyToBytes32,
+  SPL_TOKEN_PROGRAM_ID,
+  SOLANA_MAINNET_GENESIS_HASH,
   SolanaBridgeError,
   SOLANA_CCTP_DOMAIN,
   SOLANA_USDC_MINT,
@@ -38,4 +44,7 @@ export type {
   SolanaToEVMBurnParams,
   SolanaToEVMResult,
   SolanaBridgeErrorCode,
+  SolanaBridgeRecovery,
+  SolanaMintRecovery,
+  VerifySolanaUsdcAccountOptions,
 } from './solana.js';
