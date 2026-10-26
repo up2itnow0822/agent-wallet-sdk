@@ -147,7 +147,7 @@ export async function sendToken(
  * Resolve the single chain a transfer is bound to and require that the signer,
  * the read client and the caller all agree on it. Never inferred from RPC data.
  */
-function resolveBoundChainId(ctx: TransferContext, options: TransferOptions): number | undefined {
+function resolveBoundChainId(ctx: TransferContext, options: TransferOptions): number {
   const candidates: Array<[string, number | undefined]> = [
     ['ctx.chainId', ctx.chainId],
     ['options.chainId', options.chainId],
@@ -160,14 +160,20 @@ function resolveBoundChainId(ctx: TransferContext, options: TransferOptions): nu
     if (!Number.isSafeInteger(id) || id <= 0) {
       throw new TokenTransferSafetyError(`${label} is not a valid chain id`);
     }
-    if (bound === undefined || bound === null) bound = id;
+    if (bound === undefined) bound = id;
     else if (bound !== id) {
       throw new TokenTransferSafetyError(
         `chain mismatch: ${label}=${id} differs from bound chain ${bound}`,
       );
     }
   }
-  return bound;
+  // The signer itself must be bound to that chain, so viem asserts the
+  // wallet's current chain before signing (never "whatever the RPC reports").
+  const signerChain = ctx.walletClient?.chain?.id;
+  if (signerChain === undefined || signerChain === null) {
+    throw new TokenTransferSafetyError('walletClient must be bound to a chain (createWalletClient({ chain }))');
+  }
+  return bound as number;
 }
 
 /**

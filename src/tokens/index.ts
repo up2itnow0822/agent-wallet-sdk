@@ -35,6 +35,7 @@ export {
   getNativeBalance,
   getBalances,
   encodeERC20Transfer,
+  TokenTransferSafetyError,
 } from './transfers.js';
 export type {
   TransferContext,

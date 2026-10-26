@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { privateKeyToAccount } from 'viem/accounts';
-import { encodeFunctionData } from 'viem';
+import { encodeFunctionData, keccak256 } from 'viem';
 import { AgentAccountV2Abi } from '../abi.js';
 import AgentWalletPlugin, { createAgentFetch, getAgentWallet } from './elizaos.js';
 import type { AgentWalletPluginConfig } from './elizaos.js';
@@ -88,6 +88,7 @@ beforeEach(() => {
       getTransaction: transaction,
       getCode: async () => '0x6080604052',
     },
+    expectedCodeHash: keccak256('0x6080604052'),
   }));
   transfer.mockReset().mockImplementation(async () => `0x${'ab'.repeat(32)}`);
   receipt.mockReset().mockResolvedValue({ status: 'success' });

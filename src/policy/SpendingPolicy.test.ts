@@ -522,7 +522,8 @@ describe('SpendingPolicy reserve/commit/release', () => {
     const draft = await policy.reserve(makePayment({ amount: 80 }));
     policy.approveDraft(draft.draftId!);
     const first = await policy.reserveApprovedDraft(draft.draftId!);
-    policy.lock(first.reservation!, { chainId: 8453, txHashes: [VALID_HASH] });
+    const call = { from: '0x' + '1'.repeat(40), to: '0x' + '2'.repeat(40), data: '0xa9059cbb' };
+    policy.lock(first.reservation!, { chainId: 8453, txHashes: [VALID_HASH], ...call });
     expect(policy.release(first.reservation!)).toBe(false);
     expect((await policy.reserveApprovedDraft(draft.draftId!)).status).toBe('existing');
 
@@ -533,6 +534,7 @@ describe('SpendingPolicy reserve/commit/release', () => {
     const reconciled = await policy.reconcileLocked(first.reservation!, {
       getChainId: async () => 8453,
       getTransactionReceipt: async ({ hash }) => ({ transactionHash: hash, status: 'reverted' }),
+      getTransaction: async () => ({ from: call.from, to: call.to, input: call.data }),
     });
     expect(reconciled.status).toBe('released');
     const retry = await policy.reserveApprovedDraft(draft.draftId!);
@@ -685,15 +687,17 @@ describe('SpendingPolicy intent snapshot (finding 2)', () => {
 describe('SpendingPolicy locked reconciliation (finding 8)', () => {
   const HASH_A = ('0x' + 'a'.repeat(64)) as `0x${string}`;
   const HASH_B = ('0x' + 'b'.repeat(64)) as `0x${string}`;
-  const client = (status: string | number, chainId = 8453, echo?: string) => ({
+  const CALL = { from: '0x' + '1'.repeat(40), to: '0x' + '2'.repeat(40), data: '0xa9059cbb' };
+  const client = (status: string | number, chainId = 8453, echo?: string, tx = { from: CALL.from, to: CALL.to, input: CALL.data }) => ({
     getChainId: async () => chainId,
     getTransactionReceipt: async ({ hash }: { hash: string }) => ({ transactionHash: echo ?? hash, status }),
+    getTransaction: async () => tx,
   });
 
   async function lockedPolicy(hashes: string[] = [HASH_A]) {
     const policy = new SpendingPolicy({ rollingCap: { maxAmount: 100, windowMs: 86_400_000 } });
     const r = await policy.reserve({ merchant: 'm', amount: 80 });
-    policy.lock(r.reservation!, { chainId: 8453, txHashes: hashes });
+    policy.lock(r.reservation!, { chainId: 8453, txHashes: hashes, ...CALL });
     return { policy, reservation: r.reservation! };
   }
 
@@ -724,14 +728,31 @@ describe('SpendingPolicy locked reconciliation (finding 8)', () => {
     expect((await policy.reserve({ merchant: 'm', amount: 30 })).status).toBe('rejected');
   });
 
-  it('keeps a hashless lock unresolved; a later hash can be attached once but never replaced', async () => {
+  it('never attaches hashes to an existing lock (identity is immutable)', async () => {
     const policy = new SpendingPolicy({});
     const r = await policy.reserve({ merchant: 'm', amount: 1 });
     policy.lock(r.reservation!);
     expect((await policy.reconcileLocked(r.reservation!, client('reverted'))).status).toBe('unresolved');
-    expect(policy.lock(r.reservation!, { chainId: 8453, txHashes: [HASH_A] })).toBe(true);
-    expect(policy.lock(r.reservation!, { chainId: 8453, txHashes: [HASH_B] })).toBe(false);
-    expect(policy.getReservation(r.reservation!.reservationId)?.submission?.txHashes).toEqual([HASH_A]);
+    expect(policy.lock(r.reservation!, { chainId: 8453, txHashes: [HASH_A], ...CALL })).toBe(false);
+    expect(policy.getReservation(r.reservation!.reservationId)?.submission?.txHashes).toEqual([]);
+  });
+
+  it('cannot release from an outcome that carries unrelated hashes but no call binding (review follow-up)', async () => {
+    const policy = new SpendingPolicy({ rollingCap: { maxAmount: 100, windowMs: 86_400_000 } });
+    const r = await policy.reserve({ merchant: 'm', amount: 100 });
+    policy.applyOutcome(r.reservation!, { status: 'hold-unknown', retrySafe: false, txHashes: [HASH_B], chainId: 8453 });
+    const res = await policy.reconcileLocked(r.reservation!, client('reverted'));
+    expect(res.status).toBe('unresolved');
+    expect(res.reason).toMatch(/call binding/);
+    expect((await policy.reserve({ merchant: 'm', amount: 100 })).status).toBe('rejected');
+  });
+
+  it('releases an applyOutcome lock only when the supplied call binding matches', async () => {
+    const policy = new SpendingPolicy({});
+    const r = await policy.reserve({ merchant: 'm', amount: 1 });
+    policy.applyOutcome(r.reservation!, { status: 'hold-unknown', retrySafe: false, txHashes: [HASH_A], chainId: 8453 }, CALL);
+    expect((await policy.reconcileLocked(r.reservation!, client('reverted', 8453, undefined, { from: CALL.from, to: CALL.to, input: '0xdead' }))).status).toBe('unresolved');
+    expect((await policy.reconcileLocked(r.reservation!, client('reverted'))).status).toBe('released');
   });
 
   it('verifies the recorded call binding when present', async () => {

@@ -32,6 +32,7 @@
  */
 import {
   createWallet,
+  readDeploymentIdentitySettings,
   setSpendPolicy,
   createX402Client,
   USDC_ADDRESSES,
@@ -251,6 +252,10 @@ function recipientAllowlist(): Set<string> | undefined {
 export function walletFromEnv(options?: {
   chain?: string;
   rpcUrl?: string;
+  /** Deployment identity overrides (otherwise read from AGENT_WALLET_* env vars). */
+  deployment?: AgentWalletConfig['deployment'];
+  expectedCodeHash?: AgentWalletConfig['expectedCodeHash'];
+  allowUnverifiedDeployment?: boolean;
 }): ReturnType<typeof createWallet> {
   // ── Private key ────────────────────────────────────────────────────────
   const rawKey = process.env.AGENT_PRIVATE_KEY;
@@ -277,7 +282,10 @@ export function walletFromEnv(options?: {
     v === undefined || (typeof v === 'string' && v.trim() === '') ? undefined : v;
   const envName = blankToUndefined(process.env.CHAIN_NAME);
   const envId = blankToUndefined(process.env.CHAIN_ID);
-  const chainSource = blankToUndefined(options?.chain) ?? envName ?? envId;
+  if (options?.chain !== undefined && (typeof options.chain !== 'string' || options.chain.trim() === '')) {
+    throw new Error('[walletFromEnv] options.chain must be a non-empty chain name or id');
+  }
+  const chainSource = options?.chain ?? envName ?? envId;
   const toChainArg = (v: string | number) => {
     const text = String(v).trim();
     if (/^\d+$/.test(text)) return Number(text);
@@ -311,12 +319,18 @@ export function walletFromEnv(options?: {
     transport: http(rpcUrl),
   });
 
+  // ── Deployment identity (required for writes; see SECURITY.md) ─────────
+  const envIdentity = readDeploymentIdentitySettings((k) => process.env[k]);
+
   // ── Delegate to core createWallet ────────────────────────────────────────
   return createWallet({
     accountAddress: walletAddress as Address,
     chain: resolved.walletChain as AgentWalletConfig['chain'],
     rpcUrl,
     walletClient,
+    deployment: options?.deployment ?? envIdentity.deployment,
+    expectedCodeHash: options?.expectedCodeHash ?? envIdentity.expectedCodeHash,
+    allowUnverifiedDeployment: options?.allowUnverifiedDeployment ?? envIdentity.allowUnverifiedDeployment,
   });
 }
 

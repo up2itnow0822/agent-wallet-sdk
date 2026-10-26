@@ -111,13 +111,58 @@ export interface AgentWalletHandle {
   /** Deployment identity supplied at creation; checked before writes. */
   deployment?: AgentWalletConfig['deployment'];
   expectedCodeHash?: Hash;
+  allowUnverifiedDeployment?: boolean;
+}
+
+/** Own-property chain lookup: names like "constructor" or "__proto__" never resolve. */
+function lookupChain(name: unknown): Chain | undefined {
+  if (typeof name !== 'string' || !Object.prototype.hasOwnProperty.call(CHAINS, name)) return undefined;
+  const chain = CHAINS[name];
+  return chain && Number.isSafeInteger(chain.id) && chain.id > 0 ? chain : undefined;
+}
+
+/**
+ * Read deployment-identity settings (env vars or plugin settings):
+ * AGENT_WALLET_CODE_HASH, AGENT_WALLET_FACTORY + AGENT_WALLET_TOKEN_CONTRACT +
+ * AGENT_WALLET_TOKEN_ID, and the unsafe AGENT_WALLET_ALLOW_UNVERIFIED=true.
+ * Malformed nonempty values throw; blank values are treated as unset.
+ */
+export function readDeploymentIdentitySettings(
+  get: (name: string) => string | undefined | null,
+): Pick<AgentWalletConfig, 'deployment' | 'expectedCodeHash' | 'allowUnverifiedDeployment'> {
+  const val = (k: string) => {
+    const v = get(k);
+    return typeof v === 'string' && v.trim() !== '' ? v.trim() : undefined;
+  };
+  const out: Pick<AgentWalletConfig, 'deployment' | 'expectedCodeHash' | 'allowUnverifiedDeployment'> = {};
+  const codeHash = val('AGENT_WALLET_CODE_HASH');
+  if (codeHash !== undefined) {
+    if (!/^0x[0-9a-fA-F]{64}$/.test(codeHash)) throw new Error('AGENT_WALLET_CODE_HASH must be a 32-byte hex hash');
+    out.expectedCodeHash = codeHash as Hash;
+  }
+  const factory = val('AGENT_WALLET_FACTORY');
+  const tokenContract = val('AGENT_WALLET_TOKEN_CONTRACT');
+  const tokenId = val('AGENT_WALLET_TOKEN_ID');
+  if (factory !== undefined || tokenContract !== undefined || tokenId !== undefined) {
+    if (!factory || !isAddress(factory, { strict: false }) || !tokenContract || !isAddress(tokenContract, { strict: false })
+        || !tokenId || !/^\d{1,78}$/.test(tokenId)) {
+      throw new Error('AGENT_WALLET_FACTORY, AGENT_WALLET_TOKEN_CONTRACT and AGENT_WALLET_TOKEN_ID must all be set and valid');
+    }
+    out.deployment = { factoryAddress: factory as Address, tokenContract: tokenContract as Address, tokenId: BigInt(tokenId) };
+  }
+  const allow = val('AGENT_WALLET_ALLOW_UNVERIFIED');
+  if (allow !== undefined) {
+    if (allow !== 'true' && allow !== 'false') throw new Error('AGENT_WALLET_ALLOW_UNVERIFIED must be "true" or "false"');
+    out.allowUnverifiedDeployment = allow === 'true';
+  }
+  return out;
 }
 
 /**
  * Create a wallet client connected to an existing AgentAccountV2.
  */
 export function createWallet(config: AgentWalletConfig & { walletClient: WalletClient }): AgentWalletHandle {
-  const chain = CHAINS[config.chain];
+  const chain = lookupChain(config.chain);
   if (!chain) throw new Error(`Unsupported chain: ${config.chain}`);
   if (typeof config.accountAddress !== 'string' || !isAddress(config.accountAddress, { strict: false })) {
     throw new Error('createWallet: accountAddress is not a valid address');
@@ -138,15 +183,17 @@ export function createWallet(config: AgentWalletConfig & { walletClient: WalletC
     client: { public: publicClient, wallet: config.walletClient },
   });
 
-  return {
+  // Frozen: the verified address and the contract writes target can never diverge.
+  return Object.freeze({
     address: config.accountAddress,
     contract,
     publicClient,
     walletClient: config.walletClient,
     chain,
-    ...(config.deployment ? { deployment: { ...config.deployment } } : {}),
+    ...(config.deployment ? { deployment: Object.freeze({ ...config.deployment }) } : {}),
     ...(config.expectedCodeHash ? { expectedCodeHash: config.expectedCodeHash } : {}),
-  };
+    ...(config.allowUnverifiedDeployment === true ? { allowUnverifiedDeployment: true } : {}),
+  });
 }
 
 type Wallet = ReturnType<typeof createWallet>;
@@ -175,6 +222,14 @@ export async function verifyAgentWallet(wallet: Wallet): Promise<void> {
   const pending = (async () => {
     const fail = (msg: string): never => { throw new AgentWalletVerificationError(`agent wallet ${wallet.address}: ${msg}`); };
     if (typeof wallet.address !== 'string' || !isAddress(wallet.address, { strict: false })) fail('invalid address');
+    const contractAddress = (wallet.contract as { address?: unknown } | undefined)?.address;
+    if (typeof contractAddress === 'string' && contractAddress.toLowerCase() !== wallet.address.toLowerCase()) {
+      fail('wallet.contract.address differs from wallet.address');
+    }
+    if (!wallet.deployment && !wallet.expectedCodeHash && wallet.allowUnverifiedDeployment !== true) {
+      fail('deployment identity required: pass `deployment` (trusted factory + token) or `expectedCodeHash` to createWallet() ' +
+        '(env: AGENT_WALLET_FACTORY/AGENT_WALLET_TOKEN_CONTRACT/AGENT_WALLET_TOKEN_ID or AGENT_WALLET_CODE_HASH)');
+    }
     const signerChain = wallet.walletClient?.chain?.id;
     if ((signerChain !== undefined && signerChain !== null) && signerChain !== wallet.chain.id) {
       fail(`signer chain ${signerChain} differs from wallet chain ${wallet.chain.id}`);
@@ -451,7 +506,7 @@ export async function deployWallet(config: {
   rpcUrl?: string;
   walletClient: WalletClient;
 }): Promise<{ walletAddress: Address; txHash: Hash }> {
-  const chain = CHAINS[config.chain];
+  const chain = lookupChain(config.chain);
   if (!chain) throw new Error(`Unsupported chain: ${config.chain}`);
 
   const publicClient = createPublicClient({
@@ -490,7 +545,7 @@ export async function getWalletAddress(config: {
   chain: string;
   rpcUrl?: string;
 }): Promise<Address> {
-  const chain = CHAINS[config.chain];
+  const chain = lookupChain(config.chain);
   if (!chain) throw new Error(`Unsupported chain: ${config.chain}`);
 
   const publicClient = createPublicClient({
@@ -594,20 +649,27 @@ export async function getWalletHealth(
 }
 
 /**
- * [MAX-ADDED] Batch agent token transfers — multiple transfers in sequential calls.
- * Why: Agents often need to pay multiple recipients (tips, fees, splits). This helper
- * reduces boilerplate and returns all tx hashes. Each is a separate on-chain tx
- * (true batching would need a multicall contract, but this is the safe SDK-level helper).
+ * Batch agent token transfers — sequential, individually confirmed transfers.
+ * Returns one classified AgentTransferResult per transfer (`executed` or
+ * `queued`); a queued transfer moved no tokens. Each is a separate on-chain tx.
  */
 export async function batchAgentTransfer(
   wallet: Wallet,
   transfers: BatchTransfer[]
-): Promise<Hash[]> {
-  const hashes: Hash[] = [];
+): Promise<AgentTransferResult[]> {
+  // Each transfer is confirmed and classified before the next is sent. On an
+  // error the classified results so far are attached as `error.completed`;
+  // never resend those, and reconcile the failing transfer's hash.
+  const results: AgentTransferResult[] = [];
   for (const t of transfers) {
-    hashes.push(await submitAgentTransferToken(wallet, t));
+    try {
+      results.push(await agentTransferToken(wallet, t));
+    } catch (err) {
+      if (err && typeof err === 'object') Object.assign(err, { completed: [...results] });
+      throw err;
+    }
   }
-  return hashes;
+  return results;
 }
 
 /**

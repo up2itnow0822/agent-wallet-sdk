@@ -83,12 +83,16 @@ export interface SpendReservation {
 
 /**
  * Immutable identity of the on-chain submission(s) behind a locked reservation.
- * Recorded at lock time; reconciliation can only use these exact hashes.
+ * Recorded once at lock time; reconciliation can only use these exact hashes.
+ * Record EVERY submitted phase (e.g. protocol fee and payee) — release requires
+ * all recorded hashes to have reverted. Without the call binding
+ * (`from` = the signing wallet, `to`, `data`) a lock can never be released by
+ * reconciliation; it stays locked until committed.
  */
 export interface SubmissionIdentity {
   chainId?: number;
   txHashes: readonly string[];
-  /** Optional call binding checked against the fetched transaction. */
+  /** Call binding checked against every fetched transaction (required for reconciliation). */
   from?: string;
   to?: string;
   data?: string;
@@ -447,15 +451,9 @@ export class SpendingPolicy {
   lock(reservation: SpendReservation | string, submission?: SubmissionIdentity): boolean {
     const record = this.resolveReservation(reservation);
     if (!record) return false;
-    if (record.status === 'locked') {
-      // A later observation may add the hash of the SAME submission only when
-      // none was known; it can never replace recorded identity.
-      if (submission && (!record.submission || record.submission.txHashes.length === 0)) {
-        record.submission = freezeSubmission(submission);
-        return true;
-      }
-      return false;
-    }
+    // Submission identity is recorded once, at lock time, and is immutable.
+    // Hashes cannot be attached afterwards: a later "observed" hash could be an
+    // earlier reverted attempt of the same call and would wrongly release.
     if (record.status !== 'held') {
       return false;
     }
@@ -475,7 +473,12 @@ export class SpendingPolicy {
    * An already-locked attempt needs valid revert hash evidence to release;
    * a later pre-broadcast rejection cannot reconcile the earlier submission.
    */
-  applyOutcome(reservation: SpendReservation | string, outcome: SpendOutcome): boolean {
+  applyOutcome(
+    reservation: SpendReservation | string,
+    outcome: SpendOutcome,
+    /** Call binding of the submission (wallet sender, target, calldata, value). Required for later reconciliation. */
+    call?: Pick<SubmissionIdentity, 'from' | 'to' | 'data' | 'value'>,
+  ): boolean {
     if (outcome.status === 'settled') {
       return this.commit(reservation);
     }
@@ -487,6 +490,7 @@ export class SpendingPolicy {
     return this.lock(reservation, {
       chainId: outcome.chainId,
       txHashes: outcome.txHashes.filter(isEvmTxHash),
+      ...(call ?? {}),
     });
   }
 
@@ -514,6 +518,12 @@ export class SpendingPolicy {
     if (submission.chainId === undefined || submission.chainId === null) {
       return { status: 'unresolved', reason: 'submission chain was not recorded' };
     }
+    if (!submission.from || !submission.to || !submission.data) {
+      return {
+        status: 'unresolved',
+        reason: 'no call binding (from, to, data) was recorded at lock time; reconciliation cannot prove these hashes belong to this payment',
+      };
+    }
     try {
       const chainId = await client.getChainId();
       if (chainId !== submission.chainId) {
@@ -526,7 +536,7 @@ export class SpendingPolicy {
             receipt.transactionHash.toLowerCase() !== hash.toLowerCase()) {
           return { status: 'unresolved', reason: `no receipt bound to ${hash}` };
         }
-        if (submission.from || submission.to || submission.data || submission.value !== undefined) {
+        {
           if (!client.getTransaction) {
             return { status: 'unresolved', reason: 'call binding requires getTransaction' };
           }

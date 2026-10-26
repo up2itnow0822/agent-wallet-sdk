@@ -69,6 +69,12 @@ export interface AgentWalletConfig {
   };
   /** Optional keccak256 of the approved AgentAccountV2 runtime bytecode. */
   expectedCodeHash?: Hash;
+  /**
+   * UNSAFE opt-out. Writes require `deployment` or `expectedCodeHash`; set this
+   * only if you accept that any contract answering the AgentAccountV2 views
+   * (including an attacker-deployed one) can receive agent writes and value.
+   */
+  allowUnverifiedDeployment?: boolean;
 }
 
 /** Classified result of a confirmed agentTransferToken call. */

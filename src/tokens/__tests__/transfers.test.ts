@@ -66,7 +66,7 @@ describe('sendToken (mocked)', () => {
 
     const ctx = {
       publicClient: { readContract } as any,
-      walletClient: { sendTransaction } as any,
+      walletClient: { sendTransaction, chain: { id: 1 } } as any,
       account: ACCOUNT,
       chainId: 1,
     };
@@ -92,7 +92,7 @@ describe('sendNative (mocked)', () => {
 
     const ctx = {
       publicClient: {} as any,
-      walletClient: { sendTransaction } as any,
+      walletClient: { sendTransaction, chain: { id: 8453 } } as any,
       account: ACCOUNT,
     };
 
@@ -137,7 +137,7 @@ describe('sendToken scale and chain binding (finding 4)', () => {
       readContract,
       ctx: {
         publicClient: { readContract } as any,
-        walletClient: { sendTransaction } as any,
+        walletClient: { sendTransaction, chain: { id: (extra as { chainId?: number }).chainId ?? 8453 } } as any,
         account: ACCOUNT,
         ...extra,
       } as any,
@@ -178,6 +178,14 @@ describe('sendToken scale and chain binding (finding 4)', () => {
     const { ctx, sendTransaction } = mkCtx(6, { chainId: 8453 });
     ctx.walletClient.chain = { id: 1 };
     await expect(sendToken(ctx, TO, 1n, USDC_ETH)).rejects.toThrow(/chain mismatch/);
+    expect(sendTransaction).not.toHaveBeenCalled();
+  });
+
+  it('refuses to sign with a chain-less wallet client even when the read client is bound (review follow-up)', async () => {
+    const { sendToken } = await import('../transfers.js');
+    const sendTransaction = vi.fn().mockResolvedValue(FAKE_HASH);
+    const ctx = { publicClient: { chain: { id: 1 } } as any, walletClient: { sendTransaction } as any, account: ACCOUNT };
+    await expect(sendToken(ctx, TO, '1', USDC_ETH)).rejects.toThrow(/bound to a chain/);
     expect(sendTransaction).not.toHaveBeenCalled();
   });
 

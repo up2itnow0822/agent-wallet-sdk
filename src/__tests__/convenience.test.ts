@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { getAddress } from 'viem';
+import { getAddress, keccak256 } from 'viem';
 import {
   resolveEnvSpendLimits,
   resolveWalletChain,
@@ -137,6 +137,30 @@ describe('walletFromEnv', () => {
       expect(() => walletFromEnv()).toThrow();
     });
 
+  it('rejects a blank explicit chain option instead of falling back', () => {
+    process.env.AGENT_PRIVATE_KEY = TEST_PRIVATE_KEY;
+    process.env.AGENT_WALLET_ADDRESS = '0x0000000000000000000000000000000000000001';
+    expect(() => walletFromEnv({ chain: '  ' })).toThrow(/non-empty/);
+  });
+
+  it('reads deployment identity from env and rejects partial or malformed settings', () => {
+    process.env.AGENT_PRIVATE_KEY = TEST_PRIVATE_KEY;
+    process.env.AGENT_WALLET_ADDRESS = '0x0000000000000000000000000000000000000001';
+    delete process.env.CHAIN_NAME; delete process.env.CHAIN_ID;
+    process.env.AGENT_WALLET_CODE_HASH = '0x' + 'ab'.repeat(32);
+    try {
+      expect(walletFromEnv().expectedCodeHash).toBe('0x' + 'ab'.repeat(32));
+      process.env.AGENT_WALLET_FACTORY = '0x' + '11'.repeat(20);
+      expect(() => walletFromEnv()).toThrow(/must all be set/);
+      process.env.AGENT_WALLET_CODE_HASH = 'nope';
+      delete process.env.AGENT_WALLET_FACTORY;
+      expect(() => walletFromEnv()).toThrow(/32-byte/);
+    } finally {
+      delete process.env.AGENT_WALLET_CODE_HASH;
+      delete process.env.AGENT_WALLET_FACTORY;
+    }
+  });
+
   it('rejects CHAIN_NAME and CHAIN_ID that disagree', () => {
     process.env.AGENT_PRIVATE_KEY = TEST_PRIVATE_KEY;
     process.env.AGENT_WALLET_ADDRESS = '0x0000000000000000000000000000000000000001';
@@ -200,6 +224,7 @@ describe('USDC environment spending controls', () => {
         waitForTransactionReceipt: vi.fn(async () => ({ status: 'success' })),
         getCode: vi.fn(async () => '0x6080604052'),
       },
+      expectedCodeHash: keccak256('0x6080604052'),
     } as unknown as Parameters<typeof x402FromEnv>[0];
     return { wallet, transfer, setPolicy };
   }

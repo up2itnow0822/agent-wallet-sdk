@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { encodeAbiParameters, encodeEventTopics, zeroAddress, type Address } from 'viem';
+import { encodeAbiParameters, encodeEventTopics, keccak256, zeroAddress, type Address } from 'viem';
 
 // ─── Mock state ───
 const mockReadFns: Record<string, any> = {};
@@ -7,7 +7,8 @@ const mockWriteFns: Record<string, any> = {};
 const mockWaitForReceipt = vi.fn().mockResolvedValue({ logs: [] });
 const mockWatchEvent = vi.fn().mockReturnValue(() => {});
 const mockGetContractEvents = vi.fn().mockResolvedValue([]);
-const mockGetCode = vi.fn().mockResolvedValue('0x608060405234801561001057600080fd5b50');
+const MOCK_CODE = '0x608060405234801561001057600080fd5b50' as const;
+const mockGetCode = vi.fn().mockResolvedValue(MOCK_CODE);
 
 vi.mock('viem', async () => {
   const actual = await vi.importActual('viem');
@@ -66,6 +67,7 @@ function makeWallet() {
     chain: 'base',
     rpcUrl: 'https://rpc.example.com',
     walletClient: {} as any,
+    expectedCodeHash: keccak256(MOCK_CODE),
   });
 }
 
@@ -173,7 +175,7 @@ function erc20TransferLog(token: Address, from: Address, to: Address, value: big
 describe('agentExecute', () => {
   beforeEach(() => {
     mockReadFns.pendingNonce = vi.fn().mockResolvedValue(0n);
-    mockGetCode.mockResolvedValue('0x608060405234801561001057600080fd5b50');
+    mockGetCode.mockResolvedValue(MOCK_CODE);
     mockWaitForReceipt.mockImplementation(async () => ({ status: 'success', logs: [executedLog(OPERATOR, 0n)] }));
   });
 
@@ -268,6 +270,30 @@ describe('agentExecute', () => {
     await expect(agentExecute(makeWallet(), { to: OPERATOR, value: 5n })).rejects.toMatchObject({ executionStatus: 'unknown' });
   });
 
+  it('requires a deployment identity before any write (review follow-up)', async () => {
+    mockWriteFns.agentExecute = vi.fn().mockResolvedValue(TX_HASH);
+    const bare = createWallet({ accountAddress: ACCOUNT, chain: 'base', rpcUrl: 'https://rpc.example.com', walletClient: {} as any });
+    await expect(agentExecute(bare, { to: OPERATOR, value: 1n })).rejects.toThrow(/deployment identity required/);
+    expect(mockWriteFns.agentExecute).not.toHaveBeenCalled();
+  });
+
+  it('rejects a spoofing contract whose code hash differs from the approved one', async () => {
+    mockWriteFns.agentExecute = vi.fn().mockResolvedValue(TX_HASH);
+    mockGetCode.mockResolvedValue('0x6080deadbeef');
+    await expect(agentExecute(makeWallet(), { to: OPERATOR, value: 1n })).rejects.toThrow(/code hash/);
+    expect(mockWriteFns.agentExecute).not.toHaveBeenCalled();
+  });
+
+  it('rejects names of built-in object properties as chains', () => {
+    for (const chain of ['constructor', 'toString', '__proto__', 'valueOf']) {
+      expect(() => createWallet({ accountAddress: ACCOUNT, chain: chain as any, walletClient: {} as any })).toThrow(/Unsupported chain/);
+    }
+  });
+
+  it('returns a frozen handle so the verified address and write target cannot diverge', () => {
+    expect(Object.isFrozen(makeWallet())).toBe(true);
+  });
+
   it('ignores an executed event emitted by another contract or for another target', async () => {
     mockWriteFns.agentExecute = vi.fn().mockResolvedValue(TX_HASH);
     mockWaitForReceipt.mockResolvedValue({ status: 'success', logs: [
@@ -340,7 +366,7 @@ describe('cancelTransaction', () => {
 });
 
 describe('agentTransferToken', () => {
-  beforeEach(() => mockGetCode.mockResolvedValue('0x608060405234801561001057600080fd5b50'));
+  beforeEach(() => mockGetCode.mockResolvedValue(MOCK_CODE));
 
   it('transfers tokens and reports executed only with a matching ERC-20 Transfer', async () => {
     mockWriteFns.agentTransferToken = vi.fn().mockResolvedValue(TX_HASH);
@@ -491,20 +517,42 @@ describe('getWalletHealth', () => {
 });
 
 describe('batchAgentTransfer', () => {
-  it('executes multiple transfers and returns all hashes', async () => {
+  it('confirms and classifies each transfer (review follow-up)', async () => {
     const hash2 = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' as `0x${string}`;
+    mockGetCode.mockResolvedValue(MOCK_CODE);
     mockWriteFns.agentTransferToken = vi.fn()
       .mockResolvedValueOnce(TX_HASH)
       .mockResolvedValueOnce(hash2);
+    mockWaitForReceipt
+      .mockResolvedValueOnce({ status: 'success', logs: [erc20TransferLog(TOKEN, ACCOUNT, OPERATOR, 100n)] })
+      .mockResolvedValueOnce({ status: 'success', logs: [{
+        address: ACCOUNT,
+        topics: encodeEventTopics({ abi: AgentAccountV2Abi, eventName: 'TransactionQueued', args: { txId: 3n, to: ACCOUNT.toLowerCase() as Address } }),
+        data: encodeAbiParameters([{ type: 'uint256' }, { type: 'address' }, { type: 'uint256' }], [0n, TOKEN.toLowerCase() as Address, 200n]),
+      }] });
 
-    const hashes = await batchAgentTransfer(makeWallet(), [
+    const results = await batchAgentTransfer(makeWallet(), [
       { token: TOKEN, to: OPERATOR, amount: 100n },
       { token: TOKEN, to: ACCOUNT, amount: 200n },
     ]);
-    expect(hashes).toHaveLength(2);
-    expect(hashes[0]).toBe(TX_HASH);
-    expect(hashes[1]).toBe(hash2);
-    expect(mockWriteFns.agentTransferToken).toHaveBeenCalledTimes(2);
+    expect(results).toEqual([
+      { status: 'executed', txHash: TX_HASH },
+      { status: 'queued', txHash: hash2, pendingTxId: 3n },
+    ]);
+  });
+
+  it('attaches completed results when a later transfer fails', async () => {
+    mockGetCode.mockResolvedValue(MOCK_CODE);
+    mockWriteFns.agentTransferToken = vi.fn().mockResolvedValue(TX_HASH);
+    mockWaitForReceipt
+      .mockResolvedValueOnce({ status: 'success', logs: [erc20TransferLog(TOKEN, ACCOUNT, OPERATOR, 1n)] })
+      .mockResolvedValueOnce({ status: 'reverted', logs: [] });
+    const err = await batchAgentTransfer(makeWallet(), [
+      { token: TOKEN, to: OPERATOR, amount: 1n },
+      { token: TOKEN, to: OPERATOR, amount: 2n },
+    ]).catch((e) => e);
+    expect(err.executionStatus).toBe('reverted');
+    expect(err.completed).toEqual([{ status: 'executed', txHash: TX_HASH }]);
   });
 
   it('returns empty array for empty batch', async () => {
