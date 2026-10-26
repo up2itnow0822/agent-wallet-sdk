@@ -17,7 +17,7 @@ const ROUTER_ABI = parseAbi([
 ]);
 const TOKEN_ABI = parseAbi(['function approve(address spender,uint256 amount) returns (bool)']);
 
-function harness(options: { accountAddress?: Address; feeBps?: number; allowance?: bigint } = {}) {
+function harness(options: { accountAddress?: Address; feeBps?: number; allowance?: bigint; rpcChainId?: number } = {}) {
   let allowance = options.allowance ?? MAX_UINT256;
   const sent: { to: Address; data: Hex }[] = [];
   const readContract = vi.fn(async ({ functionName }: { functionName: string }) => {
@@ -32,13 +32,14 @@ function harness(options: { accountAddress?: Address; feeBps?: number; allowance
     sent.push(args);
     return args.to === TOKEN_IN ? APPROVAL_HASH : SWAP_HASH;
   });
+  const getChainId = vi.fn(async () => options.rpcChainId ?? 8453);
   const module = new SwapModule(
-    { readContract, waitForTransactionReceipt } as unknown as PublicClient,
+    { readContract, waitForTransactionReceipt, getChainId } as unknown as PublicClient,
     { account: { address: OWNER }, chain: { id: 8453 }, sendTransaction } as unknown as WalletClient,
     options.accountAddress ?? OWNER,
     { feeBps: options.feeBps ?? 0 },
   );
-  return { module, sent, readContract, waitForTransactionReceipt, sendTransaction };
+  return { module, sent, readContract, waitForTransactionReceipt, sendTransaction, getChainId };
 }
 
 afterEach(() => vi.restoreAllMocks());
@@ -189,6 +190,20 @@ describe('swap output floor and chain binding (finding 11)', () => {
     await expect(module.swap(TOKEN_IN, TOKEN_OUT, 100_000n, {
       minAmountOut: 1n, referenceAmountOut: 300_000n, maxQuoteDeviationBps: 100,
     })).rejects.toThrow(/deviates/);
+    expect(sent).toEqual([]);
+  });
+
+  it('rejects a chainless read client whose RPC serves another network, before any quote (Codex round 4)', async () => {
+    const { module, sent, readContract } = harness({ rpcChainId: 1 });
+    await expect(module.swap(TOKEN_IN, TOKEN_OUT, 100_000n, { minAmountOut: 1n })).rejects.toThrow(/RPC serves chain 1/);
+    expect(readContract).not.toHaveBeenCalled();
+    expect(sent).toEqual([]);
+  });
+
+  it('fails closed when the read client cannot report its network', async () => {
+    const { module, sent, getChainId } = harness();
+    getChainId.mockRejectedValueOnce(new Error('rpc down'));
+    await expect(module.swap(TOKEN_IN, TOKEN_OUT, 100_000n, { minAmountOut: 1n })).rejects.toThrow(/could not read the publicClient network/);
     expect(sent).toEqual([]);
   });
 

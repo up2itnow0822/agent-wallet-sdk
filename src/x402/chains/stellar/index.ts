@@ -182,7 +182,6 @@ export class StellarX402Adapter {
   private readonly confirmationHorizonUrl: string;
   private readonly timeoutMs: number;
   private readonly fetchImpl?: typeof fetch;
-  private readonly verifiedHorizons = new Set<string>();
 
   constructor(config: StellarPaymentConfig = {}) {
     const network = config.network ?? 'pubnet';
@@ -442,9 +441,13 @@ export class StellarX402Adapter {
     }
   }
 
-  /** Require that a Horizon endpoint serves this adapter's network. */
+  /**
+   * Require that a Horizon endpoint serves this adapter's network. Never
+   * cached: a long-lived adapter re-checks before every build, submission and
+   * lookup, so a backend that changes networks (even while the signer runs)
+   * fails as a pre-broadcast policy error and the reservation is released.
+   */
   private async assertHorizonNetwork(horizonUrl: string): Promise<void> {
-    if (this.verifiedHorizons.has(horizonUrl)) return;
     const res = await boundedFetch(`${horizonUrl}/`, { headers: { Accept: 'application/json' } }, {
       timeoutMs: this.timeoutMs, maxBytes: STELLAR_HORIZON_MAX_BYTES, fetchImpl: this.fetchImpl,
     });
@@ -453,7 +456,6 @@ export class StellarX402Adapter {
     if (root?.network_passphrase !== expected) {
       throw new StellarPaymentPolicyError(`Horizon ${horizonUrl} does not serve the ${this.network} network`);
     }
-    this.verifiedHorizons.add(horizonUrl);
   }
 
   private async loadAccount(publicKey: string): Promise<{ sequence: string }> {

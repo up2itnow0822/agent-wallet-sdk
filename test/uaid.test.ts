@@ -320,3 +320,33 @@ describe('registration uses the chain-specific identity registry (Codex round 3)
       .toBe(`uaid:aid:eip155:8453:${custom};uid=1;proto=erc8004`);
   });
 });
+
+describe('broker UAIDs compare EVM registry addresses case-insensitively (Codex round 4)', () => {
+  afterEach(() => vi.unstubAllGlobals());
+  const lookup = vi.fn(async () => ({ owner: OWNER as `0x${string}`, agentWallet: WALLET as `0x${string}`, blockNumber: 1n }));
+
+  it('accepts a broker record whose UAID lowercases the checksummed registry', async () => {
+    vi.stubGlobal('fetch', brokerReturning({ uaid: GOOD_UAID.toLowerCase(), protocol: 'erc8004', agentId: '42' }));
+    const v = await new UAIDResolver({ onChainLookup: lookup }).verify(GOOD_UAID);
+    expect(v.verified).toBe(true);
+  });
+
+  it.each([
+    ['another chain', GOOD_UAID.replace('eip155:8453', 'eip155:1')],
+    ['another registry', GOOD_UAID.replace(REGISTRY, '0x' + '33'.repeat(20))],
+    ['another uid', GOOD_UAID.replace('uid=42', 'uid=43')],
+    ['another protocol', GOOD_UAID.replace('proto=erc8004', 'proto=a2a')],
+    ['an added nativeId', `${GOOD_UAID};nativeId=x`],
+  ])('still rejects a broker UAID for %s', async (_case, other) => {
+    vi.stubGlobal('fetch', brokerReturning({ uaid: other, protocol: 'erc8004', agentId: '42' }));
+    const r = await new UAIDResolver().resolve(GOOD_UAID);
+    expect(r.resolved).toBe(false);
+  });
+
+  it('accepts a registration response that only changes address case', async () => {
+    const returned = GOOD_UAID.replace('uid=42', 'uid=7').toLowerCase();
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ uaid: returned }))));
+    const uaid = await new UAIDResolver({ apiKey: 'k' }).registerERC8004Agent({ agentId: 7n, chain: 'base', name: 'n', description: 'd' });
+    expect(uaid).toBe(returned);
+  });
+});

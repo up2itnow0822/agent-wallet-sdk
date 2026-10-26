@@ -12,13 +12,17 @@ const h = vi.hoisted(() => ({
   depositForBurn: vi.fn(),
   receiveMessage: vi.fn(),
   usedNonces: vi.fn(),
+  priorReceipt: vi.fn(),
 }));
 
 vi.mock('viem', async (importOriginal) => {
   const actual = await importOriginal<typeof import('viem')>();
   return {
     ...actual,
-    createPublicClient: () => ({ waitForTransactionReceipt: (...a: unknown[]) => h.receipt(...a) }),
+    createPublicClient: () => ({
+      waitForTransactionReceipt: (...a: unknown[]) => h.receipt(...a),
+      getTransactionReceipt: (...a: unknown[]) => h.priorReceipt(...a),
+    }),
     getContract: () => ({
       read: {
         allowance: (...a: unknown[]) => h.allowance(...a),
@@ -37,6 +41,7 @@ const {
   bridgeEVMToSolana,
   resumeEVMToSolana,
   receiveFromSolanaOnEVM,
+  resumeSolanaToEVM,
   verifySolanaUsdcTokenAccount,
   solanaPubkeyToBytes32,
   SolanaBridgeError,
@@ -288,6 +293,69 @@ describe('Solana→EVM receive binding and mint ambiguity (findings 22, 24)', ()
     const err = await receiveFromSolanaOnEVM(walletClient, params(msg), { toChain: 'arbitrum' }).catch((e) => e);
     expect(err.code).toBe('MINT_ALREADY_RECEIVED');
     expect(h.receiveMessage).not.toHaveBeenCalled();
+  });
+
+  describe('resumeSolanaToEVM reconciles a retained mint before any new write (Codex round 4)', () => {
+    async function unconfirmed() {
+      const msg = source(EVM_ME, 5_000_000n);
+      circle(attestedFor(msg, 1_000n));
+      h.receiveMessage.mockResolvedValue(MINT_TX);
+      h.receipt.mockRejectedValue(new Error('timeout'));
+      const err = await receiveFromSolanaOnEVM(walletClient, params(msg), { toChain: 'arbitrum' }).catch((e) => e);
+      expect(err.code).toBe('MINT_UNCONFIRMED');
+      h.receiveMessage.mockClear();
+      return err.mintRecovery;
+    }
+
+    it('does not resubmit while the retained mint is still pending', async () => {
+      const recovery = await unconfirmed();
+      h.priorReceipt.mockRejectedValue(new Error('Transaction receipt could not be found'));
+      const err = await resumeSolanaToEVM(walletClient, recovery).catch((e) => e);
+      expect(err.code).toBe('MINT_UNCONFIRMED');
+      expect(err.mintRecovery.mintTxHash).toBe(MINT_TX);
+      expect(h.receiveMessage).not.toHaveBeenCalled();
+    });
+
+    it('returns the retained mint once it succeeded and the nonce is consumed', async () => {
+      const recovery = await unconfirmed();
+      h.priorReceipt.mockResolvedValue({ status: 'success' });
+      h.usedNonces.mockResolvedValue(1n);
+      const r = await resumeSolanaToEVM(walletClient, recovery);
+      expect(r).toMatchObject({ mintTxHash: MINT_TX, recipient: EVM_ME, amount: 4_999_000n, toChain: 'arbitrum' });
+      expect(h.receiveMessage).not.toHaveBeenCalled();
+    });
+
+    it('refuses a "successful" retained tx whose nonce was never consumed', async () => {
+      const recovery = await unconfirmed();
+      h.priorReceipt.mockResolvedValue({ status: 'success' });
+      h.usedNonces.mockResolvedValue(0n);
+      const err = await resumeSolanaToEVM(walletClient, recovery).catch((e) => e);
+      expect(err.code).toBe('MINT_UNCONFIRMED');
+      expect(h.receiveMessage).not.toHaveBeenCalled();
+    });
+
+    it('mints again only after the retained tx reverted and the nonce is unused', async () => {
+      const recovery = await unconfirmed();
+      const NEW_TX = ('0x' + 'c2'.repeat(32)) as Hex;
+      h.priorReceipt.mockResolvedValue({ status: 'reverted' });
+      h.receiveMessage.mockResolvedValue(NEW_TX);
+      h.receipt.mockReset().mockResolvedValue({ status: 'success', logs: [] });
+      const r = await resumeSolanaToEVM(walletClient, recovery);
+      expect(r.mintTxHash).toBe(NEW_TX);
+      expect(h.receiveMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it('rejects a tampered recovery before any read or write', async () => {
+      const recovery = await unconfirmed();
+      const err1 = await resumeSolanaToEVM(walletClient, { ...recovery, recipient: EVM_OTHER }).catch((e) => e);
+      expect(err1.code).toBe('ATTESTATION_ERROR');
+      const err2 = await resumeSolanaToEVM(walletClient, { ...recovery, nonce: ('0x' + '00'.repeat(32)) as Hex }).catch((e) => e);
+      expect(err2.code).toBe('ATTESTATION_ERROR');
+      const err3 = await resumeSolanaToEVM(walletClient, { ...recovery, toChain: 'base' }).catch((e) => e);
+      expect(err3.code).toBe('ATTESTATION_ERROR');
+      expect(h.priorReceipt).not.toHaveBeenCalled();
+      expect(h.receiveMessage).not.toHaveBeenCalled();
+    });
   });
 
   it('treats a wallet rejection as a definite (not ambiguous) failure', async () => {

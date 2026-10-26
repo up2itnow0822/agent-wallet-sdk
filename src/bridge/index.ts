@@ -25,6 +25,7 @@ export {
   bridgeEVMToSolana,
   resumeEVMToSolana,
   receiveFromSolanaOnEVM,
+  resumeSolanaToEVM,
   verifySolanaUsdcTokenAccount,
   bytes32ToSolanaPubkey,
   solanaPubkeyToBytes32,

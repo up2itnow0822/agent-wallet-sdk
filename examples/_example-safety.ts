@@ -7,11 +7,13 @@
  * - Examples export their entry points; they only run when executed directly.
  * - Before any agent write, the advertised on-chain spend policy must already
  *   be installed (by the wallet owner) and be no looser than the example's limits.
+ * - Wallets are built with a verified deployment identity
+ *   ({@link exampleDeploymentIdentity}); the unsafe opt-out is refused.
  */
 import { pathToFileURL } from 'node:url';
 import type { Address, Chain } from 'viem';
 import { base, baseSepolia } from 'viem/chains';
-import type { AgentWalletHandle } from '../src/index.js';
+import { readDeploymentIdentitySettings, type AgentWalletHandle, type AgentWalletConfig } from '../src/index.js';
 
 export const LIVE_ACK = 'I_UNDERSTAND_THIS_SPENDS_REAL_FUNDS';
 
@@ -58,6 +60,32 @@ export function requireEnv(name: string): string {
   const value = process.env[name]?.trim();
   if (!value) throw new Error(`Missing required environment variable ${name}`);
   return value;
+}
+
+/**
+ * Deployment identity for the example wallet, from the same env vars the SDK
+ * reads: AGENT_WALLET_CODE_HASH, or AGENT_WALLET_FACTORY +
+ * AGENT_WALLET_TOKEN_CONTRACT + AGENT_WALLET_TOKEN_ID. Every agent write runs
+ * verifyAgentWallet(), so an example without one could never complete; the
+ * unsafe AGENT_WALLET_ALLOW_UNVERIFIED opt-out is refused in examples.
+ */
+export function exampleDeploymentIdentity(
+  env: NodeJS.ProcessEnv = process.env,
+): Pick<AgentWalletConfig, 'deployment' | 'expectedCodeHash'> {
+  const identity = readDeploymentIdentitySettings((name) => env[name]);
+  if (identity.allowUnverifiedDeployment) {
+    throw new Error('Examples refuse AGENT_WALLET_ALLOW_UNVERIFIED=true; configure a deployment identity instead.');
+  }
+  if (!identity.deployment && !identity.expectedCodeHash) {
+    throw new Error(
+      'Set the wallet deployment identity: AGENT_WALLET_CODE_HASH, or AGENT_WALLET_FACTORY + ' +
+        'AGENT_WALLET_TOKEN_CONTRACT + AGENT_WALLET_TOKEN_ID (the factory and token that created AGENT_WALLET).',
+    );
+  }
+  return {
+    ...(identity.deployment ? { deployment: identity.deployment } : {}),
+    ...(identity.expectedCodeHash ? { expectedCodeHash: identity.expectedCodeHash } : {}),
+  };
 }
 
 /**

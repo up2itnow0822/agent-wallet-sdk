@@ -84,21 +84,28 @@
 - CCTP: attestations are always bound to a known source message; burn terms
   are checked from the transmitter-emitted `MessageSent`; post-hash failures
   carry frozen recovery; `usedNonces` is checked before `receiveMessage`;
-  reported recipients/amounts come from attested bytes.
+  reported recipients/amounts come from attested bytes. Resume paths
+  (`resumeEVMToSolana`, `resumeSolanaToEVM`) re-validate the recovery and
+  resolve any retained transaction before another burn or mint.
 - The package has one entry point (`dist/index.js`): every public module API,
-  including the EVM↔Solana bridge and its recovery (`resumeEVMToSolana`),
+  including the EVM↔Solana bridge and both resume functions,
   is re-exported from `src/index.ts`.
 - UAID registration and UAID builders default to the chain's own
   `KNOWN_REGISTRY_ADDRESSES` identity registry (the one `verify()` trusts).
 - UAID `verify()` returns `verified` only after on-chain ERC-8004 checks;
   broker claims are `brokerAttested`. The resolution cache is a bounded LRU.
 - Stellar auto-pay requires a spend policy reserved before signing; Horizon
-  must report the configured network; success needs the signed-XDR hash,
+  must report the configured network, re-checked (never cached) before every
+  build, submission and lookup; success needs the signed-XDR hash,
   `successful === true` and a ledger confirmation. An unknown reservation is
   freed only by `StellarSpendBudget.reconcile()` evidence for its recorded
   hash: included-but-failed, or not found after its `maxTime` on a Horizon
   whose history covers the validity window.
-- Swaps require a caller `minAmountOut`. Explicit unknown chains throw.
+- Swaps require a caller `minAmountOut`, a chain-bound wallet client and a
+  read client whose RPC `getChainId()` equals the configured chain. Explicit
+  unknown chains throw.
+- Broker UAIDs match the requested UAID component-wise (protocol, uid,
+  nativeId exact; EVM registry address case-insensitive).
 - x402 binds origin+path+query, bounds the 402 body, binds explicit intents to
   the request fingerprint, and wrappers snapshot before the first hop.
 

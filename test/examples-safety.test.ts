@@ -52,3 +52,24 @@ describe('example safety (finding 20)', () => {
     await expect(assertInstalledSpendPolicy(wallet(5n, 50n), token, limits)).resolves.toBeUndefined();
   });
 });
+
+describe('runnable write examples carry a deployment identity (Codex round 4)', () => {
+  it('requires a deployment identity and refuses the unsafe opt-out', async () => {
+    const { exampleDeploymentIdentity } = await import('../examples/_example-safety.js');
+    expect(() => exampleDeploymentIdentity({})).toThrow(/deployment identity/);
+    expect(() => exampleDeploymentIdentity({ AGENT_WALLET_ALLOW_UNVERIFIED: 'true' })).toThrow(/refuse/);
+    const hash = `0x${'ab'.repeat(32)}`;
+    expect(exampleDeploymentIdentity({ AGENT_WALLET_CODE_HASH: hash })).toEqual({ expectedCodeHash: hash });
+    expect(exampleDeploymentIdentity({
+      AGENT_WALLET_FACTORY: '0x' + '11'.repeat(20),
+      AGENT_WALLET_TOKEN_CONTRACT: '0x' + '22'.repeat(20),
+      AGENT_WALLET_TOKEN_ID: '7',
+    }).deployment).toEqual({ factoryAddress: '0x' + '11'.repeat(20), tokenContract: '0x' + '22'.repeat(20), tokenId: 7n });
+  });
+
+  it.each(['micropayment-agent.ts', 'trading-agent.ts', 'x402-payment.ts'])('%s builds its wallet with exampleDeploymentIdentity()', (file) => {
+    const src = readFileSync(join(__dirname, '..', 'examples', file), 'utf8');
+    expect(src).toMatch(/createWallet\(\{[\s\S]*?\.\.\.exampleDeploymentIdentity\(\),[\s\S]*?\}\);/);
+    expect(src).toMatch(/AGENT_WALLET_CODE_HASH/);
+  });
+});

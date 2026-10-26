@@ -208,6 +208,24 @@ function canonicalUAID(uaid: unknown): string | null {
   return UAIDResolver.parseUAID(trimmed) ? trimmed : null;
 }
 
+const EVM_AID = /^(eip155:\d{1,20}):(0x[0-9a-fA-F]{40})$/;
+
+/**
+ * True when two UAIDs name the same agent: protocol, uid and nativeId match
+ * exactly; the aid matches exactly, except that an EVM `eip155:<chain>:<addr>`
+ * aid compares its address case-insensitively (checksum spelling only).
+ */
+function sameUAID(a: string, b: string): boolean {
+  const x = UAIDResolver.parseUAID(a);
+  const y = UAIDResolver.parseUAID(b);
+  if (!x || !y) return false;
+  if (x.protocol !== y.protocol || x.uid !== y.uid || x.nativeId !== y.nativeId) return false;
+  if (x.aid === y.aid) return true;
+  const ex = EVM_AID.exec(x.aid);
+  const ey = EVM_AID.exec(y.aid);
+  return !!ex && !!ey && ex[1] === ey[1] && ex[2].toLowerCase() === ey[2].toLowerCase();
+}
+
 /** Strictly validate one broker agent record against the UAID it must describe. */
 function validateBrokerAgent(raw: unknown, expectedUaid: string): {
   identity: UniversalAgentIdentity; protocol: UAIDProtocol; chain?: string; trustScore?: number; brokerAttested: boolean;
@@ -218,7 +236,7 @@ function validateBrokerAgent(raw: unknown, expectedUaid: string): {
   if (!parsed) throw new Error('requested UAID is malformed');
 
   const returnedUaid = str(d.uaid, 'uaid', MAX_UAID_LENGTH);
-  if (returnedUaid !== undefined && returnedUaid !== expectedUaid) {
+  if (returnedUaid !== undefined && !sameUAID(returnedUaid, expectedUaid)) {
     throw new Error('broker returned a record for a different UAID');
   }
   const protocol = str(d.protocol, 'protocol', 64) ?? parsed.protocol;
@@ -501,9 +519,7 @@ export class UAIDResolver {
     const data = parseBoundedJson(response.text, 'broker registration response') as { uaid?: unknown } | null;
     const returned = data && typeof data === 'object' ? canonicalUAID(data.uaid) : null;
     if (!returned) return uaid;
-    const want = UAIDResolver.parseUAID(uaid)!;
-    const got = UAIDResolver.parseUAID(returned)!;
-    if (got.aid !== want.aid || got.uid !== want.uid || got.protocol !== want.protocol) {
+    if (!sameUAID(returned, uaid)) {
       throw new Error('UAIDResolver: broker returned a UAID for a different agent');
     }
     return returned;

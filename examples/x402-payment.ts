@@ -10,6 +10,10 @@
  *   3. Pays via AgentWallet (USDC on Base)
  *   4. Retries the request with the payment receipt
  *   5. Returns the successful response
+ *
+ * Env: AGENT_PRIVATE_KEY, AGENT_ACCOUNT_ADDRESS, RPC_URL (optional),
+ *      deployment identity: AGENT_WALLET_CODE_HASH, or AGENT_WALLET_FACTORY +
+ *      AGENT_WALLET_TOKEN_CONTRACT + AGENT_WALLET_TOKEN_ID (required).
  */
 
 import { createWalletClient, http, type Address } from 'viem';
@@ -21,7 +25,7 @@ import {
   type AgentWalletHandle,
   type X402TransactionLog,
 } from '../src/index.js';
-import { isDirectRun, requireEnv, resolveExampleNetwork } from './_example-safety.js';
+import { exampleDeploymentIdentity, isDirectRun, requireEnv, resolveExampleNetwork } from './_example-safety.js';
 
 // Safety: Base Sepolia by default; Base mainnet requires AGENT_EXAMPLE_NETWORK=base
 // and AGENT_EXAMPLE_LIVE_ACK. Nothing runs (or signs) on import.
@@ -44,6 +48,7 @@ export function exampleWallet(): AgentWalletHandle {
     chain: network.chainKey,
     rpcUrl,
     walletClient,
+    ...exampleDeploymentIdentity(),
   });
   return cachedWallet;
 }

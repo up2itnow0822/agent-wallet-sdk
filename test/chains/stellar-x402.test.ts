@@ -340,3 +340,36 @@ describe('evidence-bound reconciliation of unknown reservations (Codex P2)', () 
     expect(budget.occupiedStroops).toBe(20_000_000n);
   });
 });
+
+describe('Horizon network is re-checked before every submission (Codex round 4)', () => {
+  it('refuses to broadcast when the Horizon switches networks while the signer runs', async () => {
+    let passphrase = STELLAR_NETWORK.pubnet.networkPassphrase;
+    const posts: string[] = [];
+    const impl = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith('/')) return new Response(JSON.stringify({ network_passphrase: passphrase }));
+      if (url.includes('/accounts/')) return new Response(JSON.stringify({ sequence: '123' }));
+      if (init?.method === 'POST') { posts.push(url); return new Response(JSON.stringify({ hash: HASH, ledger: 9, successful: true })); }
+      return new Response(JSON.stringify({ hash: HASH, ledger: 9, successful: true }));
+    }) as unknown as typeof fetch;
+    const slowSigner = vi.fn(async (xdr: string) => {
+      passphrase = STELLAR_NETWORK.testnet.networkPassphrase; // backend changes mid-signing
+      return xdr;
+    });
+    const budget = new StellarSpendBudget('5');
+    await expect(stellarX402Pay({
+      responseHeaders: headers('stellar:pubnet', '1'), sourcePublicKey: SRC, sign: slowSigner,
+      policy: { maxPerPayment: '5', budget }, adapter: { fetchImpl: impl },
+    })).rejects.toBeInstanceOf(StellarPaymentPolicyError);
+    expect(posts).toHaveLength(0);
+    expect(budget.occupiedStroops).toBe(0n);
+  });
+
+  it('re-checks on every call of a reused adapter', async () => {
+    const { impl, calls } = horizon();
+    const adapter = new StellarX402Adapter({ fetchImpl: impl });
+    const xdr = await adapter.buildPaymentTransaction({ destination: DEST, amount: '1', sourcePublicKey: SRC });
+    await adapter.submitTransaction(xdr);
+    await adapter.submitTransaction(xdr);
+    expect(calls.filter((c) => c.endsWith('/') && c.startsWith('GET')).length).toBeGreaterThanOrEqual(5);
+  });
+});

@@ -71,7 +71,11 @@ signing and network boundaries.
   `sendSplToken()` needs `expectedDecimals` for unlisted mints.
 - An unknown `stellarX402Pay()` reservation is freed or committed only by
   `budget.reconcile(id, adapter)`, from ledger evidence for the recorded hash.
-- `SwapModule.swap()` requires `minAmountOut` from an independent source.
+- `SwapModule.swap()` requires `minAmountOut` from an independent source, and
+  its read client must answer `getChainId()` with the configured chain.
+- The runnable examples need the wallet's deployment identity env
+  (`AGENT_WALLET_CODE_HASH`, or `AGENT_WALLET_FACTORY` +
+  `AGENT_WALLET_TOKEN_CONTRACT` + `AGENT_WALLET_TOKEN_ID`).
 - `UAIDResolver.verify()` returns `verified: true` only after on-chain ERC-8004
   verification; configure `rpcUrls`/`onChainLookup`. Broker claims are in
   `brokerAttested`.
@@ -91,7 +95,10 @@ signing and network boundaries.
 - `BridgeModule.waitForAttestation(burnTxHash)` reads the burn receipt from the
   module's source-chain RPC. `bridgeEVMToSolana` verifies the Solana recipient
   token account first; on failure after the burn, call
-  `resumeEVMToSolana(error.recovery)`.
+  `resumeEVMToSolana(error.recovery)`. A Solana→EVM `MINT_UNCONFIRMED` /
+  `MINT_SUBMISSION_UNKNOWN` error is resumed with
+  `resumeSolanaToEVM(walletClient, error.mintRecovery)`, which never mints
+  while the retained transaction is unresolved.
 
 ### Version note
 

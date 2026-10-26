@@ -11,7 +11,9 @@
  * Nothing runs on import; execute this file directly to run it.
  *
  * Env: AGENT_PRIVATE_KEY, AGENT_WALLET, RPC_URL (optional),
- *      AGENT_EXAMPLE_PAYEES (optional JSON {serviceId: address}).
+ *      AGENT_EXAMPLE_PAYEES (optional JSON {serviceId: address}),
+ *      deployment identity: AGENT_WALLET_CODE_HASH, or AGENT_WALLET_FACTORY +
+ *      AGENT_WALLET_TOKEN_CONTRACT + AGENT_WALLET_TOKEN_ID (required).
  */
 
 import { createWalletClient, http, parseUnits, isAddress, type Address } from 'viem';
@@ -28,6 +30,7 @@ import {
   isDirectRun,
   requireEnv,
   resolveExampleNetwork,
+  exampleDeploymentIdentity,
 } from './_example-safety.js';
 
 export const LIMITS = {
@@ -94,6 +97,7 @@ export async function main(): Promise<void> {
     chain: network.chainKey,
     rpcUrl: process.env.RPC_URL,
     walletClient,
+    ...exampleDeploymentIdentity(),
   });
 
   console.log(`🤖 Micropayment agent on ${network.chainKey}${network.live ? ' (LIVE FUNDS)' : ''}: ${wallet.address}`);

@@ -192,8 +192,13 @@ export class SwapModule {
     return account;
   }
 
-  /** Require both clients to be bound to the configured swap chain. */
-  private assertChainBinding(): void {
+  /**
+   * Require both clients to be bound to the configured swap chain. The read
+   * client is checked against its RPC endpoint (`eth_chainId`), not just its
+   * config, so a chainless or misconfigured transport cannot supply quotes and
+   * allowances from another network.
+   */
+  private async assertChainBinding(): Promise<void> {
     const expected = SWAP_CHAIN_IDS[this.config.chain];
     if (expected === undefined) throw new Error(`SwapModule: unsupported chain ${String(this.config.chain)}`);
     const walletChain = this.walletClient.chain?.id;
@@ -206,6 +211,18 @@ export class SwapModule {
     }
     if (readChain !== undefined && readChain !== expected) {
       throw new Error(`SwapModule: publicClient chain ${readChain} differs from ${this.config.chain} (${expected})`);
+    }
+    if (typeof this.publicClient.getChainId !== 'function') {
+      throw new Error('SwapModule: publicClient must support getChainId() to prove its network');
+    }
+    let rpcChain: number;
+    try {
+      rpcChain = await this.publicClient.getChainId();
+    } catch (err) {
+      throw new Error(`SwapModule: could not read the publicClient network: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    if (rpcChain !== expected) {
+      throw new Error(`SwapModule: publicClient RPC serves chain ${rpcChain}, not ${this.config.chain} (${expected})`);
     }
   }
 
@@ -233,7 +250,7 @@ export class SwapModule {
       throw new Error('SwapModule: fee-bearing swaps are disabled until a reviewed atomic fee route exists. Configure feeBps: 0 for fee-free EOA execution.');
     }
     const account = this.executionAccount();
-    this.assertChainBinding();
+    await this.assertChainBinding();
 
     const rpcQuote = await this.getQuote(tokenIn, tokenOut, amountIn, { slippageBps, feeTiers: options.feeTiers });
     if (rpcQuote.amountOut < options.minAmountOut) {

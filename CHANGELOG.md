@@ -27,6 +27,7 @@ all repaired with regression tests). See `docs/security-remediation.md`.
 - CI: actions pinned to commit SHAs; review-gate evidence bound to the base SHA.
 - Review round 1 (Codex): `SubmissionIdentity.calls` binds each multi-phase hash to its own call; `StellarSpendBudget.reconcile()` frees unknown Stellar reservations from ledger evidence; wallet-verification failures are typed pre-broadcast errors that release x402 reservations; queued events must match the requested transfer; the Solana cluster is re-checked before every transfer.
 - Review round 3 (Codex): x402 settlement receipts must carry the phase transfer's ERC-20 `Transfer` (or its own queue entry) — `classifyX402SettlementReceipt()`; `agentExecute()` also matches calldata; the EVM↔Solana bridge (incl. `resumeEVMToSolana`) is exported from the package root; UAID registration uses the chain's own identity registry.
+- Review round 4 (Codex): new `resumeSolanaToEVM()` resolves a retained mint before any new `receiveMessage`; Stellar re-checks the Horizon network before every submission; `SwapModule` verifies the read client's RPC chain; runnable examples require a deployment identity; broker UAIDs compare EVM registry addresses case-insensitively.
 - CI: review-gate recognizes a clean Codex pass from the bot's machine-readable state line (full head SHA); previously a clean review could never satisfy the gate because the summary table shows only a short SHA.
 
 ---

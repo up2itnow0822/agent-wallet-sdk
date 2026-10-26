@@ -558,13 +558,7 @@ export async function receiveFromSolanaOnEVM(
   if (typeof burnParams.messageHash !== 'string' || keccak256(burnParams.messageBytes).toLowerCase() !== burnParams.messageHash.toLowerCase()) {
     throw new SolanaBridgeError('ATTESTATION_ERROR', 'burnParams.messageHash does not match keccak256(burnParams.messageBytes).');
   }
-  const expectedTerms = {
-    sourceDomain: SOLANA_CCTP_DOMAIN,
-    destinationDomain: CCTP_DOMAIN_IDS[toChain],
-    burnToken: solanaPubkeyToBytes32(SOLANA_USDC_MINT),
-    sender: solanaPubkeyToBytes32(SOLANA_TOKEN_MESSENGER),
-    mintRecipient: requestedRecipient,
-  };
+  const expectedTerms = solanaToEvmTerms(toChain, requestedRecipient);
   try {
     assertBurnTerms(burnParams.messageBytes, expectedTerms);
   } catch (err) {
@@ -586,7 +580,85 @@ export async function receiveFromSolanaOnEVM(
   } catch (err) {
     throw new SolanaBridgeError('ATTESTATION_ERROR', `Attested message does not match the Solana burn: ${(err as Error).message}.`);
   }
-  const recipient = requestedRecipient;
+  return mintAttested(walletClient, {
+    toChain, evmRpcUrl, recipient: requestedRecipient, attested, decoded, startMs,
+  });
+}
+
+/** Terms every Solana→EVM USDC message for `toChain` / `recipient` must carry. */
+function solanaToEvmTerms(toChain: EVMBridgeChain, recipient: Address) {
+  return {
+    sourceDomain: SOLANA_CCTP_DOMAIN,
+    destinationDomain: CCTP_DOMAIN_IDS[toChain],
+    burnToken: solanaPubkeyToBytes32(SOLANA_USDC_MINT),
+    sender: solanaPubkeyToBytes32(SOLANA_TOKEN_MESSENGER),
+    mintRecipient: recipient,
+  };
+}
+
+/**
+ * Resume a Solana→EVM mint from the frozen `error.mintRecovery` of an earlier
+ * MINT_SUBMISSION_UNKNOWN / MINT_UNCONFIRMED failure. Re-validates the
+ * attested bytes against the recovery's chain and recipient, then resolves a
+ * retained `mintTxHash` BEFORE any new write: a successful receipt (with the
+ * nonce consumed) returns the result; a pending or unreadable one throws
+ * MINT_UNCONFIRMED again without submitting; only a reverted one (or no
+ * retained hash) proceeds to the usedNonces check and a new receiveMessage.
+ */
+export async function resumeSolanaToEVM(
+  walletClient: WalletClient,
+  recovery: SolanaMintRecovery,
+  options: { evmRpcUrl?: string } = {},
+): Promise<SolanaToEVMResult> {
+  const startMs = Date.now();
+  if (!walletClient.account) {
+    throw new SolanaBridgeError('NO_WALLET_CLIENT', 'WalletClient must have an account attached.');
+  }
+  const toChain = recovery?.toChain;
+  if (!toChain || !Object.prototype.hasOwnProperty.call(MESSAGE_TRANSMITTER_V2_MAP, toChain)) {
+    throw new SolanaBridgeError('INVALID_RECIPIENT', `Unsupported destination chain ${String(toChain)}.`);
+  }
+  if (typeof recovery.attestation !== 'string' || !/^0x[0-9a-fA-F]+$/.test(recovery.attestation)) {
+    throw new SolanaBridgeError('ATTESTATION_ERROR', 'mintRecovery.attestation is not hex.');
+  }
+  if (recovery.mintTxHash !== undefined && !/^0x[0-9a-fA-F]{64}$/.test(recovery.mintTxHash)) {
+    throw new SolanaBridgeError('ATTESTATION_ERROR', 'mintRecovery.mintTxHash is not a transaction hash.');
+  }
+  let decoded;
+  try {
+    decoded = assertBurnTerms(recovery.attestedMessage, solanaToEvmTerms(toChain, recovery.recipient));
+  } catch (err) {
+    throw new SolanaBridgeError('ATTESTATION_ERROR', `mintRecovery message does not match its chain/recipient: ${(err as Error).message}.`);
+  }
+  if (typeof recovery.nonce !== 'string' || decoded.nonce.toLowerCase() !== recovery.nonce.toLowerCase()) {
+    throw new SolanaBridgeError('ATTESTATION_ERROR', 'mintRecovery.nonce does not match the attested message.');
+  }
+  return mintAttested(walletClient, {
+    toChain,
+    evmRpcUrl: options.evmRpcUrl,
+    recipient: recovery.recipient,
+    attested: { message: recovery.attestedMessage, attestation: recovery.attestation },
+    decoded,
+    startMs,
+    priorMintTxHash: recovery.mintTxHash,
+  });
+}
+
+/** Mint an attested Solana→EVM message, reconciling any retained mint first. */
+async function mintAttested(
+  walletClient: WalletClient,
+  ctx: {
+    toChain: EVMBridgeChain;
+    evmRpcUrl?: string;
+    recipient: Address;
+    attested: { message: Hex; attestation: Hex };
+    decoded: ReturnType<typeof assertBurnTerms>;
+    startMs: number;
+    priorMintTxHash?: Hash;
+  },
+): Promise<SolanaToEVMResult> {
+  const { toChain, evmRpcUrl, recipient, attested, decoded, startMs } = ctx;
+  const account = walletClient.account!;
   const mintedAmount = decoded.amount - decoded.feeExecuted;
 
   // Submit receiveMessage on EVM
@@ -612,18 +684,42 @@ export async function receiveFromSolanaOnEVM(
     e.mintRecovery = Object.freeze({ ...recovery, ...(mintTxHash ? { mintTxHash } : {}) });
     return e;
   };
+  const readUsedNonce = async (): Promise<bigint> => {
+    let used: bigint;
+    try {
+      used = await transmitter.read.usedNonces([decoded.nonce]) as bigint;
+    } catch (err) {
+      throw fail('MINT_FAILED', `could not read usedNonces(${decoded.nonce}) on ${toChain}: ${err instanceof Error ? err.message : String(err)}. Nothing was submitted; retry later.`, ctx.priorMintTxHash);
+    }
+    if (typeof used !== 'bigint') {
+      throw fail('MINT_FAILED', `usedNonces(${decoded.nonce}) returned an invalid value; nothing was submitted.`, ctx.priorMintTxHash);
+    }
+    return used;
+  };
+
+  // A retained mint is resolved before any new write.
+  if (ctx.priorMintTxHash) {
+    const prior = ctx.priorMintTxHash;
+    let priorReceipt;
+    try {
+      priorReceipt = await destPublicClient.getTransactionReceipt({ hash: prior });
+    } catch (err) {
+      throw fail('MINT_UNCONFIRMED', `earlier receiveMessage ${prior} on ${toChain} is not yet confirmed (${err instanceof Error ? err.message : String(err)}); nothing was resubmitted.`, prior);
+    }
+    if (priorReceipt?.status === 'success') {
+      if (await readUsedNonce() === 0n) {
+        throw fail('MINT_UNCONFIRMED', `earlier tx ${prior} succeeded but nonce ${decoded.nonce} is not consumed on ${toChain}; reconcile manually, nothing was resubmitted.`, prior);
+      }
+      return { mintTxHash: prior, amount: mintedAmount, toChain, recipient, elapsedMs: Date.now() - startMs };
+    }
+    if (priorReceipt?.status !== 'reverted') {
+      throw fail('MINT_UNCONFIRMED', `earlier receiveMessage ${prior} on ${toChain} has no definite status; nothing was resubmitted.`, prior);
+    }
+    // Reverted: fall through to the nonce check before minting again.
+  }
 
   // Reconcile the nonce first: a used nonce means the mint already happened.
-  let used: bigint;
-  try {
-    used = await transmitter.read.usedNonces([decoded.nonce]) as bigint;
-  } catch (err) {
-    throw fail('MINT_FAILED', `could not read usedNonces(${decoded.nonce}) on ${toChain}: ${err instanceof Error ? err.message : String(err)}. Nothing was submitted; retry later.`);
-  }
-  if (typeof used !== 'bigint') {
-    throw fail('MINT_FAILED', `usedNonces(${decoded.nonce}) returned an invalid value; nothing was submitted.`);
-  }
-  if (used !== 0n) {
+  if (await readUsedNonce() !== 0n) {
     throw fail('MINT_ALREADY_RECEIVED', `CCTP nonce ${decoded.nonce} was already received on ${toChain}; do not resubmit.`);
   }
 
@@ -645,7 +741,7 @@ export async function receiveFromSolanaOnEVM(
   try {
     mintReceipt = await destPublicClient.waitForTransactionReceipt({ hash: mintTxHash });
   } catch (err: unknown) {
-    throw fail('MINT_UNCONFIRMED', `receiveMessage submitted on ${toChain} (tx: ${mintTxHash}) but its receipt could not be read: ${err instanceof Error ? err.message : String(err)}. Reconcile this tx; do not resubmit blindly.`, mintTxHash);
+    throw fail('MINT_UNCONFIRMED', `receiveMessage submitted on ${toChain} (tx: ${mintTxHash}) but its receipt could not be read: ${err instanceof Error ? err.message : String(err)}. Resume with resumeSolanaToEVM(error.mintRecovery); do not resubmit blindly.`, mintTxHash);
   }
   if (mintReceipt.status !== 'success') {
     throw fail('MINT_FAILED', `receiveMessage reverted on ${toChain} (tx: ${mintTxHash}).`, mintTxHash);

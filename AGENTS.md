@@ -30,8 +30,9 @@
 - Persist and reconcile in-flight intents outside these in-memory clients
   before restarting a payment service or replacing its configuration.
 - Examples default to testnet, require `AGENT_EXAMPLE_LIVE_ACK` for mainnet,
-  verify the advertised on-chain policy before spending, and never run on
-  import (`test/examples-safety.test.ts`).
+  build wallets with a deployment identity (`exampleDeploymentIdentity()`;
+  the unsafe opt-out is refused), verify the advertised on-chain policy
+  before spending, and never run on import (`test/examples-safety.test.ts`).
 - Breaking security changes take a new major version; never republish a
   vulnerable version number.
 
