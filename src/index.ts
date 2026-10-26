@@ -650,6 +650,7 @@ export type {
 export {
   SpendingPolicy,
   debitAmountForPolicy,
+  snapshotPaymentIntent,
 } from './policy/SpendingPolicy.js';
 export type {
   SpendingPolicyConfig,
@@ -663,6 +664,10 @@ export type {
   AuditStatus,
   AuditEntry,
   DraftEntry,
+  SubmissionIdentity,
+  ReconciliationClient,
+  ReconcileResult,
+  ReconcileStatus,
 } from './policy/SpendingPolicy.js';
 
 // ─── UptoBillingPolicy — x402 usage-based settlement accounting ─────────────

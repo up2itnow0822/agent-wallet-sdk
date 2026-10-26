@@ -77,6 +77,36 @@ export interface SpendReservation {
   createdAt: string;
   idempotencyKey?: string;
   draftId?: string;
+  /** Present once locked: the submission identity reconciliation must match. */
+  submission?: SubmissionIdentity;
+}
+
+/**
+ * Immutable identity of the on-chain submission(s) behind a locked reservation.
+ * Recorded at lock time; reconciliation can only use these exact hashes.
+ */
+export interface SubmissionIdentity {
+  chainId?: number;
+  txHashes: readonly string[];
+  /** Optional call binding checked against the fetched transaction. */
+  from?: string;
+  to?: string;
+  data?: string;
+  value?: bigint;
+}
+
+/** Minimal read client used to reconcile a locked reservation on-chain (viem PublicClient compatible). */
+export interface ReconciliationClient {
+  getChainId(): Promise<number>;
+  getTransactionReceipt(args: { hash: `0x${string}` }): Promise<{ transactionHash?: string; status?: string | number } | null | undefined>;
+  getTransaction?(args: { hash: `0x${string}` }): Promise<{ hash?: string; from?: string; to?: string | null; input?: string; value?: bigint } | null | undefined>;
+}
+
+export type ReconcileStatus = 'released' | 'committed' | 'unresolved';
+
+export interface ReconcileResult {
+  status: ReconcileStatus;
+  reason?: string;
 }
 
 /** A queued draft transaction awaiting approval. */
@@ -149,6 +179,46 @@ function nextId(prefix: string): string {
   return `${prefix}-${Date.now()}-${++_idCounter}`;
 }
 
+const MAX_INTENT_STRING = 2048;
+
+function readOptionalString(value: unknown, label: string): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'string') throw new Error(`${label} must be a string`);
+  if (value.length > MAX_INTENT_STRING) throw new Error(`${label} is too long`);
+  return value;
+}
+
+/**
+ * Read every PaymentIntent field exactly once into a frozen plain object.
+ * Getters, Proxies and prototype tricks cannot make later checks, records or
+ * results see different terms from the ones validated (TOCTOU, CWE-367).
+ */
+export function snapshotPaymentIntent(payment: PaymentIntent): Readonly<PaymentIntent> {
+  if (payment === null || typeof payment !== 'object') {
+    throw new Error('payment intent must be an object');
+  }
+  const merchant = payment.merchant;
+  const amount = payment.amount;
+  const timestamp = payment.timestamp;
+  const description = payment.description;
+  const idempotencyKey = payment.idempotencyKey;
+
+  if (typeof merchant !== 'string' || merchant.length === 0 || merchant.length > MAX_INTENT_STRING) {
+    throw new Error('merchant must be a non-empty string');
+  }
+  if (typeof amount !== 'number') throw new Error('amount must be a number of base units');
+  toSafeIntegerAmount(amount, 'amount');
+
+  const snapshot: PaymentIntent = { merchant, amount };
+  const ts = readOptionalString(timestamp, 'timestamp');
+  const desc = readOptionalString(description, 'description');
+  const key = readOptionalString(idempotencyKey, 'idempotencyKey');
+  if (ts !== undefined) snapshot.timestamp = ts;
+  if (desc !== undefined) snapshot.description = desc;
+  if (key !== undefined && key !== '') snapshot.idempotencyKey = key;
+  return Object.freeze(snapshot);
+}
+
 function paymentFingerprint(payment: PaymentIntent): string {
   return JSON.stringify([payment.merchant.toLowerCase(), payment.amount, payment.description ?? '']);
 }
@@ -183,6 +253,31 @@ export function debitAmountForPolicy(principal: number, includeProtocolFee: bool
     feeAmount: Number(feeExact),
     reservedAmount: Number(reservedExact),
   };
+}
+
+function freezeSubmission(submission: SubmissionIdentity): SubmissionIdentity {
+  const hashes = Array.from(submission.txHashes ?? []).filter(isEvmTxHash);
+  const chainId = submission.chainId;
+  const frozen: SubmissionIdentity = {
+    txHashes: Object.freeze([...new Set(hashes.map((h) => h.toLowerCase()))]),
+  };
+  if (typeof chainId === 'number' && Number.isSafeInteger(chainId) && chainId > 0) frozen.chainId = chainId;
+  if (typeof submission.from === 'string') frozen.from = submission.from.toLowerCase();
+  if (typeof submission.to === 'string') frozen.to = submission.to.toLowerCase();
+  if (typeof submission.data === 'string') frozen.data = submission.data.toLowerCase();
+  if (typeof submission.value === 'bigint') frozen.value = submission.value;
+  return Object.freeze(frozen);
+}
+
+function callMatches(
+  expected: SubmissionIdentity,
+  tx: { from?: string; to?: string | null; input?: string; value?: bigint },
+): boolean {
+  if (expected.from && (tx.from ?? '').toLowerCase() !== expected.from) return false;
+  if (expected.to && (tx.to ?? '').toLowerCase() !== expected.to) return false;
+  if (expected.data && (tx.input ?? '').toLowerCase() !== expected.data) return false;
+  if (expected.value !== undefined && tx.value !== expected.value) return false;
+  return true;
 }
 
 // ─── SpendingPolicy ───────────────────────────────────────────────────────────
@@ -222,12 +317,15 @@ export class SpendingPolicy {
    * can keep the hold instead of consuming the cap immediately.
    */
   async check(payment: PaymentIntent): Promise<PolicyResult> {
+    let snapshot: Readonly<PaymentIntent> | undefined;
     try {
-      return await this._check(payment);
+      snapshot = snapshotPaymentIntent(payment);
+      return await this._check(snapshot);
     } catch (err: unknown) {
       const reason = `Policy engine error (fail-closed): ${err instanceof Error ? err.message : String(err)}`;
       const result: PolicyResult = { status: 'rejected', reason };
-      await this.log(payment, result).catch(() => {/* ignore log errors in fail-closed path */});
+      if (snapshot) await this.log(snapshot, result).catch(() => {/* ignore log errors in fail-closed path */});
+      else this.logRejectedUnreadable(reason);
       return result;
     }
   }
@@ -239,14 +337,17 @@ export class SpendingPolicy {
    * observes the same intent, including when it is locked or committed.
    */
   async reserve(payment: PaymentIntent): Promise<ReserveResult> {
+    let snapshot: Readonly<PaymentIntent> | undefined;
     try {
-      const result = this.reserveSync(payment);
-      await this.logReserve(payment, result);
+      snapshot = snapshotPaymentIntent(payment);
+      const result = this.reserveSync(snapshot);
+      await this.logReserve(snapshot, result);
       return result;
     } catch (err: unknown) {
       const reason = `Policy engine error (fail-closed): ${err instanceof Error ? err.message : String(err)}`;
       const result: ReserveResult = { status: 'rejected', reason };
-      await this.log(payment, { status: 'rejected', reason }).catch(() => undefined);
+      if (snapshot) await this.log(snapshot, { status: 'rejected', reason }).catch(() => undefined);
+      else this.logRejectedUnreadable(reason);
       return result;
     }
   }
@@ -321,19 +422,13 @@ export class SpendingPolicy {
 
   /**
    * Return held capacity after a definite not-charged outcome.
-   * Locked (hold-unknown) reservations refuse release — a timer never unlocks.
+   * Locked (hold-unknown) reservations refuse release — a timer never unlocks
+   * them and no caller flag can. Use reconcileLocked() with on-chain evidence.
    * Idempotent: a second observer releases nothing.
    */
-  release(
-    reservation: SpendReservation | string,
-    options: { reconciled?: boolean } = {},
-  ): boolean {
+  release(reservation: SpendReservation | string): boolean {
     const record = this.resolveReservation(reservation);
-    if (!record) return false;
-    const canRelease =
-      record.status === 'held' ||
-      (record.status === 'locked' && options.reconciled === true);
-    if (!canRelease) {
+    if (!record || record.status !== 'held') {
       return false;
     }
     record.status = 'released';
@@ -349,11 +444,22 @@ export class SpendingPolicy {
    * Capacity stays occupied until a confirmed settlement commits it or an
    * explicit reconciled release proves no charge. A timer never unlocks it.
    */
-  lock(reservation: SpendReservation | string): boolean {
+  lock(reservation: SpendReservation | string, submission?: SubmissionIdentity): boolean {
     const record = this.resolveReservation(reservation);
-    if (!record || record.status !== 'held') {
+    if (!record) return false;
+    if (record.status === 'locked') {
+      // A later observation may add the hash of the SAME submission only when
+      // none was known; it can never replace recorded identity.
+      if (submission && (!record.submission || record.submission.txHashes.length === 0)) {
+        record.submission = freezeSubmission(submission);
+        return true;
+      }
       return false;
     }
+    if (record.status !== 'held') {
+      return false;
+    }
+    record.submission = freezeSubmission(submission ?? { txHashes: [] });
     record.status = 'locked';
     this.logSync(record.payment, {
       status: 'locked',
@@ -374,18 +480,100 @@ export class SpendingPolicy {
       return this.commit(reservation);
     }
     if (outcome.status === 'released') {
-      const record = this.resolveReservation(reservation);
-      return this.release(reservation, {
-        reconciled: record?.status === 'locked' && outcome.retrySafe &&
-          outcome.txHashes.length > 0 && outcome.txHashes.every(isEvmTxHash),
-      });
+      // Only a held (never-submitted-ambiguously) reservation may be released
+      // by a classified outcome. A locked one needs reconcileLocked().
+      return this.release(reservation);
     }
-    return this.lock(reservation);
+    return this.lock(reservation, {
+      chainId: outcome.chainId,
+      txHashes: outcome.txHashes.filter(isEvmTxHash),
+    });
+  }
+
+  /**
+   * Reconcile a locked reservation against the chain using ONLY the submission
+   * identity recorded when it was locked. All recorded hashes must be found on
+   * the recorded chain: every receipt reverted → released; any success →
+   * committed; anything missing or ambiguous → unresolved (stays locked).
+   */
+  async reconcileLocked(
+    reservation: SpendReservation | string,
+    client: ReconciliationClient,
+  ): Promise<ReconcileResult> {
+    const record = this.resolveReservation(reservation);
+    if (!record || record.status !== 'locked') {
+      return { status: 'unresolved', reason: 'reservation is not locked' };
+    }
+    const submission = record.submission;
+    if (!submission || submission.txHashes.length === 0) {
+      return {
+        status: 'unresolved',
+        reason: 'no submission hash was recorded; the hold stays locked (commit it to let it age out)',
+      };
+    }
+    if (submission.chainId == null) {
+      return { status: 'unresolved', reason: 'submission chain was not recorded' };
+    }
+    try {
+      const chainId = await client.getChainId();
+      if (chainId !== submission.chainId) {
+        return { status: 'unresolved', reason: `client chain ${chainId} differs from submission chain ${submission.chainId}` };
+      }
+      let reverted = 0;
+      for (const hash of submission.txHashes) {
+        const receipt = await client.getTransactionReceipt({ hash: hash as `0x${string}` });
+        if (!receipt || typeof receipt.transactionHash !== 'string' ||
+            receipt.transactionHash.toLowerCase() !== hash.toLowerCase()) {
+          return { status: 'unresolved', reason: `no receipt bound to ${hash}` };
+        }
+        if (submission.from || submission.to || submission.data || submission.value !== undefined) {
+          if (!client.getTransaction) {
+            return { status: 'unresolved', reason: 'call binding requires getTransaction' };
+          }
+          const tx = await client.getTransaction({ hash: hash as `0x${string}` });
+          if (!tx || !callMatches(submission, tx)) {
+            return { status: 'unresolved', reason: `transaction ${hash} does not match the recorded call` };
+          }
+        }
+        const st = receipt.status;
+        if (st === 'success' || st === 1 || st === '0x1') {
+          // Re-check status after awaits: commit only from a still-locked record.
+          if (record.status !== 'locked') return { status: 'unresolved', reason: 'reservation changed' };
+          this.commit(record);
+          return { status: 'committed' };
+        }
+        if (st === 'reverted' || st === 0 || st === '0x0') reverted += 1;
+        else return { status: 'unresolved', reason: `unknown receipt status for ${hash}` };
+      }
+      if (reverted === submission.txHashes.length && record.status === 'locked') {
+        record.status = 'released';
+        this.logSync(record.payment, {
+          status: 'released',
+          reservationId: record.reservationId,
+          reason: 'reconciled: every recorded submission reverted on-chain',
+        });
+        return { status: 'released' };
+      }
+      return { status: 'unresolved', reason: 'reservation changed during reconciliation' };
+    } catch (err) {
+      return { status: 'unresolved', reason: `reconciliation error: ${(err as Error).message}` };
+    }
   }
 
   getReservation(reservationId: string): SpendReservation | undefined {
     const record = this.reservations.get(reservationId);
     return record ? { ...record, payment: { ...record.payment } } : undefined;
+  }
+
+  private logRejectedUnreadable(reason: string): void {
+    this.auditLog.push({
+      id: nextId('audit'),
+      timestamp: new Date().toISOString(),
+      merchant: '<unreadable>',
+      amount: 0,
+      status: 'rejected',
+      reason,
+    });
   }
 
   /** Held + locked reserved amounts (not yet committed or released). */
@@ -554,7 +742,7 @@ export class SpendingPolicy {
 
     const reservation: SpendReservation = {
       reservationId: nextId('resv'),
-      payment: { ...payment },
+      payment, // already a frozen snapshot
       principalAmount: amounts.principalAmount,
       feeAmount: amounts.feeAmount,
       reservedAmount: amounts.reservedAmount,
