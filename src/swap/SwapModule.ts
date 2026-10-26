@@ -28,6 +28,7 @@ import {
   PROTOCOL_FEE_COLLECTOR,
   DEFAULT_SLIPPAGE_BPS,
   UNISWAP_V3_ADDRESSES,
+  SWAP_CHAIN_IDS,
 } from './types.js';
 
 const FEE_TIERS: UniswapFeeTier[] = [100, 500, 3000, 10000];
@@ -191,6 +192,23 @@ export class SwapModule {
     return account;
   }
 
+  /** Require both clients to be bound to the configured swap chain. */
+  private assertChainBinding(): void {
+    const expected = SWAP_CHAIN_IDS[this.config.chain];
+    if (expected === undefined) throw new Error(`SwapModule: unsupported chain ${String(this.config.chain)}`);
+    const walletChain = this.walletClient.chain?.id;
+    const readChain = this.publicClient.chain?.id;
+    if (walletChain === undefined) {
+      throw new Error('SwapModule: walletClient must be bound to a chain');
+    }
+    if (walletChain !== expected) {
+      throw new Error(`SwapModule: walletClient chain ${walletChain} differs from ${this.config.chain} (${expected})`);
+    }
+    if (readChain !== undefined && readChain !== expected) {
+      throw new Error(`SwapModule: publicClient chain ${readChain} differs from ${this.config.chain} (${expected})`);
+    }
+  }
+
   async swap(
     tokenIn: Address,
     tokenOut: Address,
@@ -200,14 +218,39 @@ export class SwapModule {
     validateAmount(amountIn, 'amountIn');
     const slippageBps = options.slippageBps ?? DEFAULT_SLIPPAGE_BPS;
     validateSlippage(slippageBps);
+    if (options.minAmountOut === undefined) {
+      throw new Error('SwapModule: minAmountOut is required — supply an absolute output floor from a source independent of the swap RPC');
+    }
+    validateAmount(options.minAmountOut, 'minAmountOut');
+    if (options.referenceAmountOut !== undefined) validateAmount(options.referenceAmountOut, 'referenceAmountOut');
+    const maxDeviationBps = options.maxQuoteDeviationBps ?? 100;
+    if (!Number.isSafeInteger(maxDeviationBps) || maxDeviationBps < 0 || maxDeviationBps > 10_000) {
+      throw new Error('SwapModule: maxQuoteDeviationBps must be an integer between 0 and 10000');
+    }
     const deadlineSecs = options.deadlineSecs ?? 300;
     calcDeadline(deadlineSecs); // Validate before an approval can be signed.
     if (this.config.feeBps !== 0) {
       throw new Error('SwapModule: fee-bearing swaps are disabled until a reviewed atomic fee route exists. Configure feeBps: 0 for fee-free EOA execution.');
     }
     const account = this.executionAccount();
+    this.assertChainBinding();
 
-    const quote = await this.getQuote(tokenIn, tokenOut, amountIn, { slippageBps, feeTiers: options.feeTiers });
+    const rpcQuote = await this.getQuote(tokenIn, tokenOut, amountIn, { slippageBps, feeTiers: options.feeTiers });
+    if (rpcQuote.amountOut < options.minAmountOut) {
+      throw new Error(`SwapModule: quoted output ${rpcQuote.amountOut} is below the caller's minAmountOut ${options.minAmountOut}; not approving or swapping`);
+    }
+    if (options.referenceAmountOut !== undefined) {
+      const ref = options.referenceAmountOut;
+      const diff = rpcQuote.amountOut > ref ? rpcQuote.amountOut - ref : ref - rpcQuote.amountOut;
+      if (diff * 10_000n > ref * BigInt(maxDeviationBps)) {
+        throw new Error(`SwapModule: quote ${rpcQuote.amountOut} deviates from reference ${ref} by more than ${maxDeviationBps} bps`);
+      }
+    }
+    // The signed minimum is never below the caller's independent floor.
+    const quote = {
+      ...rpcQuote,
+      amountOutMinimum: rpcQuote.amountOutMinimum > options.minAmountOut ? rpcQuote.amountOutMinimum : options.minAmountOut,
+    };
 
     if (quote.gasEstimate > 2000000n) {
       console.warn(`SwapModule: High gas estimate (${quote.gasEstimate}). Pool may be illiquid.`);
