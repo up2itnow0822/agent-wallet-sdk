@@ -11,8 +11,9 @@
 #   1. A non-dismissed chatgpt-codex-connector[bot] (user.type == Bot) review
 #      exists with commit_id exactly equal to the 40-character head SHA,
 #      submitted after the PR's most recent base change — a retarget OR the
-#      base branch moving to its current SHA (read from the repository
-#      activity log; unknown => fail closed); or, for a
+#      base branch moving to its current tip (tip read from the branch, time
+#      from the repository activity log; unknown => fail closed with an
+#      explicit "Base change time unavailable" result); or, for a
 #      clean pass (Codex submits no review when it has no findings), the
 #      Codex bot's own review-summary comment reports
 #      `Code Review | Completed | <full 40-char head sha>` and was updated
@@ -273,10 +274,33 @@ jobs:
             // from the repository activity log. Evidence must be newer than
             // this, so every base SHA change invalidates earlier review
             // evidence. If the move cannot be found, fail closed with "now".
-            async function baseShaSinceMs(pr) {
-              const baseSha = fullSha(pr.base && pr.base.sha);
+            // The CURRENT tip of the base branch. pr.base.sha can lag behind
+            // the branch until the PR is synchronized, so read the branch.
+            async function baseTipSha(pr) {
               const baseRef = pr.base && pr.base.ref;
-              if (!baseSha || !baseRef) return Date.now();
+              if (!baseRef) return '';
+              try {
+                const { data } = await github.rest.repos.getBranch({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  branch: baseRef,
+                });
+                return fullSha(data && data.commit && data.commit.sha);
+              } catch (err) {
+                core.warning(`base branch lookup failed (${err.message}); failing closed`);
+                return '';
+              }
+            }
+
+            // Server time at which the base branch moved to its CURRENT tip,
+            // from the repository activity log. Evidence must be newer than
+            // this, so every base move invalidates earlier review evidence.
+            // Unknown => Infinity: a stable, fail-closed value (no evidence
+            // can qualify) that keeps snapshots comparable between reads.
+            async function baseShaSinceMs(pr) {
+              const baseSha = await baseTipSha(pr);
+              const baseRef = pr.base && pr.base.ref;
+              if (!baseSha || !baseRef) return Number.POSITIVE_INFINITY;
               try {
                 const { data } = await github.request('GET /repos/{owner}/{repo}/activity', {
                   owner: context.repo.owner,
@@ -289,10 +313,10 @@ jobs:
                   .map(a => Date.parse(a.timestamp))
                   .filter(Number.isFinite)
                   .sort((x, y) => y - x)[0];
-                return hit === undefined ? Date.now() : hit;
+                return hit === undefined ? Number.POSITIVE_INFINITY : hit;
               } catch (err) {
                 core.warning(`base activity lookup failed (${err.message}); failing closed`);
-                return Date.now();
+                return Number.POSITIVE_INFINITY;
               }
             }
 
@@ -384,7 +408,7 @@ jobs:
                 pull_number: prNumber,
               });
               const { baseChangedMs } = await timelineFacts(prNumber, pr);
-              return `${fullSha(pr.head.sha)}|${pr.base.ref}|${fullSha(pr.base.sha)}|${baseChangedMs}`;
+              return `${fullSha(pr.head.sha)}|${pr.base.ref}|${await baseTipSha(pr)}|${baseChangedMs}`;
             }
 
             async function evaluate(prNumber) {
@@ -405,6 +429,15 @@ jobs:
               const labels = (pr.labels || []).map(l => l.name);
 
               const { baseChangedMs, lastWaiverEvent } = await timelineFacts(prNumber, pr);
+              if (!Number.isFinite(baseChangedMs)) {
+                return {
+                  prNumber, headSha,
+                  conclusion: 'failure',
+                  title: 'Base change time unavailable',
+                  summary: 'Could not establish when the base branch reached its current tip ' +
+                    '(branch or activity API unavailable). Fail-closed: re-run once the API is reachable.',
+                };
+              }
               const waiverAfterBase =
                 lastWaiverEvent &&
                 lastWaiverEvent.event === 'labeled' &&

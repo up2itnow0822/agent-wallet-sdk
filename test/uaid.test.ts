@@ -245,3 +245,41 @@ describe('UAIDResolver cache bounds (finding 29)', () => {
     expect(r.cacheSize).toBe(0);
   });
 });
+
+describe('UAID review follow-ups (N2, N3, N8, cache config)', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('never returns broker metadata as part of a verified identity', async () => {
+    vi.stubGlobal('fetch', brokerReturning({
+      uaid: GOOD_UAID, protocol: 'erc8004', owner: OWNER,
+      agentURI: 'https://attacker.example/agent.json',
+      registrationFile: { services: [{ endpoint: 'https://attacker.example' }] },
+    }));
+    const lookup = vi.fn(async () => ({ owner: OWNER as `0x${string}`, agentWallet: WALLET as `0x${string}`, agentURI: 'data:onchain', blockNumber: 1n }));
+    const v = await new UAIDResolver({ onChainLookup: lookup }).verify(GOOD_UAID);
+    expect(v.verified).toBe(true);
+    expect(v.identity?.agentURI).toBe('data:onchain');
+    expect(v.identity?.registrationFile).toBeNull();
+  });
+
+  it('refuses to verify a zero agent wallet', async () => {
+    vi.stubGlobal('fetch', brokerReturning({ uaid: GOOD_UAID, protocol: 'erc8004' }));
+    const lookup = vi.fn(async () => ({ owner: OWNER as `0x${string}`, agentWallet: ('0x' + '0'.repeat(40)) as `0x${string}`, blockNumber: 1n }));
+    const v = await new UAIDResolver({ onChainLookup: lookup }).verify(GOOD_UAID);
+    expect(v.verified).toBe(false);
+    expect(v.error).toMatch(/zero address/);
+  });
+
+  it('builds UAIDs that name the identity registry, so they can verify', () => {
+    expect(new UAIDResolver().buildERC8004UAID(42n, 'base')).toBe(GOOD_UAID);
+  });
+
+  it('rejects UAIDs with duplicate fields', () => {
+    expect(UAIDResolver.parseUAID(`${GOOD_UAID};uid=43`)).toBeNull();
+  });
+
+  it('rejects NaN or negative cache settings', () => {
+    expect(() => new UAIDResolver({ cacheMaxEntries: Number.NaN })).toThrow();
+    expect(() => new UAIDResolver({ cacheTtlMs: -1 })).toThrow();
+  });
+});

@@ -63,13 +63,16 @@
 - Token transfers pin decimals (registry or caller `expectedDecimals`) and
   bind signer/read/requested chains; Solana signs only after the genesis-hash
   cluster check and uses `TransferChecked`. Amounts never truncate.
-- Every AgentAccountV2 write first passes `verifyAgentWallet`. Execution is
+- Every AgentAccountV2 write first passes `verifyAgentWallet`, which requires
+  a deployment identity (`deployment` or `expectedCodeHash`) unless the caller
+  explicitly sets `allowUnverifiedDeployment`. Execution is
   classified only from matching wallet events (`TransactionExecuted` /
   `TransactionQueued`) or, for `agentTransferToken`, a matching ERC-20
   `Transfer`; anything else is `unknown`.
 - `SpendingPolicy` snapshots intents once (`snapshotPaymentIntent`). A locked
-  reservation is released only by `reconcileLocked` against its recorded
-  submission identity; there is no caller override.
+  reservation is released only by `reconcileLocked` against the submission
+  identity and call binding recorded once at lock time; there is no caller
+  override and no later hash attachment.
 - CCTP: attestations are always bound to a known source message; burn terms
   are checked from the transmitter-emitted `MessageSent`; post-hash failures
   carry frozen recovery; `usedNonces` is checked before `receiveMessage`;

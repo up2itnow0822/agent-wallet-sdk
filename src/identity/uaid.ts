@@ -118,7 +118,7 @@ export interface UAIDResolverConfig {
    * Must read owner and agent wallet at one block from the given registry.
    */
   onChainLookup?: (params: { chain: SupportedChain; registry: Address; agentId: bigint }) =>
-    Promise<{ owner: Address; agentWallet: Address; blockNumber: bigint }>;
+    Promise<{ owner: Address; agentWallet: Address; agentURI?: string; blockNumber: bigint }>;
 }
 
 /** Result of UAIDResolver.verify(). */
@@ -276,9 +276,15 @@ export class UAIDResolver {
     this.brokerUrl = (config.brokerUrl ?? DEFAULT_BROKER_URL).replace(/\/+$/, '');
     this.apiKey = config.apiKey;
     this.timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-    this.cacheTtlMs = config.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
-    this.cacheMaxEntries = Math.max(0, Math.floor(config.cacheMaxEntries ?? DEFAULT_CACHE_MAX_ENTRIES));
-    this.maxResponseBytes = config.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
+    const nonNegative = (v: number | undefined, d: number, name: string) => {
+      const n = v ?? d;
+      if (!Number.isFinite(n) || n < 0) throw new Error(`UAIDResolver: ${name} must be a finite non-negative number`);
+      return n;
+    };
+    this.cacheTtlMs = nonNegative(config.cacheTtlMs, DEFAULT_CACHE_TTL_MS, 'cacheTtlMs');
+    this.cacheMaxEntries = Math.floor(nonNegative(config.cacheMaxEntries, DEFAULT_CACHE_MAX_ENTRIES, 'cacheMaxEntries'));
+    this.maxResponseBytes = nonNegative(config.maxResponseBytes, DEFAULT_MAX_RESPONSE_BYTES, 'maxResponseBytes');
+    this.timeoutMs = nonNegative(config.timeoutMs, DEFAULT_TIMEOUT_MS, 'timeoutMs');
     this.config = { ...config };
   }
 
@@ -423,8 +429,10 @@ export class UAIDResolver {
    * Useful when you already have an on-chain identity and want to work
    * with the universal format (e.g., for cross-chain discovery).
    */
-  erc8004ToUniversal(identity: AgentIdentity, chain: SupportedChain): UniversalAgentIdentity {
+  erc8004ToUniversal(identity: AgentIdentity, chain: SupportedChain, registryAddress?: Address): UniversalAgentIdentity {
     const chainId = EVM_CHAIN_IDS[chain];
+    const registry = registryAddress ?? KNOWN_REGISTRY_ADDRESSES[chain]?.identity;
+    if (!registry) throw new Error(`UAIDResolver: no ERC-8004 identity registry known for ${chain}`);
     return {
       agentId: identity.agentId.toString(),
       owner: identity.owner,
@@ -433,7 +441,7 @@ export class UAIDResolver {
       registrationFile: identity.registrationFile,
       protocol: 'erc8004',
       chain: `eip155:${chainId}`,
-      uaid: `uaid:aid:eip155:${chainId}:${identity.owner};uid=${identity.agentId};proto=erc8004`,
+      uaid: `uaid:aid:eip155:${chainId}:${registry};uid=${identity.agentId};proto=erc8004`,
     };
   }
 
@@ -443,9 +451,12 @@ export class UAIDResolver {
    * This creates the identifier — it does NOT register with the HOL registry.
    * Use registerERC8004Agent() to make the agent discoverable cross-chain.
    */
-  buildERC8004UAID(agentId: bigint, chain: SupportedChain, ownerAddress: Address): string {
+  buildERC8004UAID(agentId: bigint, chain: SupportedChain, registryAddress?: Address): string {
     const chainId = EVM_CHAIN_IDS[chain];
-    return `uaid:aid:eip155:${chainId}:${ownerAddress};uid=${agentId};proto=erc8004`;
+    const registry = registryAddress ?? KNOWN_REGISTRY_ADDRESSES[chain]?.identity;
+    if (!registry) throw new Error(`UAIDResolver: no ERC-8004 identity registry known for ${chain}`);
+    // The aid names the identity REGISTRY (as registerERC8004Agent and verify() expect).
+    return `uaid:aid:eip155:${chainId}:${registry};uid=${agentId};proto=erc8004`;
   }
 
   /**
@@ -538,7 +549,7 @@ export class UAIDResolver {
     if (!/^\d{1,78}$/.test(parsed.uid)) return unverified('ERC-8004 uid must be a decimal token id');
     const agentId = BigInt(parsed.uid);
 
-    let binding: { owner: Address; agentWallet: Address; blockNumber: bigint };
+    let binding: { owner: Address; agentWallet: Address; agentURI?: string; blockNumber: bigint };
     try {
       binding = this.config.onChainLookup
         ? await this.config.onChainLookup({ chain, registry, agentId })
@@ -548,6 +559,9 @@ export class UAIDResolver {
     }
     if (!isAddress(binding.owner, { strict: false }) || !isAddress(binding.agentWallet, { strict: false })) {
       return unverified('On-chain lookup returned invalid addresses');
+    }
+    if (/^0x0{40}$/i.test(binding.owner) || /^0x0{40}$/i.test(binding.agentWallet)) {
+      return unverified('On-chain owner or agent wallet is the zero address (unset); refusing to verify a payment address');
     }
     const brokerOwner = resolution.identity.owner;
     const brokerWallet = resolution.identity.paymentAddress;
@@ -559,10 +573,15 @@ export class UAIDResolver {
     }
     return {
       verified: true,
+      // Only on-chain values are returned as verified. Broker-supplied
+      // metadata (agentURI, registrationFile) is not carried over; resolve the
+      // registration file through ERC8004Client with your own trusted resolver.
       identity: Object.freeze({
         ...resolution.identity,
         owner: binding.owner,
         paymentAddress: binding.agentWallet,
+        agentURI: typeof binding.agentURI === 'string' ? binding.agentURI : '',
+        registrationFile: null,
         chain: `eip155:${m[1]}`,
       }),
       blockNumber: binding.blockNumber,
@@ -581,6 +600,9 @@ export class UAIDResolver {
     if (typeof uaid !== 'string' || uaid.length > MAX_UAID_LENGTH || !uaid.startsWith('uaid:')) return null;
 
     const parts = uaid.split(';');
+    for (const prefix of ['uaid:aid:', 'uid=', 'proto=', 'nativeId=']) {
+      if (parts.filter((p) => p.startsWith(prefix)).length > 1) return null; // ambiguous
+    }
     const aidPart = parts.find(p => p.startsWith('uaid:aid:'));
     const uidPart = parts.find(p => p.startsWith('uid='));
     const protoPart = parts.find(p => p.startsWith('proto='));

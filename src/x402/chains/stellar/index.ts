@@ -14,7 +14,7 @@
  *   configured network passphrase before any account load or submission.
  * - Every Horizon call has an end-to-end deadline and a response size cap.
  * - Automatic payment requires a fail-closed spending policy (per-payment cap,
- *   optional cumulative budget, recipient allowlist, approval callback) and a
+ *   mandatory cumulative budget, recipient allowlist, approval callback) and a
  *   reservation before the signer is invoked.
  * - A submission is "successful" only when Horizon returns the hash computed
  *   from the signed envelope, an explicit successful=true, and a confirmation
@@ -257,18 +257,28 @@ export class StellarX402Adapter {
    * Submit a signed Stellar transaction to the configured Horizon and confirm
    * it. Throws StellarSubmissionUnknownError when the outcome is ambiguous.
    */
-  async submitTransaction(signedXdr: string): Promise<StellarPaymentResult> {
-    const StellarSdk = await loadStellarSdk();
-    const networkConfig = STELLAR_NETWORK[this.network];
-    let expectedHash: string;
-    try {
-      const tx = StellarSdk.TransactionBuilder.fromXDR(signedXdr, networkConfig.networkPassphrase);
-      expectedHash = Buffer.from(tx.hash()).toString('hex').toLowerCase();
-      if (!STELLAR_TX_HASH.test(expectedHash)) throw new Error('unexpected transaction hash format');
-    } catch (err) {
-      throw new StellarPaymentPolicyError(`signed XDR is not a valid ${this.network} transaction: ${(err as Error).message}`);
+  async submitTransaction(
+    signedXdr: string,
+    options: {
+      /**
+       * Hash of the transaction that was policy-checked (signatures are not
+       * part of the hash). When set, a signer that altered the envelope's
+       * destination, amount or any other field is refused before broadcast.
+       */
+      expectedUnsignedHash?: string;
+      /** Called immediately before the POST (after all pre-broadcast checks). */
+      onBeforeBroadcast?: () => void;
+    } = {},
+  ): Promise<StellarPaymentResult> {
+    const expectedHash = await this.transactionHash(signedXdr, 'signed XDR');
+    if (options.expectedUnsignedHash !== undefined && options.expectedUnsignedHash.toLowerCase() !== expectedHash) {
+      throw new StellarPaymentPolicyError('signed transaction differs from the policy-checked transaction');
     }
+    // Verify every Horizon this submission will use BEFORE broadcasting, so no
+    // policy error can occur after the POST.
     await this.assertHorizonNetwork(this.horizonUrl);
+    await this.assertHorizonNetwork(this.confirmationHorizonUrl);
+    options.onBeforeBroadcast?.();
 
     let res;
     try {
@@ -305,9 +315,21 @@ export class StellarX402Adapter {
     return this.confirmOrUnknown(expectedHash, 'submission accepted but confirmation failed');
   }
 
+  /** Network-bound transaction hash (hex) of an XDR envelope; excludes signatures. */
+  async transactionHash(xdr: string, label = 'XDR'): Promise<string> {
+    const StellarSdk = await loadStellarSdk();
+    try {
+      const tx = StellarSdk.TransactionBuilder.fromXDR(xdr, STELLAR_NETWORK[this.network].networkPassphrase);
+      const hash = Buffer.from(tx.hash()).toString('hex').toLowerCase();
+      if (!STELLAR_TX_HASH.test(hash)) throw new Error('unexpected transaction hash format');
+      return hash;
+    } catch (err) {
+      throw new StellarPaymentPolicyError(`${label} is not a valid ${this.network} transaction: ${(err as Error).message}`);
+    }
+  }
+
   /** Read the transaction back and require it to be successful in a ledger. */
   private async confirm(expectedHash: string): Promise<StellarPaymentResult> {
-    await this.assertHorizonNetwork(this.confirmationHorizonUrl);
     const res = await boundedFetch(`${this.confirmationHorizonUrl}/transactions/${expectedHash}`, {
       headers: { Accept: 'application/json' },
     }, { timeoutMs: this.timeoutMs, maxBytes: STELLAR_HORIZON_MAX_BYTES, fetchImpl: this.fetchImpl });
@@ -319,8 +341,12 @@ export class StellarX402Adapter {
     if (typeof tx.ledger !== 'number' || !Number.isSafeInteger(tx.ledger) || tx.ledger <= 0) {
       throw new StellarSubmissionUnknownError(expectedHash, 'confirmation lacks a ledger');
     }
-    if (tx.successful !== true) {
+    if (tx.successful === false) {
+      // Included with a failed operation: the payment was not made.
       throw new StellarTransactionRejectedError(`Stellar transaction ${expectedHash} was included but failed`, expectedHash);
+    }
+    if (tx.successful !== true) {
+      throw new StellarSubmissionUnknownError(expectedHash, 'confirmation lacks an explicit successful flag');
     }
     return { hash: expectedHash, ledger: tx.ledger, successful: true, network: this.network };
   }
@@ -375,8 +401,8 @@ export interface StellarSpendPolicy {
   maxPerPayment: string;
   /** Allowed destination accounts. When non-empty, any other destination is refused. */
   allowedDestinations?: string[];
-  /** Cumulative budget shared across payments (recommended). */
-  budget?: StellarSpendBudget;
+  /** Cumulative budget shared across payments. Required. */
+  budget: StellarSpendBudget;
   /** Final approval hook; must resolve to true to proceed. */
   approve?: (details: { destination: string; amount: string; resource?: string; network: StellarNetwork }) => Promise<boolean> | boolean;
 }
@@ -467,6 +493,9 @@ export async function stellarX402Pay(params: {
   if (!policy || typeof policy !== 'object' || typeof policy.maxPerPayment !== 'string') {
     throw new StellarPaymentPolicyError('stellarX402Pay requires a spending policy with maxPerPayment');
   }
+  if (!(policy.budget instanceof StellarSpendBudget)) {
+    throw new StellarPaymentPolicyError('stellarX402Pay requires policy.budget (a StellarSpendBudget cumulative cap)');
+  }
   const perPaymentCap = stellarAmountToStroops(policy.maxPerPayment);
   const adapter = new StellarX402Adapter({ ...params.adapter, network });
 
@@ -493,7 +522,8 @@ export async function stellarX402Pay(params: {
     if (ok !== true) throw new StellarPaymentPolicyError('payment was not approved');
   }
 
-  const reservationId = policy.budget?.reserve(details.amount);
+  const budget = policy.budget;
+  const reservationId = budget.reserve(details.amount);
   let submitted = false;
   try {
     const xdr = await adapter.buildPaymentTransaction({
@@ -503,16 +533,22 @@ export async function stellarX402Pay(params: {
       resource: details.resource,
       network,
     });
+    const policyCheckedHash = await adapter.transactionHash(xdr, 'built XDR');
     const signedXdr = await params.sign(xdr);
-    submitted = true;
-    const result = await adapter.submitTransaction(signedXdr);
-    if (reservationId) policy.budget!.commit(reservationId, result.hash);
+    // submitTransaction refuses an altered envelope and verifies every Horizon
+    // before the POST; only after that does the payment count as submitted.
+    const result = await adapter.submitTransaction(signedXdr, {
+      expectedUnsignedHash: policyCheckedHash,
+      onBeforeBroadcast: () => { submitted = true; },
+    });
+    budget.commit(reservationId, result.hash);
     return result;
   } catch (err) {
-    if (reservationId) {
-      if (err instanceof StellarSubmissionUnknownError) policy.budget!.markUnknown(reservationId, err.expectedHash);
-      else if (!submitted || err instanceof StellarPaymentPolicyError || err instanceof StellarTransactionRejectedError) policy.budget!.release(reservationId);
-      else policy.budget!.markUnknown(reservationId);
+    if (!submitted || err instanceof StellarTransactionRejectedError) {
+      // Nothing was broadcast, or Horizon/ledger definitively rejected it.
+      budget.release(reservationId);
+    } else {
+      budget.markUnknown(reservationId, err instanceof StellarSubmissionUnknownError ? err.expectedHash : undefined);
     }
     throw err;
   }

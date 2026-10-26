@@ -531,7 +531,15 @@ export class X402Client {
     }
     // Snapshot and serialize all merchant fields before policy callbacks or
     // transfers. The proof never reads a merchant/callback-owned object again.
-    const paymentRequired = JSON.parse(JSON.stringify(parsedPaymentRequired)) as X402PaymentRequired;
+    let paymentRequired: X402PaymentRequired;
+    try {
+      paymentRequired = JSON.parse(JSON.stringify(parsedPaymentRequired)) as X402PaymentRequired;
+    } catch (err) {
+      // Pathologically deep challenges overflow re-serialization: never pay
+      // from them. Other serialization errors keep their existing failure.
+      if (err instanceof RangeError) return response;
+      throw err;
+    }
 
     // Bind against the final response URL (after redirects). Refuse auto-pay when
     // fetch followed a cross-origin redirect — otherwise a 402 on the redirected

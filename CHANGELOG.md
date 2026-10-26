@@ -5,13 +5,16 @@ all repaired with regression tests). See `docs/security-remediation.md`.
 
 ### Breaking
 - `agentTransferToken()` confirms and returns `{ status: 'executed' | 'queued', txHash, pendingTxId? }`; new `submitAgentTransferToken()` returns the bare submission hash.
-- Agent/owner writes require a verified AgentAccountV2 deployment (`verifyAgentWallet`); `agentExecute()` needs a matching wallet event to report executed.
-- `SpendingPolicy.release()` no longer accepts `{ reconciled }`; use `lock(reservation, submission)` + `reconcileLocked()`.
+- Agent/owner writes require a deployment identity (`deployment` or `expectedCodeHash`, or explicit unsafe `allowUnverifiedDeployment`) verified by `verifyAgentWallet`; `agentExecute()` needs a matching wallet event to report executed; `createWallet()` returns a frozen handle.
+- `batchAgentTransfer()` returns classified `AgentTransferResult[]`.
+- `sendToken()`/`sendNative()` require a chain-bound wallet client.
+- `SpendingPolicy.release()` no longer accepts `{ reconciled }`; record the submission and call binding at lock time (`lock()` / `applyOutcome(r, outcome, call)`) and use `reconcileLocked()`.
 - `sendToken()` requires `expectedDecimals` for string amounts of unlisted tokens; amounts never truncate.
 - `SolanaWallet` binds to a cluster by genesis hash (default `mainnet-beta`); `sendSplToken()` uses `TransferChecked` and pinned decimals.
 - `SwapModule.swap()` requires `minAmountOut`.
 - `UAIDResolver.verify()` verifies ERC-8004 identities on-chain; broker claims move to `brokerAttested`.
-- `stellarX402Pay()` requires a `policy`.
+- `stellarX402Pay()` requires a `policy` with a `StellarSpendBudget`.
+- `buildERC8004UAID()` / `erc8004ToUniversal()` emit the identity registry in the `aid`.
 - Unknown `CHAIN_NAME`/`CHAIN_ID` values throw instead of using Base mainnet.
 - x402 challenges must bind the exact resource including its query.
 

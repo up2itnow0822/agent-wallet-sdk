@@ -28,7 +28,7 @@ signing and network boundaries.
 | 16 | Mutable action tags with `checks:write` | All actions pinned to commit SHAs; Dependabot proposes pin updates. |
 | 17 | Ignored Horizon override | Configured Horizon used everywhere and must report the configured network passphrase; https only. |
 | 18 | Unbounded UAID bodies | Broker requests use one deadline over the body and a size cap; error bodies truncated. |
-| 19 | review-gate not bound to base SHA | Evidence must post-date the base branch moving to its current SHA (activity log, unknown ⇒ fail closed); snapshot includes base SHA; pushes to `main` re-evaluate. |
+| 19 | review-gate not bound to base SHA | Evidence must post-date the base branch moving to its current tip (tip from the branch API, time from the activity log; unknown ⇒ explicit fail-closed result); snapshot includes the tip; pushes to `main` re-evaluate. |
 | 20 | Examples spend real funds | Examples default to Base Sepolia, need `AGENT_EXAMPLE_LIVE_ACK` for mainnet, verify the installed policy, and never auto-run on import. |
 | 21 | Unbounded Horizon I/O | Deadlines and size caps; ambiguous submission ⇒ `StellarSubmissionUnknownError` with the expected hash. |
 | 22 | Unchecked Solana→EVM recipient | Source domain, message hash, destination, burn token, remote sender and mint recipient validated; returned values derived from attested bytes. |
@@ -45,15 +45,25 @@ signing and network boundaries.
 - `agentTransferToken()` now resolves to `{ status, txHash, pendingTxId? }` and
   throws `AgentExecutionError` for reverted/unknown receipts. Use
   `submitAgentTransferToken()` only when you confirm receipts yourself.
-- Agent writes call `verifyAgentWallet()`. Pass `deployment`
-  (`factoryAddress`, `tokenContract`, `tokenId`) and/or `expectedCodeHash` to
-  `createWallet()` for strong deployment identity. `agentExecute()` throws
-  `unknown` when the receipt has neither a matching executed nor queued event.
-- `SpendingPolicy.release()` no longer accepts `{ reconciled }`. Record the
-  submission with `lock(reservation, { chainId, txHashes })` (or
-  `applyOutcome`) and call `reconcileLocked(reservation, publicClient)`.
-- `sendToken()` string amounts for tokens outside the registry need
-  `expectedDecimals`; over-precision amounts throw instead of truncating.
+- Agent writes call `verifyAgentWallet()` and REQUIRE a deployment identity:
+  pass `deployment` (`factoryAddress`, `tokenContract`, `tokenId`) or
+  `expectedCodeHash` to `createWallet()` (env/Eliza settings:
+  `AGENT_WALLET_FACTORY` + `AGENT_WALLET_TOKEN_CONTRACT` + `AGENT_WALLET_TOKEN_ID`,
+  or `AGENT_WALLET_CODE_HASH`). `allowUnverifiedDeployment: true`
+  (`AGENT_WALLET_ALLOW_UNVERIFIED=true`) is an explicit unsafe opt-out.
+  `createWallet()` returns a frozen handle. `agentExecute()` throws `unknown`
+  when the receipt has neither a matching executed nor queued event.
+- `batchAgentTransfer()` returns `AgentTransferResult[]` (confirmed and
+  classified); on failure `error.completed` lists the transfers already done.
+- `SpendingPolicy.release()` no longer accepts `{ reconciled }`. Record every
+  submitted phase and the call binding once, at lock time —
+  `lock(reservation, { chainId, txHashes, from, to, data, value })` or
+  `applyOutcome(reservation, outcome, { from, to, data, value })` — then call
+  `reconcileLocked(reservation, publicClient)`. Identity cannot be attached
+  later; a lock without the binding stays locked until committed.
+- `sendToken()`/`sendNative()` require a chain-bound wallet client; string
+  amounts for tokens outside the registry need `expectedDecimals`;
+  over-precision amounts throw instead of truncating.
 - `SolanaWallet` verifies the RPC cluster (default `mainnet-beta`). Set
   `cluster: 'devnet'` (or `expectedGenesisHash`) for other clusters.
   `sendSplToken()` needs `expectedDecimals` for unlisted mints.
@@ -61,8 +71,17 @@ signing and network boundaries.
 - `UAIDResolver.verify()` returns `verified: true` only after on-chain ERC-8004
   verification; configure `rpcUrls`/`onChainLookup`. Broker claims are in
   `brokerAttested`.
-- `stellarX402Pay()` requires `policy`. The Stellar adapter now verifies the
-  Horizon network and confirms submissions.
+- `stellarX402Pay()` requires `policy` with a `StellarSpendBudget`. The signed
+  envelope must hash to the policy-checked transaction; both Horizons are
+  verified before broadcast; submissions are confirmed in a ledger.
+- `UAIDResolver.buildERC8004UAID()` / `erc8004ToUniversal()` now put the
+  identity registry (not the owner) in the `aid`, matching `verify()`. A
+  verified identity carries only on-chain values (owner, wallet, `agentURI`);
+  `registrationFile` is null — resolve it through `ERC8004Client`.
+- x402 explicit intents bind the request's headers too. A retry of the same
+  intent with different headers (e.g. a fresh `traceparent` or rotated
+  `Authorization`) is a terms conflict, never a second payment; resend the
+  original headers, or use `reconcileSubmission` for a lost response.
 - `walletFromEnv()` / `resolveWalletChain()` throw on unknown chains.
 - x402 challenges must name the full resource URL including the query.
 - `BridgeModule.waitForAttestation(burnTxHash)` reads the burn receipt from the
@@ -241,7 +260,9 @@ until an administrator applies and verifies it.
 ## Verification and limits
 
 Regressions reproduce the assessed failures with harmless fixtures and mocked
-signing/network boundaries. Verification of the 8.0.0 repairs passed 807 tests
+signing/network boundaries. Three independent fresh-context reviews were run
+over the repairs; every follow-up they raised was fixed or dispositioned in
+the commit history. Verification of the 8.0.0 repairs passed 833 tests
 across 34 files (baseline at the assessed revision: 676 tests across 28 files),
 the TypeScript build and lint with zero errors. Run:
 

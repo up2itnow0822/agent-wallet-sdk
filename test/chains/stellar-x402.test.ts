@@ -16,7 +16,7 @@ vi.mock('@stellar/stellar-sdk', () => {
     build() { return { toXDR: () => `XDR|${this.opts.networkPassphrase}|${JSON.stringify(this.ops)}` }; }
     static fromXDR(xdr: string, passphrase: string) {
       if (!xdr.includes(passphrase)) throw new Error('network mismatch');
-      return { hash: () => Buffer.from('ab'.repeat(32), 'hex') };
+      return { hash: () => Buffer.from((xdr.includes('EVIL') ? 'cd' : 'ab').repeat(32), 'hex') };
     }
   }
   return {
@@ -79,13 +79,22 @@ describe('exact Stellar chain matching (finding 7)', () => {
     const { impl } = horizon();
     await expect(stellarX402Pay({
       responseHeaders: headers('stellar:testnet'), sourcePublicKey: SRC, sign: signer,
-      policy: { maxPerPayment: '5' }, adapter: { fetchImpl: impl },
+      policy: { maxPerPayment: '5', budget: new StellarSpendBudget('100') }, adapter: { fetchImpl: impl },
     })).rejects.toBeInstanceOf(StellarPaymentPolicyError);
     expect(signer).not.toHaveBeenCalled();
   });
 });
 
 describe('mandatory spending policy (finding 10)', () => {
+  it('refuses to auto-pay without a cumulative budget', async () => {
+    const { impl } = horizon();
+    await expect(stellarX402Pay({
+      responseHeaders: headers('stellar:pubnet'), sourcePublicKey: SRC, sign: signer,
+      policy: { maxPerPayment: '5' } as never, adapter: { fetchImpl: impl },
+    })).rejects.toThrow(/budget/);
+    expect(signer).not.toHaveBeenCalled();
+  });
+
   it('refuses to auto-pay without a policy', async () => {
     await expect(stellarX402Pay({ responseHeaders: headers('stellar:pubnet'), sourcePublicKey: SRC, sign: signer } as never))
       .rejects.toThrow(/spending policy/);
@@ -94,11 +103,11 @@ describe('mandatory spending policy (finding 10)', () => {
   it('enforces per-payment cap, allowlist, approval and cumulative budget before signing', async () => {
     const { impl } = horizon();
     const base = { sourcePublicKey: SRC, sign: signer, adapter: { fetchImpl: impl } };
-    await expect(stellarX402Pay({ ...base, responseHeaders: headers('stellar:pubnet', '1000'), policy: { maxPerPayment: '5' } }))
+    await expect(stellarX402Pay({ ...base, responseHeaders: headers('stellar:pubnet', '1000'), policy: { maxPerPayment: '5', budget: new StellarSpendBudget('100') } }))
       .rejects.toThrow(/exceeds/);
-    await expect(stellarX402Pay({ ...base, responseHeaders: headers('stellar:pubnet', '1', OTHER), policy: { maxPerPayment: '5', allowedDestinations: [DEST] } }))
+    await expect(stellarX402Pay({ ...base, responseHeaders: headers('stellar:pubnet', '1', OTHER), policy: { maxPerPayment: '5', allowedDestinations: [DEST], budget: new StellarSpendBudget('100') } }))
       .rejects.toThrow(/not allowed/);
-    await expect(stellarX402Pay({ ...base, responseHeaders: headers('stellar:pubnet', '1'), policy: { maxPerPayment: '5', approve: () => false } }))
+    await expect(stellarX402Pay({ ...base, responseHeaders: headers('stellar:pubnet', '1'), policy: { maxPerPayment: '5', approve: () => false, budget: new StellarSpendBudget('100') } }))
       .rejects.toThrow(/not approved/);
     const budget = new StellarSpendBudget('2');
     await stellarX402Pay({ ...base, responseHeaders: headers('stellar:pubnet', '1.5'), policy: { maxPerPayment: '5', budget } });
@@ -111,7 +120,7 @@ describe('mandatory spending policy (finding 10)', () => {
     for (const [amount, dest] of [['1e3', DEST], ['-1', DEST], ['0.00000001', DEST], ['1', 'not-an-account']]) {
       await expect(stellarX402Pay({
         responseHeaders: headers('stellar:pubnet', amount, dest), sourcePublicKey: SRC, sign: signer,
-        policy: { maxPerPayment: '5' }, adapter: { fetchImpl: impl },
+        policy: { maxPerPayment: '5', budget: new StellarSpendBudget('100') }, adapter: { fetchImpl: impl },
       })).rejects.toBeInstanceOf(StellarPaymentPolicyError);
     }
     expect(signer).not.toHaveBeenCalled();
@@ -198,5 +207,45 @@ describe('settlement verification (finding 26)', () => {
     const adapter = new StellarX402Adapter({ fetchImpl: impl });
     await expect(adapter.submitTransaction(`XDR|${STELLAR_NETWORK.testnet.networkPassphrase}|[]`))
       .rejects.toBeInstanceOf(StellarPaymentPolicyError);
+  });
+});
+
+
+describe('review follow-ups (N1, N6)', () => {
+  it('never broadcasts when the confirmation Horizon is unhealthy, and releases the reservation', async () => {
+    const { impl, calls } = horizon();
+    const confirmImpl = vi.fn(async (url: string, init?: RequestInit) =>
+      url.startsWith('https://confirm.example') ? new Response('down', { status: 503 }) : impl(url, init)) as unknown as typeof fetch;
+    const budget = new StellarSpendBudget('1');
+    await expect(stellarX402Pay({
+      responseHeaders: headers('stellar:pubnet', '1'), sourcePublicKey: SRC, sign: signer,
+      policy: { maxPerPayment: '5', budget },
+      adapter: { fetchImpl: confirmImpl, confirmationHorizonUrl: 'https://confirm.example' },
+    })).rejects.toBeInstanceOf(StellarPaymentPolicyError);
+    expect(calls.some((c) => c.startsWith('POST'))).toBe(false);
+    expect(budget.occupiedStroops).toBe(0n);
+  });
+
+  it('keeps the reservation when the confirmation lacks an explicit successful flag', async () => {
+    const { impl } = horizon({ confirm: () => new Response(JSON.stringify({ hash: HASH, ledger: 9 })) });
+    const budget = new StellarSpendBudget('1');
+    await expect(stellarX402Pay({
+      responseHeaders: headers('stellar:pubnet', '1'), sourcePublicKey: SRC, sign: signer,
+      policy: { maxPerPayment: '5', budget }, adapter: { fetchImpl: impl },
+    })).rejects.toBeInstanceOf(StellarSubmissionUnknownError);
+    expect(budget.occupiedStroops).toBe(10_000_000n);
+    expect(budget.unresolved()).toHaveLength(1);
+  });
+
+  it('refuses a signer that alters the policy-checked envelope', async () => {
+    const { impl, calls } = horizon();
+    const evil = vi.fn(async (xdr: string) => xdr.replace(DEST, 'EVIL'));
+    const budget = new StellarSpendBudget('5');
+    await expect(stellarX402Pay({
+      responseHeaders: headers('stellar:pubnet', '1'), sourcePublicKey: SRC, sign: evil,
+      policy: { maxPerPayment: '5', budget }, adapter: { fetchImpl: impl },
+    })).rejects.toThrow(/differs from the policy-checked/);
+    expect(calls.some((c) => c.startsWith('POST'))).toBe(false);
+    expect(budget.occupiedStroops).toBe(0n);
   });
 });

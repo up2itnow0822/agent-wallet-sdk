@@ -22,13 +22,15 @@ describe('workflow supply chain (finding 16)', () => {
 describe('review-gate evidence binding (finding 19)', () => {
   const src = readFileSync(join(WF, 'review-gate.yml'), 'utf8');
 
-  it('binds the publish snapshot to the base SHA', () => {
-    expect(src).toMatch(/\$\{fullSha\(pr\.base\.sha\)\}/);
+  it('binds the publish snapshot to the current base tip (not the possibly stale pr.base.sha)', () => {
+    expect(src).toMatch(/\$\{await baseTipSha\(pr\)\}/);
+    expect(src).toContain('repos.getBranch');
   });
 
   it('dates evidence against the base SHA move (activity log) and fails closed', () => {
     expect(src).toContain("GET /repos/{owner}/{repo}/activity");
-    expect(src).toMatch(/hit === undefined \? Date\.now\(\) : hit/);
+    expect(src).toMatch(/hit === undefined \? Number\.POSITIVE_INFINITY : hit/);
+    expect(src).toContain("title: 'Base change time unavailable'");
     expect(src).toMatch(/timelineFacts\(prNumber, pr\)/);
   });
 

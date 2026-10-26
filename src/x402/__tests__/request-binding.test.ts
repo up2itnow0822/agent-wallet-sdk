@@ -146,3 +146,16 @@ describe('wrapWithX402 snapshots before the first hop (finding 28)', () => {
     expect(retried).toEqual([[1, 2, 3]]);
   });
 });
+
+describe('pathological 402 nesting (review follow-up)', () => {
+  it('returns the 402 instead of throwing on deeply nested extra data', async () => {
+    const w = wallet();
+    const deep = '['.repeat(22_000) + ']'.repeat(22_000); // fits the 64 KiB header, too deep to re-serialize
+    const body = JSON.stringify(challenge('/purchase')).replace('"extra":{}', `"extra":{"x":${deep}}`);
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response(null, { status: 402, headers: { 'payment-required': btoa(body) } }));
+    const res = await new X402Client(w).fetch(URL);
+    expect(res.status).toBe(402);
+    expect(transfer).not.toHaveBeenCalled();
+  });
+});
