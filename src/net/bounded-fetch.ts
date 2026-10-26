@@ -54,6 +54,8 @@ export async function boundedFetch(
   }
   const controller = new AbortController();
   let timedOut = false;
+  let internalAbort = false;
+  const abortInternally = () => { internalAbort = true; controller.abort(); };
   const timer = setTimeout(() => {
     timedOut = true;
     controller.abort();
@@ -65,6 +67,7 @@ export async function boundedFetch(
   }
   const deadline = new Promise<never>((_, reject) => {
     controller.signal.addEventListener('abort', () => {
+      if (internalAbort) return; // our own size-limit abort reports TOO_LARGE itself
       reject(new BoundedFetchError(timedOut ? 'TIMEOUT' : 'NETWORK', timedOut
         ? `request to ${url} exceeded ${timeoutMs} ms`
         : `request to ${url} was cancelled`));
@@ -81,10 +84,10 @@ export async function boundedFetch(
     ]);
     const declared = Number(response.headers?.get?.('content-length') ?? NaN);
     if (Number.isFinite(declared) && declared > maxBytes) {
-      controller.abort();
+      abortInternally();
       throw new BoundedFetchError('TOO_LARGE', `response from ${url} declares ${declared} bytes (limit ${maxBytes})`);
     }
-    const text = await Promise.race([readCapped(response, maxBytes, controller, url), deadline]);
+    const text = await Promise.race([readCapped(response, maxBytes, abortInternally, url), deadline]);
     return { ok: response.ok, status: response.status, headers: response.headers, text };
   } catch (err) {
     if (err instanceof BoundedFetchError) throw err;
@@ -101,7 +104,7 @@ export async function boundedFetch(
 async function readCapped(
   response: Response,
   maxBytes: number,
-  controller: AbortController,
+  abort: () => void,
   url: string,
 ): Promise<string> {
   const body = (response as { body?: ReadableStream<Uint8Array> | null }).body;
@@ -114,7 +117,7 @@ async function readCapped(
       if (done) break;
       total += value.byteLength;
       if (total > maxBytes) {
-        controller.abort();
+        abort();
         await reader.cancel().catch(() => undefined);
         throw new BoundedFetchError('TOO_LARGE', `response from ${url} exceeded ${maxBytes} bytes`);
       }
@@ -158,7 +161,7 @@ export async function readBoundedText(
   });
   deadline.catch(() => undefined);
   try {
-    return await Promise.race([readCapped(response, options.maxBytes, controller, label), deadline]);
+    return await Promise.race([readCapped(response, options.maxBytes, () => controller.abort(), label), deadline]);
   } finally {
     clearTimeout(timer);
   }
