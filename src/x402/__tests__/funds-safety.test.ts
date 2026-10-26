@@ -67,7 +67,10 @@ function merchant(required: ReturnType<typeof challenge>, paidFailure?: Error) {
       if (paidFailure) throw paidFailure;
       return new Response('paid', { status: 200 });
     }
-    return new Response(JSON.stringify(required), { status: 402 });
+    // A well-formed challenge names the exact resource requested, query included.
+    const search = typeof _input === 'string' ? new globalThis.URL(_input).search : '';
+    const bound = { ...required, resource: { ...required.resource, url: required.resource.url + search } };
+    return new Response(JSON.stringify(bound), { status: 402 });
   });
   vi.spyOn(globalThis, 'fetch').mockImplementation(fetchFn);
   return { fetchFn, proofs };

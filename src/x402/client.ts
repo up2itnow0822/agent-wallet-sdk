@@ -32,6 +32,7 @@ import { submitAgentTransferToken, checkBudget } from '../index.js';
 import { AgentAccountV2Abi } from '../abi.js';
 import { parseNetworkChainId, resolveAssetAddress } from './multi-asset.js';
 import { toReplayableFetchArgs, withFailClosedRedirect } from './fetch-args.js';
+import { readBoundedText } from '../net/bounded-fetch.js';
 
 /**
  * keccak256("TransactionQueued(uint256,address,uint256,address,uint256)").
@@ -51,6 +52,12 @@ export const X402_TRANSACTION_QUEUED_TOPIC = toEventHash({
 });
 
 const MAX_PAYMENT_REQUIRED_HEADER_BYTES = 64 * 1024;
+/** Maximum 402 JSON body read when no PAYMENT-REQUIRED header is present. */
+const MAX_PAYMENT_REQUIRED_BODY_BYTES = 64 * 1024;
+/** Deadline for reading a 402 challenge body. */
+const X402_CHALLENGE_BODY_TIMEOUT_MS = 10_000;
+/** Maximum payment options accepted from one challenge. */
+const MAX_PAYMENT_OPTIONS = 16;
 const MAX_UINT256 = (1n << 256n) - 1n;
 const EVM_TX_HASH = /^0x[0-9a-fA-F]{64}$/;
 
@@ -591,7 +598,13 @@ export class X402Client {
       return reserved.reservationId;
     };
 
-    const termsFingerprint = buildX402PaymentTermsFingerprint(selected);
+    // Explicit merchant intent ids also bind the full call-time request identity
+    // (body, headers, credentials/context), so a merchant cannot replay an old
+    // proof for a different request body or caller: a mismatch is a terms
+    // conflict, never a replay and never a second transfer.
+    const termsFingerprint = explicitIntent
+      ? `${buildX402PaymentTermsFingerprint(selected)}|${encodeX402KeyField(unkeyedRequestFingerprint)}`
+      : buildX402PaymentTermsFingerprint(selected);
     const paymentKey = explicitIntent
       ? buildX402PaymentIntentKey(method, urlStr, explicitIntent)
       : buildUnkeyedPendingKey(method, urlStr, termsFingerprint, unkeyedRequestFingerprint);
@@ -730,6 +743,14 @@ export class X402Client {
     if (entry.deliveryFailed !== false) {
       entry.deliveryFailed = true;
     }
+  }
+
+  /**
+   * Public snapshot used by wrappers BEFORE their first network hop, so the
+   * settled terms and the paid retry use the bytes that were challenged.
+   */
+  snapshotRequestInitForRetry(init?: RequestInit): RequestInit | undefined {
+    return this.snapshotRequestInit(init);
   }
 
   /** Clone mutable request data so retry cannot observe caller-side mutation. */
@@ -1602,14 +1623,19 @@ export class X402Client {
       }
     }
 
-    // Try JSON body as fallback
+    // Try JSON body as fallback — size- and time-bounded, then shape-validated.
     try {
-      const body = await response.clone().json();
+      const text = await readBoundedText(response.clone(), {
+        timeoutMs: X402_CHALLENGE_BODY_TIMEOUT_MS,
+        maxBytes: MAX_PAYMENT_REQUIRED_BODY_BYTES,
+        label: '402 challenge body',
+      });
+      const body = JSON.parse(text);
       if (this.isValidPaymentRequired(body)) {
         return body as X402PaymentRequired;
       }
     } catch {
-      // Not parseable
+      // Not parseable, too large or too slow: never pay from it
     }
 
     return null;
@@ -1625,7 +1651,9 @@ export class X402Client {
     const candidate = value as X402PaymentRequired;
     if (candidate.x402Version !== 1) return false;
     if (!candidate.resource || typeof candidate.resource.url !== 'string') return false;
+    if (candidate.resource.url.length > 2048) return false;
     if (!Array.isArray(candidate.accepts) || candidate.accepts.length === 0) return false;
+    if (candidate.accepts.length > MAX_PAYMENT_OPTIONS) return false;
 
     return candidate.accepts.every(req => (
       req
@@ -1633,7 +1661,12 @@ export class X402Client {
       && typeof req.network === 'string'
       && typeof req.asset === 'string'
       && typeof req.amount === 'string'
+      && req.amount.length <= 78
       && /^\d+$/.test(req.amount)
+      && req.scheme.length <= 64
+      && req.network.length <= 64
+      && req.asset.length <= 128
+      && req.payTo.length <= 128
       && typeof req.payTo === 'string'
       && typeof req.maxTimeoutSeconds === 'number'
       && req.maxTimeoutSeconds > 0
@@ -1687,7 +1720,11 @@ export class X402Client {
     try {
       const requested = new URL(requestUrl);
       const resource = new URL(paymentRequired.resource.url, requested.origin);
-      return resource.origin === requested.origin && resource.pathname === requested.pathname;
+      // The query string is part of the purchased resource: authorization and
+      // proof must name exactly the request that will be retried.
+      return resource.origin === requested.origin
+        && resource.pathname === requested.pathname
+        && resource.search === requested.search;
     } catch {
       return false;
     }

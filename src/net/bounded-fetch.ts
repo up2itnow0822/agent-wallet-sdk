@@ -118,7 +118,7 @@ async function readCapped(
       total += value.byteLength;
       if (total > maxBytes) {
         abort();
-        await reader.cancel().catch(() => undefined);
+        void reader.cancel().catch(() => undefined); // never await: a tee branch cancel waits for its sibling
         throw new BoundedFetchError('TOO_LARGE', `response from ${url} exceeded ${maxBytes} bytes`);
       }
       chunks.push(value);

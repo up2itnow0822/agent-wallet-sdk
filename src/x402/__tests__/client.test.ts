@@ -1753,7 +1753,7 @@ describe('X402Client retry idempotency', () => {
       const unkeyed = {
         x402Version: 1,
         resource: {
-          url: requested.pathname,
+          url: requested.pathname + requested.search,
           description: 'Data API',
           mimeType: 'application/json',
         },
@@ -1831,7 +1831,7 @@ describe('X402Client retry idempotency', () => {
       const unkeyed = {
         x402Version: 1,
         resource: {
-          url: requested.pathname,
+          url: requested.pathname + requested.search,
           description: 'Data API',
           mimeType: 'application/json',
         },
@@ -2415,7 +2415,7 @@ describe('X402Client retry idempotency', () => {
         headers: {
           'payment-required': btoa(JSON.stringify({
             x402Version: 1,
-            resource: { url: new URL(requested).pathname, description: 'Data API', mimeType: 'application/json' },
+            resource: { url: new URL(requested).pathname + new URL(requested).search, description: 'Data API', mimeType: 'application/json' },
             accepts: [
               { scheme: 'exact', network: 'base:8453', asset, amount: '1000000', payTo, maxTimeoutSeconds: 30, extra: { nonce } },
             ],
@@ -2463,7 +2463,7 @@ describe('X402Client retry idempotency', () => {
           'payment-required': btoa(JSON.stringify({
             x402Version: 1,
             resource: {
-              url: new URL(requested).pathname,
+              url: new URL(requested).pathname + new URL(requested).search,
               description: 'Data API',
               mimeType: 'application/json',
             },
@@ -2535,7 +2535,7 @@ describe('X402Client retry idempotency', () => {
         headers: {
           'payment-required': btoa(JSON.stringify({
             x402Version: 1,
-            resource: { url: new URL(requested).pathname, description: 'Data API', mimeType: 'application/json' },
+            resource: { url: new URL(requested).pathname + new URL(requested).search, description: 'Data API', mimeType: 'application/json' },
             accepts: [
               { scheme: 'exact', network: 'base:8453', asset, amount: '1000000', payTo, maxTimeoutSeconds: 30, extra: { nonce } },
             ],
