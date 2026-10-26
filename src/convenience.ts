@@ -111,21 +111,33 @@ const CREATE_WALLET_KEY_BY_ID: Record<number, AgentWalletConfig['chain']> = {
   480: 'worldchain',
 };
 
-/** Resolve a viem chain from a documented name or numeric id. Unknown ids use Base. */
+/**
+ * Resolve a viem chain from a documented name or numeric id.
+ * Unknown or malformed explicit values fail closed — they never fall back to
+ * Base mainnet. (Base is only the default when no chain is configured at all.)
+ */
 function resolveChain(nameOrId: string | number): any {
   if (typeof nameOrId === 'number') {
+    if (!Number.isSafeInteger(nameOrId) || nameOrId <= 0) {
+      throw new Error(`Invalid chain id ${String(nameOrId)}`);
+    }
     const found = Object.values(CHAIN_MAP).find((c) => c.id === nameOrId);
-    return found ?? base;
+    if (!found) throw new Error(`Unsupported chain id ${nameOrId}`);
+    return found;
   }
+  if (typeof nameOrId !== 'string') throw new Error('Chain must be a name or numeric id');
   const key = nameOrId.toLowerCase().trim();
-  return CHAIN_MAP[key] ?? base;
+  if (!key) throw new Error('Chain name is empty');
+  const found = CHAIN_MAP[key];
+  if (!found) throw new Error(`Unsupported chain name "${nameOrId}"`);
+  return found;
 }
 
 /**
  * Resolve the viem chain, the createWallet() key, and a default RPC URL.
  *
- * Unknown numeric ids still fall back to Base (documented). The createWallet
- * key is taken from chain id, never from viem's display name.
+ * Unknown or malformed values throw. The createWallet key is taken from chain
+ * id, never from viem's display name.
  */
 export function resolveWalletChain(nameOrId: string | number): {
   chain: any;
@@ -133,7 +145,8 @@ export function resolveWalletChain(nameOrId: string | number): {
   rpcUrl: string;
 } {
   const chain = resolveChain(nameOrId);
-  const walletChain = CREATE_WALLET_KEY_BY_ID[chain.id] ?? chain.name.toLowerCase();
+  const walletChain = CREATE_WALLET_KEY_BY_ID[chain.id];
+  if (!walletChain) throw new Error(`Chain ${chain.id} has no AgentWallet deployment key`);
   const rpcUrl =
     DEFAULT_RPC[walletChain] ??
     DEFAULT_RPC[chain.name.toLowerCase()] ??
@@ -259,22 +272,33 @@ export function walletFromEnv(options?: {
   }
 
   // ── Chain resolution ────────────────────────────────────────────────────
-  const chainSource =
-    options?.chain ??
-    process.env.CHAIN_NAME ??
-    (process.env.CHAIN_ID ? process.env.CHAIN_ID : undefined);
+  // Blank settings mean "not configured"; any explicit value must resolve exactly.
+  const blankToUndefined = (v: string | number | undefined) =>
+    v === undefined || (typeof v === 'string' && v.trim() === '') ? undefined : v;
+  const envName = blankToUndefined(process.env.CHAIN_NAME);
+  const envId = blankToUndefined(process.env.CHAIN_ID);
+  const chainSource = blankToUndefined(options?.chain) ?? envName ?? envId;
+  const toChainArg = (v: string | number) => {
+    const text = String(v).trim();
+    if (/^\d+$/.test(text)) return Number(text);
+    if (/^[+-]?\d/.test(text)) throw new Error(`[walletFromEnv] Invalid chain id "${text}"`);
+    return text;
+  };
 
-  const resolved = chainSource
-    ? resolveWalletChain(
-        /^\d+$/.test(String(chainSource))
-          ? parseInt(chainSource, 10)
-          : String(chainSource)
-      )
+  const resolved = chainSource !== undefined
+    ? resolveWalletChain(toChainArg(chainSource))
     : {
         chain: base,
         walletChain: 'base' as const,
         rpcUrl: DEFAULT_RPC['base'],
       };
+
+  if (options?.chain === undefined && envName !== undefined && envId !== undefined) {
+    const byId = resolveWalletChain(toChainArg(envId));
+    if (byId.chain.id !== resolved.chain.id) {
+      throw new Error(`[walletFromEnv] CHAIN_NAME (${String(envName)}) and CHAIN_ID (${String(envId)}) disagree`);
+    }
+  }
 
   // ── RPC URL ─────────────────────────────────────────────────────────────
   const rpcUrl = options?.rpcUrl ?? process.env.RPC_URL ?? resolved.rpcUrl;
