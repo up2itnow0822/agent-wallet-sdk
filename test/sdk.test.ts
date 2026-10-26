@@ -221,9 +221,19 @@ describe('agentExecute', () => {
     mockWaitForReceipt.mockResolvedValue({ status: 'success', logs: [{
       address: ACCOUNT,
       topics: encodeEventTopics({ abi: AgentAccountV2Abi, eventName: 'TransactionQueued', args: { txId: 7n, to: OPERATOR.toLowerCase() as Address } }),
-      data: encodeAbiParameters([{ type: 'uint256' }, { type: 'address' }, { type: 'uint256' }], [0n, TOKEN.toLowerCase() as Address, 10n]),
+      data: encodeAbiParameters([{ type: 'uint256' }, { type: 'address' }, { type: 'uint256' }], [0n, NATIVE_TOKEN, 0n]),
     }] });
     expect(await agentExecute(makeWallet(), { to: OPERATOR })).toMatchObject({ executed: false, pendingTxId: 7n, txHash: TX_HASH });
+  });
+
+  it('does not mistake a re-entrant token-transfer queue for this call (Codex round 8)', async () => {
+    mockWriteFns.agentExecute = vi.fn().mockResolvedValue(TX_HASH);
+    mockWaitForReceipt.mockResolvedValue({ status: 'success', logs: [{
+      address: ACCOUNT,
+      topics: encodeEventTopics({ abi: AgentAccountV2Abi, eventName: 'TransactionQueued', args: { txId: 8n, to: OPERATOR.toLowerCase() as Address } }),
+      data: encodeAbiParameters([{ type: 'uint256' }, { type: 'address' }, { type: 'uint256' }], [0n, TOKEN.toLowerCase() as Address, 10n]),
+    }, executedLog(OPERATOR, 0n)] });
+    expect(await agentExecute(makeWallet(), { to: OPERATOR })).toMatchObject({ executed: true, txHash: TX_HASH });
   });
 
   it('does not report executed from a same-target, same-value event with different calldata (Codex round 3)', async () => {

@@ -21,6 +21,7 @@ import {
 import { boundedFetch, parseBoundedJson } from '../net/bounded-fetch.js';
 import {
   createPublicClient,
+  decodeFunctionData,
   http,
   keccak256,
   pad,
@@ -669,6 +670,26 @@ export async function resumeSolanaToEVM(
   });
 }
 
+/** True only when `hash` is a call of receiveMessage(message, attestation) on `transmitter`. */
+async function retainedMintMatches(
+  client: PublicClient,
+  hash: Hash,
+  transmitter: Address,
+  attested: { message: Hex; attestation: Hex },
+): Promise<boolean> {
+  try {
+    const tx = await client.getTransaction({ hash });
+    if (!tx || typeof tx.to !== 'string' || tx.to.toLowerCase() !== transmitter.toLowerCase()) return false;
+    const call = decodeFunctionData({ abi: MessageTransmitterV2Abi, data: tx.input });
+    if (call.functionName !== 'receiveMessage') return false;
+    const [message, attestation] = call.args as readonly [Hex, Hex];
+    return message.toLowerCase() === attested.message.toLowerCase()
+      && attestation.toLowerCase() === attested.attestation.toLowerCase();
+  } catch {
+    return false;
+  }
+}
+
 /** Mint an attested Solana→EVM message, reconciling any retained mint first. */
 async function mintAttested(
   walletClient: WalletClient,
@@ -734,6 +755,11 @@ async function mintAttested(
       throw fail('MINT_UNCONFIRMED', `earlier receiveMessage ${prior} on ${toChain} is not yet confirmed (${err instanceof Error ? err.message : String(err)}); nothing was resubmitted.`, prior);
     }
     if (priorReceipt?.status === 'success') {
+      // A retained hash is evidence only if it is THIS message's mint:
+      // receiveMessage(message, attestation) sent to the transmitter.
+      if (!(await retainedMintMatches(destPublicClient, prior, transmitterAddress, attested))) {
+        throw fail('MINT_UNCONFIRMED', `retained tx ${prior} is not receiveMessage for this message on ${toChain}; reconcile manually, nothing was resubmitted.`, prior);
+      }
       if (await readUsedNonce() === 0n) {
         throw fail('MINT_UNCONFIRMED', `earlier tx ${prior} succeeded but nonce ${decoded.nonce} is not consumed on ${toChain}; reconcile manually, nothing was resubmitted.`, prior);
       }

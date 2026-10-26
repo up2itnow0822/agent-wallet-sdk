@@ -71,6 +71,21 @@ const STELLAR_TX_HASH = /^[0-9a-f]{64}$/;
  */
 export const STELLAR_RECONCILE_HISTORY_MARGIN_S = 3600;
 
+/**
+ * Transaction result codes that depend only on the signed envelope (not on
+ * ledger state or time that a retry could change), so the same bytes can
+ * never have been applied by another submission. Every other rejection code
+ * is resolved against the ledger before the reservation is released.
+ */
+export const STELLAR_DETERMINISTIC_REJECTIONS: ReadonlySet<string> = new Set([
+  'tx_malformed',
+  'tx_missing_operation',
+  'tx_bad_auth',
+  'tx_bad_auth_extra',
+  'tx_not_supported',
+  'tx_too_early',
+]);
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export type StellarNetwork = 'pubnet' | 'testnet';
@@ -315,8 +330,17 @@ export class StellarX402Adapter {
       const body = safeJson(res.text);
       const resultCodes = (body as { extras?: { result_codes?: unknown } } | undefined)?.extras?.result_codes;
       if (res.status >= 400 && res.status < 500 && resultCodes) {
-        // Horizon rejected the envelope with explicit result codes.
-        throw new StellarTransactionRejectedError(`Stellar transaction rejected: ${res.status} ${JSON.stringify(resultCodes).slice(0, 200)}`, expectedHash);
+        const code = (resultCodes as { transaction?: unknown }).transaction;
+        const detail = `${res.status} ${JSON.stringify(resultCodes).slice(0, 200)}`;
+        if (typeof code === 'string' && STELLAR_DETERMINISTIC_REJECTIONS.has(code)) {
+          // A property of the envelope itself: no earlier or retried
+          // submission of these exact bytes could have been applied.
+          throw new StellarTransactionRejectedError(`Stellar transaction rejected: ${detail}`, expectedHash);
+        }
+        // Anything else (tx_bad_seq after a proxy retry, tx_too_late,
+        // fee-market codes, an untrusted endpoint) may follow an applied
+        // submission: decide from the ledger, never from the 4xx body.
+        return this.confirmOrUnknown(expectedHash, `Horizon returned ${detail}; outcome unknown`);
       }
       return this.confirmOrUnknown(expectedHash, `Horizon returned ${res.status}; outcome unknown`);
     }
@@ -581,7 +605,10 @@ export class StellarSpendBudget {
     if (!r || r.state !== 'unknown') return { status: 'unresolved', reason: 'reservation is not unknown' };
     if (!r.hash) return { status: 'unresolved', reason: 'no transaction hash was recorded for this reservation' };
     if (!(adapter instanceof StellarX402Adapter)) return { status: 'unresolved', reason: 'a StellarX402Adapter is required' };
-    if (r.chainId && adapter.chainId !== r.chainId) {
+    if (!r.chainId) {
+      return { status: 'unresolved', reason: 'no submission network was recorded (markUnknown evidence.chainId); evidence cannot be bound to it' };
+    }
+    if (adapter.chainId !== r.chainId) {
       return { status: 'unresolved', reason: `adapter network ${adapter.chainId} differs from submission network ${r.chainId}` };
     }
     const hash = r.hash;

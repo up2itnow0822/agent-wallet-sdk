@@ -13,6 +13,7 @@ const h = vi.hoisted(() => ({
   receiveMessage: vi.fn(),
   usedNonces: vi.fn(),
   priorReceipt: vi.fn(),
+  priorTx: vi.fn(),
 }));
 
 vi.mock('viem', async (importOriginal) => {
@@ -22,6 +23,7 @@ vi.mock('viem', async (importOriginal) => {
     createPublicClient: () => ({
       waitForTransactionReceipt: (...a: unknown[]) => h.receipt(...a),
       getTransactionReceipt: (...a: unknown[]) => h.priorReceipt(...a),
+      getTransaction: (...a: unknown[]) => h.priorTx(...a),
     }),
     getContract: () => ({
       read: {
@@ -51,6 +53,8 @@ const {
   SPL_TOKEN_PROGRAM_ID,
 } = await import('../solana.js');
 const { BridgeModule, BridgeError, MESSAGE_TRANSMITTER_V2, USDC_CONTRACT } = await import('../client.js');
+const { MessageTransmitterV2Abi } = await import('../abis.js');
+const { encodeFunctionData } = await import('viem');
 const { pollCircleAttestation, decodeCctpV2Message, assertBurnTerms } = await import('../attestation.js');
 const { CCTP_DOMAIN_IDS } = await import('../types.js');
 
@@ -339,18 +343,41 @@ describe('Solana→EVM receive binding and mint ambiguity (findings 22, 24)', ()
       expect(h.receiveMessage).not.toHaveBeenCalled();
     });
 
+    const mintCall = (recovery: { attestedMessage: Hex; attestation: Hex }) => ({
+      to: MESSAGE_TRANSMITTER_V2.arbitrum,
+      input: encodeFunctionData({ abi: MessageTransmitterV2Abi, functionName: 'receiveMessage', args: [recovery.attestedMessage, recovery.attestation] }),
+    });
+
     it('returns the retained mint once it succeeded and the nonce is consumed', async () => {
       const recovery = await unconfirmed();
       h.priorReceipt.mockResolvedValue({ status: 'success' });
+      h.priorTx.mockResolvedValue(mintCall(recovery));
       h.usedNonces.mockResolvedValue(1n);
       const r = await resumeSolanaToEVM(walletClient, recovery);
       expect(r).toMatchObject({ mintTxHash: MINT_TX, recipient: EVM_ME, amount: 4_999_000n, toChain: 'arbitrum' });
       expect(h.receiveMessage).not.toHaveBeenCalled();
     });
 
+    it('refuses a retained hash that is not this message\'s receiveMessage (Codex round 8)', async () => {
+      const recovery = await unconfirmed();
+      h.priorReceipt.mockResolvedValue({ status: 'success' });
+      h.usedNonces.mockResolvedValue(1n); // consumed by someone else, e.g. a relayer
+      for (const tx of [
+        { ...mintCall(recovery), to: EVM_OTHER },
+        mintCall({ ...recovery, attestation: ('0x' + 'cd'.repeat(65)) as Hex }),
+        { to: MESSAGE_TRANSMITTER_V2.arbitrum, input: '0xdeadbeef' as Hex },
+      ]) {
+        h.priorTx.mockResolvedValueOnce(tx);
+        const err = await resumeSolanaToEVM(walletClient, recovery).catch((e) => e);
+        expect(err.code).toBe('MINT_UNCONFIRMED');
+      }
+      expect(h.receiveMessage).not.toHaveBeenCalled();
+    });
+
     it('refuses a "successful" retained tx whose nonce was never consumed', async () => {
       const recovery = await unconfirmed();
       h.priorReceipt.mockResolvedValue({ status: 'success' });
+      h.priorTx.mockResolvedValue(mintCall(recovery));
       h.usedNonces.mockResolvedValue(0n);
       const err = await resumeSolanaToEVM(walletClient, recovery).catch((e) => e);
       expect(err.code).toBe('MINT_UNCONFIRMED');

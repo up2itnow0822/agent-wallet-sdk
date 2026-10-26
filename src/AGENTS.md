@@ -63,7 +63,8 @@
 - Token transfers pin decimals (registry or caller `expectedDecimals`) and
   bind signer/read/requested chains; Solana signs only over a blockhash
   fetched BEFORE a fresh genesis-hash cluster check (never cached), signs
-  locally and submits raw bytes, and uses `TransferChecked`.
+  locally and submits raw bytes, and uses `TransferChecked`. A confirmation
+  without an explicit `{ err: null }` result is `unknown`, never success.
   Amounts never truncate.
 - Every AgentAccountV2 write first passes `verifyAgentWallet`, which requires
   a deployment identity (`deployment` or `expectedCodeHash`) unless the caller
@@ -74,8 +75,9 @@
   (`src/wallet-verification-error.ts`): a definite pre-broadcast failure, so
   x402 releases its reservation. Execution is classified only from wallet
   events matching the requested call (`TransactionExecuted` with matching
-  target/value/calldata, or `TransactionQueued` matching recipient/value and,
-  for token transfers, token/amount) or a matching ERC-20 `Transfer`;
+  target/value/calldata, or `TransactionQueued` matching recipient/value and
+  token — `NATIVE_TOKEN` for `agentExecute`, the token and amount for token
+  transfers) or a matching ERC-20 `Transfer`;
   anything else is `unknown`. x402 classifies every settlement receipt
   against its phase's prepared transfer (`classifyX402SettlementReceipt`): a
   successful outer receipt alone is never payment proof.
@@ -91,11 +93,13 @@
   carry frozen recovery; `usedNonces` is checked before `receiveMessage`;
   reported recipients/amounts come from attested bytes. Resume paths
   (`resumeEVMToSolana`, `resumeSolanaToEVM`) re-validate the recovery and
-  resolve any retained transaction before another burn or mint; a hashless
+  resolve any retained transaction (bound to this message's
+  `receiveMessage` call) before another burn or mint; a hashless
   ambiguous mint stays held until the caller passes
   `originalSubmissionReconciled`.
 - The package has one entry point (`dist/index.js`): every public module API,
-  including the EVM↔Solana bridge and both resume functions,
+  including the EVM↔Solana bridge, both resume functions and the Stellar x402
+  adapter/budget,
   is re-exported from `src/index.ts`.
 - UAID registration and UAID builders default to the chain's own
   `KNOWN_REGISTRY_ADDRESSES` identity registry (the one `verify()` trusts).
@@ -107,7 +111,10 @@
   must report the configured network, re-checked (never cached) before every
   build, submission and lookup, and after every reconciliation read; success
   needs the signed-XDR hash,
-  `successful === true` and a ledger confirmation. An unknown reservation is
+  `successful === true` and a ledger confirmation. A 4xx rejection releases
+  the reservation only for envelope-deterministic codes
+  (`STELLAR_DETERMINISTIC_REJECTIONS`); any other code is decided from the
+  ledger. Reconciliation requires the recorded network. An unknown reservation is
   freed only by `StellarSpendBudget.reconcile()` evidence for its recorded
   hash: included-but-failed, or not found after its `maxTime` on a Horizon
   whose history covers the validity window.

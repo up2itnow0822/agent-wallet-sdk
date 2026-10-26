@@ -70,7 +70,9 @@ signing and network boundaries.
   `cluster: 'devnet'` (or `expectedGenesisHash`) for other clusters.
   `sendSplToken()` needs `expectedDecimals` for unlisted mints.
 - An unknown `stellarX402Pay()` reservation is freed or committed only by
-  `budget.reconcile(id, adapter)`, from ledger evidence for the recorded hash.
+  `budget.reconcile(id, adapter)`, from ledger evidence for the recorded hash
+  and network. The Stellar API (`StellarSpendBudget`, `stellarX402Pay`, …) is
+  exported from the package root.
 - `SwapModule.swap()` requires `minAmountOut` from an independent source, and
   its read client must answer `getChainId()` with the configured chain.
 - The runnable examples need the wallet's deployment identity env

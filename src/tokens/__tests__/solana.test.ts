@@ -10,6 +10,8 @@ const solana = vi.hoisted(() => ({
   mintDecimals: 6 as number,
   calls: [] as string[],
   confirmErr: null as unknown,
+  /** null = normal `{ value: { err } }`; anything else is returned verbatim. */
+  confirmResult: null as unknown,
   checkedDecimals: [] as number[],
 }));
 
@@ -30,7 +32,7 @@ vi.mock('@solana/web3.js', () => {
         solana.sent.push(tx);
         return 'test-signature';
       };
-      confirmTransaction = async () => ({ value: { err: solana.confirmErr } });
+      confirmTransaction = async () => (solana.confirmResult === null ? { value: { err: solana.confirmErr } } : solana.confirmResult);
     },
     Keypair: { fromSecretKey: () => ({ publicKey: new PublicKey('sender') }) },
     Transaction: class {
@@ -65,6 +67,7 @@ beforeEach(() => {
   solana.sent.length = 0;
   solana.calls.length = 0;
   solana.confirmErr = null;
+  solana.confirmResult = null;
   solana.getAccountInfo.mockReset().mockResolvedValue(null);
   solana.createAta.mockReset().mockReturnValue({ amount: 0n });
   solana.transfer.mockReset();
@@ -199,6 +202,14 @@ describe('Solana SPL scale and cluster binding (finding 1)', () => {
     const wallet = createSolanaWallet({ keypairBytes: new Uint8Array(64) });
     solana.confirmErr = { InstructionError: [0, 'Custom'] };
     await expect(wallet.sendSol('recipient', '1')).rejects.toMatchObject({ signature: 'test-signature' });
+  });
+
+  it('treats a missing confirmation result as unknown, never success (Codex round 8)', async () => {
+    const wallet = createSolanaWallet({ keypairBytes: new Uint8Array(64) });
+    solana.confirmResult = {};
+    await expect(wallet.sendSol('recipient', '1')).rejects.toMatchObject({ signature: 'test-signature', outcome: 'unknown' });
+    solana.confirmResult = undefined;
+    await expect(wallet.sendSol('recipient', '1')).rejects.toMatchObject({ outcome: 'unknown' });
   });
 
   it('accepts an explicitly configured devnet cluster', async () => {

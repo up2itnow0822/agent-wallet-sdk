@@ -536,10 +536,18 @@ export class SolanaWallet {
     transaction.sign(keypair);
     const signature: string = await connection.sendRawTransaction(transaction.serialize());
     const confirmation = await connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, 'confirmed');
-    if (confirmation?.value?.err) {
+    const value = confirmation?.value;
+    if (!value || typeof value !== 'object' || !('err' in value)) {
+      // No confirmation result: the outcome is unknown, never success.
       throw Object.assign(
-        new Error(`Solana transaction ${signature} failed: ${JSON.stringify(confirmation.value.err)}`),
-        { signature },
+        new Error(`Solana transaction ${signature} has no confirmation result; outcome unknown — reconcile the signature before any retry`),
+        { signature, outcome: 'unknown' as const },
+      );
+    }
+    if (value.err !== null) {
+      throw Object.assign(
+        new Error(`Solana transaction ${signature} failed: ${JSON.stringify(value.err)}`),
+        { signature, outcome: 'failed' as const },
       );
     }
     return signature;

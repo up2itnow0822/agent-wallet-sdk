@@ -390,3 +390,62 @@ describe('Horizon network is re-checked before every submission (Codex round 4)'
     expect(calls.filter((c) => c.endsWith('/') && c.startsWith('GET')).length).toBeGreaterThanOrEqual(5);
   });
 });
+
+describe('4xx rejections are decided from the ledger (Codex round 8)', () => {
+  const rejected = (code: string) => () => new Response(JSON.stringify({ extras: { result_codes: { transaction: code } } }), { status: 400 });
+
+  it('keeps the reservation for tx_bad_seq when the hash is not yet on the ledger', async () => {
+    const { impl } = horizon({ submit: rejected('tx_bad_seq'), confirm: () => new Response('{}', { status: 404 }) });
+    const budget = new StellarSpendBudget('5');
+    await expect(stellarX402Pay({
+      responseHeaders: headers('stellar:pubnet', '1'), sourcePublicKey: SRC, sign: signer,
+      policy: { maxPerPayment: '5', budget }, adapter: { fetchImpl: impl },
+    })).rejects.toBeInstanceOf(StellarSubmissionUnknownError);
+    expect(budget.occupiedStroops).toBe(10_000_000n);
+    expect(budget.unresolved()).toHaveLength(1);
+  });
+
+  it('commits when a proxy retry got tx_bad_seq but the first submission landed', async () => {
+    const { impl } = horizon({ submit: rejected('tx_bad_seq') }); // confirm: successful
+    const budget = new StellarSpendBudget('5');
+    const r = await stellarX402Pay({
+      responseHeaders: headers('stellar:pubnet', '1'), sourcePublicKey: SRC, sign: signer,
+      policy: { maxPerPayment: '5', budget }, adapter: { fetchImpl: impl },
+    });
+    expect(r.successful).toBe(true);
+    expect(budget.occupiedStroops).toBe(10_000_000n);
+    expect(budget.unresolved()).toHaveLength(0);
+  });
+
+  it('releases only for envelope-deterministic codes', async () => {
+    const { impl } = horizon({ submit: rejected('tx_bad_auth') });
+    const budget = new StellarSpendBudget('5');
+    await expect(stellarX402Pay({
+      responseHeaders: headers('stellar:pubnet', '1'), sourcePublicKey: SRC, sign: signer,
+      policy: { maxPerPayment: '5', budget }, adapter: { fetchImpl: impl },
+    })).rejects.toThrow(/rejected/);
+    expect(budget.occupiedStroops).toBe(0n);
+  });
+});
+
+describe('reconcile requires the recorded submission network (Codex round 8)', () => {
+  it('leaves a reservation without a recorded chain unresolved', async () => {
+    const budget = new StellarSpendBudget('5');
+    const id = budget.reserve('1');
+    budget.markUnknown(id, HASH, { maxTime: 1_700_000_300 }); // no chainId
+    const r = await budget.reconcile(id, new StellarX402Adapter({ network: 'testnet' }));
+    expect(r.status).toBe('unresolved');
+    expect(r.reason).toMatch(/network was recorded/);
+    expect(budget.occupiedStroops).toBe(10_000_000n);
+  });
+});
+
+describe('Stellar API is exported from the package root (Codex round 8)', () => {
+  it('exposes the mandatory budget, adapter, helper and errors', async () => {
+    const root = await import('../../src/index.js');
+    for (const name of ['StellarSpendBudget', 'StellarX402Adapter', 'stellarX402Pay', 'StellarSubmissionUnknownError',
+      'StellarPaymentPolicyError', 'StellarTransactionRejectedError', 'stellarAmountToStroops']) {
+      expect(typeof (root as Record<string, unknown>)[name], name).toBe('function');
+    }
+  });
+});

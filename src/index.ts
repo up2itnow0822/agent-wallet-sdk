@@ -64,6 +64,30 @@ export {
   X402_PROTOCOL_FEE_COLLECTOR,
   x402ProtocolFeeAmount,
   x402DebitAmount,
+  classifyX402SettlementReceipt,
+  // Stellar x402 (optional peer dependency @stellar/stellar-sdk, loaded lazily)
+  StellarX402Adapter,
+  StellarSpendBudget,
+  stellarX402Pay,
+  stellarAmountToStroops,
+  StellarSubmissionUnknownError,
+  StellarPaymentPolicyError,
+  StellarTransactionRejectedError,
+  STELLAR_NETWORK,
+  STELLAR_USDC,
+  STELLAR_RECONCILE_HISTORY_MARGIN_S,
+  STELLAR_DETERMINISTIC_REJECTIONS,
+} from './x402/index.js';
+export type {
+  X402SettlementTransfer,
+  X402ReceiptClassification,
+  StellarNetwork,
+  StellarPaymentConfig,
+  StellarPaymentRequest,
+  StellarPaymentResult,
+  StellarSpendPolicy,
+  StellarTransactionLookup,
+  StellarReconcileResult,
 } from './x402/index.js';
 export type {
   X402PaymentRequired,
@@ -347,7 +371,13 @@ export async function agentExecute(
 
   const walletLogs = receipt.logs.filter(log => log.address.toLowerCase() === wallet.address.toLowerCase());
   const queuedLog = parseEventLogs({ abi: AgentAccountV2Abi, eventName: 'TransactionQueued', logs: walletLogs })
-    .find(log => log.args.to.toLowerCase() === params.to.toLowerCase() && log.args.value === value);
+    // An agentExecute queue entry is a native call (token == NATIVE_TOKEN); a
+    // queued token transfer to the same address (e.g. from a re-entrant target)
+    // is a different action and must not mask this call's execution.
+    .find(log =>
+      log.args.to.toLowerCase() === params.to.toLowerCase() &&
+      log.args.value === value &&
+      log.args.token.toLowerCase() === NATIVE_TOKEN);
   if (queuedLog) {
     return { executed: false, txHash: hash, pendingTxId: queuedLog.args.txId };
   }
