@@ -152,13 +152,21 @@ export class SwapModule {
     };
   }
 
+  /**
+   * Approve `spender` for `amount` if the current allowance is lower. The read
+   * RPC's chain is checked before the allowance read and again after every
+   * read, so no decision or write rests on another network's state.
+   */
   async ensureApproval(token: Address, spender: Address, amount: bigint): Promise<Hash | undefined> {
     validateAmount(amount, 'approval amount');
     const account = this.executionAccount();
+    await this.assertChainBinding();
     const currentAllowance = (await this.publicClient.readContract({
       address: token, abi: ERC20Abi, functionName: 'allowance',
       args: [this.accountAddress, spender],
     })) as bigint;
+    // Also closes the bracket around any reads made before this call (swap quotes).
+    await this.assertChainBinding();
 
     if (currentAllowance >= amount) return undefined;
 
@@ -177,6 +185,7 @@ export class SwapModule {
       address: token, abi: ERC20Abi, functionName: 'allowance',
       args: [this.accountAddress, spender],
     })) as bigint;
+    await this.assertChainBinding();
     if (confirmedAllowance < amount) {
       throw new Error('SwapModule: confirmed allowance does not cover the swap input');
     }
@@ -273,6 +282,8 @@ export class SwapModule {
       console.warn(`SwapModule: High gas estimate (${quote.gasEstimate}). Pool may be illiquid.`);
     }
 
+    // ensureApproval re-checks the read chain after the quote and allowance
+    // reads, so the swap below is never signed on another network's state.
     const approvalTxHash = await this.ensureApproval(tokenIn, this.config.routerAddress, amountIn);
     const approvalRequired = approvalTxHash !== undefined;
 

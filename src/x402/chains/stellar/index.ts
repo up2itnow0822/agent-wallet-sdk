@@ -351,7 +351,7 @@ export class StellarX402Adapter {
     const StellarSdk = await loadStellarSdk();
     try {
       const tx = StellarSdk.TransactionBuilder.fromXDR(xdr, STELLAR_NETWORK[this.network].networkPassphrase);
-      const hash = Buffer.from(tx.hash()).toString('hex').toLowerCase();
+      const hash = bytesToHex(tx.hash());
       if (!STELLAR_TX_HASH.test(hash)) throw new Error('unexpected transaction hash format');
       const rawMax = tx.timeBounds?.maxTime;
       const maxTime = typeof rawMax === 'string' && /^\d{1,15}$/.test(rawMax) ? Number(rawMax) : undefined;
@@ -716,6 +716,11 @@ export async function stellarX402Pay(params: {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/** Lower-case hex of hash bytes without the Node-only Buffer global (browsers, workers). */
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+}
 
 function normalizeHorizonUrl(url: string): string {
   let parsed: URL;

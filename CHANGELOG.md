@@ -22,6 +22,7 @@ all repaired with regression tests). See `docs/security-remediation.md`.
 - Bridge: bounded Circle polling, receipt-bound attestations, burn-term checks, Solana recipient verification, frozen recovery and `resumeEVMToSolana()`, mint ambiguity codes and `usedNonces` reconciliation, recipient/amount derived from attested bytes.
 - x402: bounded 402 body parsing, explicit intents bound to the request fingerprint, `wrapWithX402` snapshots before the first hop. Challenges nested deeper than `X402_MAX_CHALLENGE_DEPTH` (32) are never paid; the earlier guard relied on the engine's stack limit, and on Node 26 a deep challenge was paid and then failed while attaching the proof.
 - Package: compiled tests and test helpers are no longer published.
+- Post-merge Codex review: the package root re-exports every public submodule value and type (Solana bridge constants and `EVMBridgeChain`, the Abstract x402 facilitator API, multi-chain swap token tables; checked by `test/root-exports.test.ts`); `reconcileLocked` re-checks the RPC chain after its evidence reads; Stellar hashing no longer uses the Node-only `Buffer` global; swaps re-check the read chain after the quote and allowance reads, before each approve or swap write.
 - Stellar: exact chain matching, configured Horizon with network check, bounded I/O, verified settlement, spend budget.
 - UAID: strict broker schema, bounded broker I/O, bounded LRU cache.
 - Examples default to Base Sepolia and never auto-run.

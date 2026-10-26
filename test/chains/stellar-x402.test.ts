@@ -2,9 +2,11 @@
  * Stellar x402 regression tests — findings 7, 10, 17, 21, 26.
  * @stellar/stellar-sdk is mocked; no network or funds are used.
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('@stellar/stellar-sdk', () => {
+  // Captured so the SDK mock keeps working when a test hides the Node global.
+  const NodeBuffer = Buffer;
   class Account { constructor(readonly id: string, readonly seq: string) {} }
   class Asset { constructor(readonly code: string, readonly issuer: string) {} }
   class TransactionBuilder {
@@ -17,7 +19,7 @@ vi.mock('@stellar/stellar-sdk', () => {
     static fromXDR(xdr: string, passphrase: string) {
       if (!xdr.includes(passphrase)) throw new Error('network mismatch');
       return {
-        hash: () => Buffer.from((xdr.includes('EVIL') ? 'cd' : 'ab').repeat(32), 'hex'),
+        hash: () => NodeBuffer.from((xdr.includes('EVIL') ? 'cd' : 'ab').repeat(32), 'hex'),
         timeBounds: { minTime: '0', maxTime: '1700000300' },
       };
     }
@@ -490,5 +492,24 @@ describe('Stellar API is exported from the package root (Codex round 8)', () => 
       'StellarPaymentPolicyError', 'StellarTransactionRejectedError', 'stellarAmountToStroops']) {
       expect(typeof (root as Record<string, unknown>)[name], name).toBe('function');
     }
+  });
+});
+
+describe('Stellar hashing does not need the Node Buffer global (Codex post-merge #98)', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('computes the transaction identity in a runtime without Buffer', async () => {
+    const adapter = new StellarX402Adapter({ network: 'pubnet' });
+    const xdr = `XDR|${STELLAR_NETWORK.pubnet.networkPassphrase}|[]`;
+    vi.stubGlobal('Buffer', undefined);
+    expect(await adapter.transactionIdentity(xdr)).toEqual({ hash: HASH, maxTime: 1_700_000_300 });
+  });
+
+  it('accepts the hash as a plain Uint8Array', async () => {
+    const { TransactionBuilder } = await import('@stellar/stellar-sdk') as unknown as { TransactionBuilder: { fromXDR: (x: string, p: string) => { hash: () => Uint8Array } } };
+    const spy = vi.spyOn(TransactionBuilder, 'fromXDR').mockReturnValue({ hash: () => new Uint8Array(32).fill(0xab) } as never);
+    const adapter = new StellarX402Adapter({ network: 'pubnet' });
+    expect((await adapter.transactionIdentity('XDR')).hash).toBe(HASH);
+    spy.mockRestore();
   });
 });

@@ -214,3 +214,46 @@ describe('swap output floor and chain binding (finding 11)', () => {
     expect(sent).toEqual([]);
   });
 });
+
+describe('swap re-checks the read chain after its reads, before each write (Codex post-merge #98)', () => {
+  // A load-balanced read RPC: answers the listed chains in order, then `after`.
+  const chains = (getChainId: ReturnType<typeof vi.fn>, first: number[], after: number) => {
+    const queue = [...first];
+    getChainId.mockImplementation(async () => (queue.length ? queue.shift()! : after));
+  };
+
+  it('does not swap when the chain moved during the quote reads', async () => {
+    const { module, sent, getChainId } = harness();
+    chains(getChainId, [8453], 1);
+    await expect(module.swap(TOKEN_IN, TOKEN_OUT, 100_000n, { minAmountOut: 1n })).rejects.toThrow(/RPC serves chain 1/);
+    expect(sent).toEqual([]);
+  });
+
+  it('does not approve when the chain moved during the allowance read', async () => {
+    const { module, sent, getChainId } = harness({ allowance: 0n });
+    chains(getChainId, [8453, 8453], 1);
+    await expect(module.swap(TOKEN_IN, TOKEN_OUT, 100_000n, { minAmountOut: 1n })).rejects.toThrow(/RPC serves chain 1/);
+    expect(sent).toEqual([]);
+  });
+
+  it('does not swap when the chain moved during the confirmed-allowance read', async () => {
+    const { module, sent, getChainId } = harness({ allowance: 0n });
+    chains(getChainId, [8453, 8453, 8453], 1);
+    await expect(module.swap(TOKEN_IN, TOKEN_OUT, 100_000n, { minAmountOut: 1n })).rejects.toThrow(/RPC serves chain 1/);
+    expect(sent.map((t) => t.to)).toEqual([TOKEN_IN]); // the approval only
+  });
+
+  it('checks the read chain when ensureApproval is called on its own', async () => {
+    const { module, sent, readContract } = harness({ allowance: 0n, rpcChainId: 1 });
+    await expect(module.ensureApproval(TOKEN_IN, ACCOUNT, 100_000n)).rejects.toThrow(/RPC serves chain 1/);
+    expect(readContract).not.toHaveBeenCalled();
+    expect(sent).toEqual([]);
+  });
+
+  it('still approves and swaps on a stable chain', async () => {
+    const { module, sent } = harness({ allowance: 0n });
+    const r = await module.swap(TOKEN_IN, TOKEN_OUT, 100_000n, { minAmountOut: 1n });
+    expect(r.approvalRequired).toBe(true);
+    expect(sent.map((t) => t.to)).toHaveLength(2);
+  });
+});

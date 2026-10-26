@@ -923,3 +923,41 @@ describe('incomplete hash evidence never releases a lock (Codex round 10)', () =
     expect((await policy.reconcileLocked(reservation, reverted)).status).toBe('released');
   });
 });
+
+describe('reconcileLocked re-checks the chain after its evidence reads (Codex post-merge #98)', () => {
+  const HASH_A = ('0x' + 'a'.repeat(64)) as `0x${string}`;
+  const CALL = { from: '0x' + '1'.repeat(40), to: '0x' + '2'.repeat(40), data: '0xa9059cbb' };
+  // A load-balanced RPC that answers the first chain check on the recorded
+  // chain and then serves the evidence from another network.
+  const switching = (status: string, chains: number[]) => {
+    const getChainId = vi.fn(async () => chains.shift() ?? 1);
+    return {
+      getChainId,
+      getTransactionReceipt: async ({ hash }: { hash: string }) => ({ transactionHash: hash, status }),
+      getTransaction: async ({ hash }: { hash: string }) => ({ hash, from: CALL.from, to: CALL.to, input: CALL.data }),
+    };
+  };
+  async function locked() {
+    const policy = new SpendingPolicy({ rollingCap: { maxAmount: 100, windowMs: 86_400_000 } });
+    const r = await policy.reserve({ merchant: 'm', amount: 80 });
+    policy.lock(r.reservation!, { chainId: 8453, txHashes: [HASH_A], ...CALL });
+    return { policy, reservation: r.reservation! };
+  }
+
+  it.each(['reverted', 'success'])('neither releases nor commits on %s evidence when the chain moved during the reads', async (status) => {
+    const { policy, reservation } = await locked();
+    const client = switching(status, [8453, 1]);
+    const res = await policy.reconcileLocked(reservation, client);
+    expect(res.status).toBe('unresolved');
+    expect(res.reason).toMatch(/chain/);
+    expect(client.getChainId).toHaveBeenCalledTimes(2);
+    expect(policy.getReservation(reservation.reservationId)?.status).toBe('locked');
+  });
+
+  it('still releases when the chain is unchanged before and after the reads', async () => {
+    const { policy, reservation } = await locked();
+    const client = switching('reverted', [8453, 8453]);
+    expect((await policy.reconcileLocked(reservation, client)).status).toBe('released');
+    expect(client.getChainId).toHaveBeenCalledTimes(2);
+  });
+});
