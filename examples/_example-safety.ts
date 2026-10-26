@@ -16,6 +16,7 @@ import { base, baseSepolia } from 'viem/chains';
 import { readDeploymentIdentitySettings, type AgentWalletHandle, type AgentWalletConfig } from '../src/index.js';
 
 export const LIVE_ACK = 'I_UNDERSTAND_THIS_SPENDS_REAL_FUNDS';
+const SECONDS_PER_DAY = 86_400n;
 
 export interface ExampleNetwork {
   chainKey: 'base' | 'base-sepolia';
@@ -90,14 +91,15 @@ export function exampleDeploymentIdentity(
 
 /**
  * Verify, before any write, that the wallet owner has installed an on-chain
- * spend policy for `token` that is no looser than the advertised limits.
+ * spend policy for `token` that is no looser than the advertised limits:
+ * per-tx and period caps within the limits, and a period of at least a day.
  */
 export async function assertInstalledSpendPolicy(
   wallet: AgentWalletHandle,
   token: Address,
   limits: { perTx: bigint; perDay: bigint },
 ): Promise<void> {
-  const [perTxLimit, periodLimit] = await wallet.contract.read.spendPolicies([token]);
+  const [perTxLimit, periodLimit, periodLength] = await wallet.contract.read.spendPolicies([token]);
   if (perTxLimit === 0n && periodLimit === 0n) {
     throw new Error(
       `No on-chain spend policy for ${token}. The owner must call setSpendPolicy ` +
@@ -108,6 +110,13 @@ export async function assertInstalledSpendPolicy(
     throw new Error(
       `Installed policy (perTx ${perTxLimit}, period ${periodLimit}) is looser than the ` +
         `advertised limits (perTx ${limits.perTx}, perDay ${limits.perDay}); refusing to spend.`,
+    );
+  }
+  // A shorter period resets more often than daily: 50 per 60 s is not 50 per day.
+  if (periodLength < SECONDS_PER_DAY) {
+    throw new Error(
+      `Installed policy period is ${periodLength}s, shorter than one day; its cap of ${periodLimit} ` +
+        `would reset more than once a day, so it is looser than ${limits.perDay}/day. Refusing to spend.`,
     );
   }
 }

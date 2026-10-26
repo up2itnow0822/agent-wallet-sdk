@@ -61,14 +61,15 @@
   (one deadline over request + body, byte cap); never await a tee'd clone's
   `cancel()`.
 - Token transfers pin decimals (registry or caller `expectedDecimals`) and
-  bind signer/read/requested chains; Solana re-checks the genesis-hash cluster
-  before every signed transfer (never cached), again immediately before
-  signing, and uses `TransferChecked`.
+  bind signer/read/requested chains; Solana signs only over a blockhash
+  fetched BEFORE a fresh genesis-hash cluster check (never cached), signs
+  locally and submits raw bytes, and uses `TransferChecked`.
   Amounts never truncate.
 - Every AgentAccountV2 write first passes `verifyAgentWallet`, which requires
   a deployment identity (`deployment` or `expectedCodeHash`) unless the caller
   explicitly sets `allowUnverifiedDeployment`, and requires the read RPC's
-  `getChainId()` to equal the wallet chain. Every verification failure
+  `getChainId()` to equal the wallet chain before and after the deployment
+  reads (nothing is cached otherwise). Every verification failure
   (RPC errors included) is an `AgentWalletVerificationError`
   (`src/wallet-verification-error.ts`): a definite pre-broadcast failure, so
   x402 releases its reservation. Execution is classified only from wallet
@@ -97,7 +98,8 @@
 - UAID registration and UAID builders default to the chain's own
   `KNOWN_REGISTRY_ADDRESSES` identity registry (the one `verify()` trusts).
 - UAID `verify()` returns `verified` only after on-chain ERC-8004 checks
-  (`readAgentBinding` first proves the RPC serves the UAID chain);
+  (`readAgentBinding` proves the RPC serves the UAID chain before and after
+  its reads);
   broker claims are `brokerAttested`. The resolution cache is a bounded LRU.
 - Stellar auto-pay requires a spend policy reserved before signing; Horizon
   must report the configured network, re-checked (never cached) before every

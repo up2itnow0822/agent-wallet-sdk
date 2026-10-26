@@ -89,6 +89,26 @@ export const SOLANA_CLUSTER_GENESIS_HASHES = {
 
 export type SolanaCluster = keyof typeof SOLANA_CLUSTER_GENESIS_HASHES;
 
+/** Minimal @solana/web3.js Connection surface used to sign and submit. */
+interface SolanaSendConnection {
+  getLatestBlockhash(commitment?: string): Promise<{ blockhash: string; lastValidBlockHeight: number }>;
+  getGenesisHash(): Promise<string>;
+  sendRawTransaction(raw: unknown): Promise<string>;
+  confirmTransaction(
+    strategy: { signature: string; blockhash: string; lastValidBlockHeight: number },
+    commitment?: string,
+  ): Promise<{ value?: { err?: unknown } } | undefined>;
+}
+
+/** Minimal legacy Transaction surface used to sign and submit. */
+interface SolanaSignableTransaction {
+  recentBlockhash?: string;
+  lastValidBlockHeight?: number;
+  feePayer?: unknown;
+  sign(...signers: unknown[]): void;
+  serialize(): unknown;
+}
+
 /** Thrown before signing when a Solana transfer cannot be bound to a pinned scale or cluster. */
 export class SolanaTransferSafetyError extends Error {
   constructor(message: string) {
@@ -376,8 +396,7 @@ export class SolanaWallet {
       throw new SolanaTransferSafetyError(`SolanaWallet: ${(err as Error).message}`);
     }
 
-    const { PublicKey, SystemProgram, Transaction, sendAndConfirmTransaction } =
-      await loadSolanaWeb3();
+    const { PublicKey, SystemProgram, Transaction } = await loadSolanaWeb3();
     const connection = await this.getConnection();
     await this.assertCluster(connection);
     const keypair = await this.getKeypair();
@@ -390,10 +409,7 @@ export class SolanaWallet {
       })
     );
 
-    // Re-check immediately before signing (no awaits between this and send).
-    await this.assertCluster(connection);
-    const signature = await sendAndConfirmTransaction(connection, transaction, [keypair]);
-    return { signature };
+    return { signature: await this.signAndSend(connection, transaction, keypair) };
   }
 
   /**
@@ -492,14 +508,41 @@ export class SolanaWallet {
       )
     );
 
-    const { Transaction, sendAndConfirmTransaction } = await loadSolanaWeb3();
+    const { Transaction } = await loadSolanaWeb3();
     const transaction = new Transaction().add(...instructions);
+    return { signature: await this.signAndSend(connection, transaction, keypair) };
+  }
 
-    // Re-check immediately before signing: the mint and recipient-account
-    // reads above are awaits during which the endpoint could change clusters.
+  /**
+   * Bind the signed transfer to the configured cluster: fetch the recent
+   * blockhash FIRST, then prove the cluster by genesis hash, then sign locally
+   * with that blockhash and submit the raw bytes. A transaction signed over a
+   * blockhash from the configured cluster cannot execute on any other cluster,
+   * so an endpoint that switches clusters at any point cannot redirect it.
+   */
+  private async signAndSend(
+    connection: SolanaSendConnection,
+    transaction: SolanaSignableTransaction,
+    keypair: { publicKey: unknown },
+  ): Promise<string> {
+    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
+    if (typeof blockhash !== 'string' || blockhash.length === 0) {
+      throw new SolanaTransferSafetyError('Solana RPC returned no recent blockhash');
+    }
     await this.assertCluster(connection);
-    const signature = await sendAndConfirmTransaction(connection, transaction, [keypair]);
-    return { signature };
+    transaction.recentBlockhash = blockhash;
+    transaction.lastValidBlockHeight = lastValidBlockHeight;
+    transaction.feePayer = keypair.publicKey;
+    transaction.sign(keypair);
+    const signature: string = await connection.sendRawTransaction(transaction.serialize());
+    const confirmation = await connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, 'confirmed');
+    if (confirmation?.value?.err) {
+      throw Object.assign(
+        new Error(`Solana transaction ${signature} failed: ${JSON.stringify(confirmation.value.err)}`),
+        { signature },
+      );
+    }
+    return signature;
   }
 
   private pinnedDecimals(mintAddress: string, options: SendSplTokenOptions): number | undefined {

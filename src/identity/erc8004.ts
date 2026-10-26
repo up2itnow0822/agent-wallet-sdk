@@ -367,10 +367,15 @@ export class ERC8004Client {
   async readAgentBinding(agentId: bigint): Promise<{ owner: Address; agentWallet: Address; agentURI: string; blockNumber: bigint }> {
     // The identity registry address is shared across chains: prove the RPC
     // endpoint (not just the client config) serves this client's chain.
-    const rpcChainId = await this.publicClient.getChainId();
-    if (rpcChainId !== this.chain.id) {
-      throw new Error(`ERC8004Client: RPC serves chain ${rpcChainId}, not ${this.config.chain} (${this.chain.id})`);
-    }
+    // The check brackets the reads: a load balancer that switches networks
+    // mid-read invalidates the snapshot instead of verifying another chain.
+    const assertChain = async (when: string) => {
+      const rpcChainId = await this.publicClient.getChainId();
+      if (rpcChainId !== this.chain.id) {
+        throw new Error(`ERC8004Client: RPC serves chain ${rpcChainId}, not ${this.config.chain} (${this.chain.id}) ${when}`);
+      }
+    };
+    await assertChain('before the binding read');
     const blockNumber = await this.publicClient.getBlockNumber();
     const contract = this.getReadContract();
     const [owner, agentWallet, agentURI] = await Promise.all([
@@ -378,6 +383,7 @@ export class ERC8004Client {
       contract.read.getAgentWallet([agentId], { blockNumber }),
       contract.read.tokenURI([agentId], { blockNumber }),
     ]);
+    await assertChain('after the binding read');
     return { owner: owner as Address, agentWallet: agentWallet as Address, agentURI: agentURI as string, blockNumber };
   }
 

@@ -238,10 +238,13 @@ export async function verifyAgentWallet(wallet: Wallet): Promise<void> {
     }
     // `publicClient.chain` is static config: prove the read RPC endpoint itself
     // serves the wallet chain before trusting any deployment evidence from it.
-    const rpcChain = await wallet.publicClient.getChainId();
-    if (rpcChain !== wallet.chain.id) {
-      fail(`read RPC serves chain ${rpcChain}, not the wallet chain ${wallet.chain.id}`);
-    }
+    const assertReadChain = async (when: string) => {
+      const rpcChain = await wallet.publicClient.getChainId();
+      if (rpcChain !== wallet.chain.id) {
+        fail(`read RPC serves chain ${rpcChain}, not the wallet chain ${wallet.chain.id} (${when})`);
+      }
+    };
+    await assertReadChain('before deployment reads');
     const code = await wallet.publicClient.getCode({ address: wallet.address });
     if (!code || code === '0x') fail('no contract code at this address (EOA or undeployed)');
     if (code!.toLowerCase().startsWith(EIP7702_DELEGATION_PREFIX)) fail('address is an EIP-7702 delegated EOA, not an AgentAccountV2');
@@ -267,6 +270,9 @@ export async function verifyAgentWallet(wallet: Wallet): Promise<void> {
         fail('factory CREATE2 address does not match accountAddress');
       }
     }
+    // Re-check after the reads so evidence from a mid-verification network
+    // switch is discarded rather than cached.
+    await assertReadChain('after deployment reads');
   })().catch((err: unknown) => {
     // Every failure here happens before any write: report it as a typed,
     // definite pre-broadcast verification failure (RPC errors included).

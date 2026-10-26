@@ -468,6 +468,16 @@ describe('agentTransferToken', () => {
     expect(mockWriteFns.agentTransferToken).not.toHaveBeenCalled();
   });
 
+  it('does not cache a verification whose reads came from a switched network (Codex round 6)', async () => {
+    mockWriteFns.agentTransferToken = vi.fn().mockResolvedValue(TX_HASH);
+    mockGetChainId.mockResolvedValueOnce(8453).mockResolvedValueOnce(1);
+    const wallet = makeWallet();
+    const err = await agentTransferToken(wallet, { token: TOKEN, to: OPERATOR, amount: 1n }).catch((e) => e);
+    expect(err).toBeInstanceOf(AgentWalletVerificationError);
+    expect(err.message).toMatch(/after deployment reads/);
+    expect(mockWriteFns.agentTransferToken).not.toHaveBeenCalled();
+  });
+
   it('reports an RPC failure during pre-write verification as a typed verification error, without writing', async () => {
     mockWriteFns.agentTransferToken = vi.fn().mockResolvedValue(TX_HASH);
     mockGetCode.mockRejectedValueOnce(new Error('rpc unavailable'));

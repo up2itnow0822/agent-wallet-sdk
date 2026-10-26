@@ -8,6 +8,8 @@ const solana = vi.hoisted(() => ({
   transfer: vi.fn(),
   genesis: vi.fn(),
   mintDecimals: 6 as number,
+  calls: [] as string[],
+  confirmErr: null as unknown,
   checkedDecimals: [] as number[],
 }));
 
@@ -20,21 +22,29 @@ vi.mock('@solana/web3.js', () => {
     PublicKey,
     Connection: class {
       getAccountInfo = solana.getAccountInfo;
-      getGenesisHash = solana.genesis;
+      getGenesisHash = async () => { solana.calls.push('genesis'); return solana.genesis(); };
+      getLatestBlockhash = async () => { solana.calls.push('blockhash'); return { blockhash: 'BH', lastValidBlockHeight: 10 }; };
+      sendRawTransaction = async (tx: { instructions: Array<{ amount: bigint | number }>; recentBlockhash?: string; signed?: boolean }) => {
+        solana.calls.push('send');
+        if (!tx.signed || tx.recentBlockhash !== 'BH') throw new Error('unsigned or unbound transaction');
+        solana.sent.push(tx);
+        return 'test-signature';
+      };
+      confirmTransaction = async () => ({ value: { err: solana.confirmErr } });
     },
     Keypair: { fromSecretKey: () => ({ publicKey: new PublicKey('sender') }) },
     Transaction: class {
       instructions: Array<{ amount: bigint | number }> = [];
+      recentBlockhash?: string;
+      signed = false;
       add(...instructions: Array<{ amount: bigint | number }>) {
         this.instructions.push(...instructions);
         return this;
       }
+      sign() { solana.calls.push('sign'); this.signed = true; }
+      serialize() { return this; }
     },
     SystemProgram: { transfer: ({ lamports }: { lamports: bigint | number }) => ({ amount: lamports }) },
-    sendAndConfirmTransaction: async (_connection: unknown, tx: { instructions: Array<{ amount: bigint | number }> }) => {
-      solana.sent.push(tx);
-      return 'test-signature';
-    },
   };
 });
 
@@ -53,6 +63,8 @@ vi.mock('@solana/spl-token', () => ({
 
 beforeEach(() => {
   solana.sent.length = 0;
+  solana.calls.length = 0;
+  solana.confirmErr = null;
   solana.getAccountInfo.mockReset().mockResolvedValue(null);
   solana.createAta.mockReset().mockReturnValue({ amount: 0n });
   solana.transfer.mockReset();
@@ -164,6 +176,29 @@ describe('Solana SPL scale and cluster binding (finding 1)', () => {
       .mockResolvedValue('EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG');
     await expect(wallet.sendSplToken('recipient', '1', SOLANA_TOKENS.USDC)).rejects.toThrow(/genesis/);
     expect(solana.sent).toHaveLength(0);
+  });
+
+  it('fetches the blockhash, then proves the cluster, then signs and sends (Codex round 6)', async () => {
+    const wallet = createSolanaWallet({ keypairBytes: new Uint8Array(64) });
+    await wallet.sendSplToken('recipient', '1', SOLANA_TOKENS.USDC);
+    const tail = solana.calls.slice(solana.calls.lastIndexOf('blockhash'));
+    expect(tail).toEqual(['blockhash', 'genesis', 'sign', 'send']);
+  });
+
+  it('never signs when the cluster changes after the blockhash was fetched', async () => {
+    const wallet = createSolanaWallet({ keypairBytes: new Uint8Array(64) });
+    solana.genesis
+      .mockResolvedValueOnce('5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d') // early check
+      .mockResolvedValue('EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG'); // after the blockhash
+    await expect(wallet.sendSol('recipient', '1')).rejects.toThrow(/genesis/);
+    expect(solana.calls).not.toContain('sign');
+    expect(solana.sent).toHaveLength(0);
+  });
+
+  it('reports a confirmed on-chain failure with its signature', async () => {
+    const wallet = createSolanaWallet({ keypairBytes: new Uint8Array(64) });
+    solana.confirmErr = { InstructionError: [0, 'Custom'] };
+    await expect(wallet.sendSol('recipient', '1')).rejects.toMatchObject({ signature: 'test-signature' });
   });
 
   it('accepts an explicitly configured devnet cluster', async () => {

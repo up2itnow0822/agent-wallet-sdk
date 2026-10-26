@@ -42,14 +42,18 @@ describe('example safety (finding 20)', () => {
   });
 
   it('refuses to spend unless the advertised policy is installed and no looser', async () => {
-    const wallet = (perTx: bigint, period: bigint) => ({
-      contract: { read: { spendPolicies: async () => [perTx, period, 86400n, 0n, 0n] } },
+    const wallet = (perTx: bigint, period: bigint, periodLength = 86400n) => ({
+      contract: { read: { spendPolicies: async () => [perTx, period, periodLength, 0n, 0n] } },
     }) as any;
     const token = '0x036CbD53842c5426634e7929541eC2318f3dCF7e';
     const limits = { perTx: 5n, perDay: 50n };
     await expect(assertInstalledSpendPolicy(wallet(0n, 0n), token, limits)).rejects.toThrow(/No on-chain/);
     await expect(assertInstalledSpendPolicy(wallet(10n, 50n), token, limits)).rejects.toThrow(/looser/);
     await expect(assertInstalledSpendPolicy(wallet(5n, 50n), token, limits)).resolves.toBeUndefined();
+    // Codex round 6: a sub-daily period is looser than the advertised daily cap.
+    await expect(assertInstalledSpendPolicy(wallet(5n, 50n, 60n), token, limits)).rejects.toThrow(/shorter than one day/);
+    await expect(assertInstalledSpendPolicy(wallet(5n, 50n, 0n), token, limits)).rejects.toThrow(/shorter than one day/);
+    await expect(assertInstalledSpendPolicy(wallet(5n, 50n, 7n * 86400n), token, limits)).resolves.toBeUndefined();
   });
 });
 

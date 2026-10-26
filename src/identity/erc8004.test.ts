@@ -283,3 +283,10 @@ describe('readAgentBinding is bound to the RPC endpoint chain (Codex round 5)', 
     expect(rpc.readContract).not.toHaveBeenCalled();
   });
 });
+
+describe('readAgentBinding re-checks the chain after its reads (Codex round 6)', () => {
+  it('discards a snapshot read while the endpoint switched networks', async () => {
+    rpc.getChainId.mockResolvedValueOnce(8453).mockResolvedValueOnce(1);
+    await expect(new ERC8004Client({ chain: 'base' }).readAgentBinding(7n)).rejects.toThrow(/after the binding read/);
+  });
+});
