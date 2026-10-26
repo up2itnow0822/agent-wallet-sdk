@@ -13,7 +13,7 @@
  */
 // x402 Client — automatic 402 payment handling for AgentWallet (v6: multi-asset)
 import type { Address, Hash } from 'viem';
-import { encodeFunctionData, isAddress, keccak256, toEventHash, toHex } from 'viem';
+import { decodeEventLog, encodeFunctionData, isAddress, keccak256, toEventHash, toHex } from 'viem';
 import type {
   X402PaymentRequired,
   X402PaymentRequirements,
@@ -104,6 +104,8 @@ type SettlementConfirmation = 'confirmed' | 'unknown' | 'reverted' | 'queued';
 
 type PaymentPhase = 'fee' | 'payee';
 type PreparedTransfer = Readonly<{ token: Address; to: Address; amount: bigint; input: `0x${string}` }>;
+/** A submitted payee transfer: its hash plus the transfer its receipt must evidence. */
+type SubmittedPayee = { txHash: Hash; transfer: PreparedTransfer };
 
 type CachedFeePhase = {
   txHash?: Hash;
@@ -141,6 +143,8 @@ type CachedSettlement = {
   status: 'in-flight' | 'unknown' | 'queued' | 'confirmed' | 'reverted';
   /** Submitted transaction hash once execute() returned. */
   txHash?: Hash;
+  /** The payee transfer behind `txHash`; every receipt is classified against it. */
+  payeeTransfer?: PreparedTransfer;
   /** Client-side budget reservation for this settlement; settled or released exactly once. */
   reservationId?: string;
   /**
@@ -360,6 +364,7 @@ export function buildUnkeyedPendingKey(
 type SettlementReceiptLog = {
   address?: string;
   topics?: readonly string[];
+  data?: string;
 };
 
 type SettlementReceipt = {
@@ -378,19 +383,105 @@ type SettlementReplacementEvent = {
   };
 };
 
+const ERC20_TRANSFER_EVENT_ABI = [{
+  type: 'event',
+  name: 'Transfer',
+  inputs: [
+    { name: 'from', type: 'address', indexed: true },
+    { name: 'to', type: 'address', indexed: true },
+    { name: 'value', type: 'uint256', indexed: false },
+  ],
+}] as const;
+
+/** The token, recipient and amount a settlement receipt must evidence. */
+export type X402SettlementTransfer = Readonly<{ token: string; to: string; amount: bigint }>;
+
+/** Outcome a successful outer receipt evidences for one x402 transfer. */
+export type X402ReceiptClassification = 'settled' | 'queued' | 'unknown';
+
+function decodeQueued(log: SettlementReceiptLog) {
+  try {
+    return decodeEventLog({
+      abi: AgentAccountV2Abi,
+      eventName: 'TransactionQueued',
+      topics: log.topics as [`0x${string}`, ...`0x${string}`[]],
+      data: (log.data ?? '0x') as `0x${string}`,
+    }).args as { to: string; value: bigint; token: string; amount: bigint };
+  } catch {
+    return undefined;
+  }
+}
+
+function decodeTransfer(log: SettlementReceiptLog) {
+  try {
+    return decodeEventLog({
+      abi: ERC20_TRANSFER_EVENT_ABI,
+      eventName: 'Transfer',
+      topics: log.topics as [`0x${string}`, ...`0x${string}`[]],
+      data: (log.data ?? '0x') as `0x${string}`,
+    }).args;
+  } catch {
+    return undefined;
+  }
+}
+
+function queuedMatches(log: SettlementReceiptLog, walletAddr: string, transfer: X402SettlementTransfer): boolean {
+  if (log?.topics?.[0] !== X402_TRANSACTION_QUEUED_TOPIC) return false;
+  if (typeof log.address !== 'string' || log.address.toLowerCase() !== walletAddr) return false;
+  const args = decodeQueued(log);
+  return !!args &&
+    args.to.toLowerCase() === transfer.to.toLowerCase() &&
+    args.token.toLowerCase() === transfer.token.toLowerCase() &&
+    args.amount === transfer.amount &&
+    args.value === 0n;
+}
+
+/**
+ * Classify a successful outer receipt against the exact transfer it should
+ * carry. `queued`: the wallet emitted TransactionQueued for THIS transfer
+ * (recipient, token, amount, no native value). `settled`: the token emitted
+ * Transfer(wallet → recipient, amount). Anything else — no matching event, an
+ * unrelated queue, a missing wallet address — is `unknown`, never payment.
+ */
+export function classifyX402SettlementReceipt(
+  receipt: SettlementReceipt | null | undefined,
+  walletAddress: string | undefined,
+  transfer: X402SettlementTransfer | undefined,
+): X402ReceiptClassification {
+  const logs = receipt?.logs;
+  if (!transfer || typeof walletAddress !== 'string' || !Array.isArray(logs)) return 'unknown';
+  const walletAddr = walletAddress.toLowerCase();
+  if (logs.some((log) => queuedMatches(log, walletAddr, transfer))) return 'queued';
+  const tokenAddr = transfer.token.toLowerCase();
+  const moved = logs.some((log) => {
+    if (typeof log?.address !== 'string' || log.address.toLowerCase() !== tokenAddr) return false;
+    const args = decodeTransfer(log);
+    return !!args &&
+      args.from.toLowerCase() === walletAddr &&
+      args.to.toLowerCase() === transfer.to.toLowerCase() &&
+      args.value === transfer.amount;
+  });
+  return moved ? 'settled' : 'unknown';
+}
+
 /**
  * True when the agent wallet emitted TransactionQueued. The outer tx can still
  * be `success` — the spend was parked for owner approval and no tokens moved.
+ * Pass `transfer` to count only a queued entry for that exact transfer.
  */
 export function x402SettlementReceiptIsQueued(
   receipt: SettlementReceipt | null | undefined,
   walletAddress?: string,
+  transfer?: X402SettlementTransfer,
 ): boolean {
   const logs = receipt?.logs;
   if (!Array.isArray(logs) || logs.length === 0) {
     return false;
   }
   const walletAddr = typeof walletAddress === 'string' ? walletAddress.toLowerCase() : '';
+  if (transfer) {
+    return !!walletAddr && logs.some((log) => queuedMatches(log, walletAddr, transfer));
+  }
   return logs.some((log) => {
     if (log?.topics?.[0] !== X402_TRANSACTION_QUEUED_TOPIC) {
       return false;
@@ -1048,11 +1139,14 @@ export class X402Client {
   private async executeReservedSettlement(
     key: string,
     entry: CachedSettlement,
-    execute: (intent: { key: string; termsFingerprint: string }) => Promise<{ txHash: Hash }>,
+    execute: (intent: { key: string; termsFingerprint: string }) => Promise<SubmittedPayee>,
   ): Promise<{ txHash: Hash }> {
     let result: { txHash: Hash };
+    let transfer: PreparedTransfer;
     try {
-      result = await execute({ key, termsFingerprint: entry.termsFingerprint });
+      const submitted = await execute({ key, termsFingerprint: entry.termsFingerprint });
+      result = { txHash: submitted.txHash };
+      transfer = submitted.transfer;
       entry.feePhasePending = false;
       entry.unverifiedReplacement = undefined;
     } catch (error) {
@@ -1082,8 +1176,9 @@ export class X402Client {
     }
 
     entry.txHash = result.txHash;
+    entry.payeeTransfer = transfer;
     try {
-      const settledHash = await this.waitForSettlementReceipt(result.txHash);
+      const settledHash = await this.waitForSettlementReceipt(result.txHash, transfer);
       entry.txHash = settledHash;
       result = { txHash: settledHash };
     } catch (receiptError) {
@@ -1112,7 +1207,7 @@ export class X402Client {
   private async resumePendingFeeSettlement(
     key: string,
     entry: CachedSettlement,
-    execute: (intent: { key: string; termsFingerprint: string }) => Promise<{ txHash: Hash }>,
+    execute: (intent: { key: string; termsFingerprint: string }) => Promise<SubmittedPayee>,
   ): Promise<PaymentResult | null> {
     if (entry.status === 'in-flight') {
       const observed = await this.observeSettledPayment(entry.promise, true);
@@ -1150,7 +1245,7 @@ export class X402Client {
   private async executeUnkeyedPayment(
     key: string,
     termsFingerprint: string,
-    execute: (intent: { key: string; termsFingerprint: string }) => Promise<{ txHash: Hash }>,
+    execute: (intent: { key: string; termsFingerprint: string }) => Promise<SubmittedPayee>,
     authorize: AuthorizeFreshTransfer,
     paymentIdempotencyKey: string,
     retryWindowMs: number = X402_SETTLEMENT_RETRY_WINDOW_MS,
@@ -1291,7 +1386,7 @@ export class X402Client {
   private async settlePayment(
     key: string,
     termsFingerprint: string,
-    execute: (intent: { key: string; termsFingerprint: string }) => Promise<{ txHash: Hash }>,
+    execute: (intent: { key: string; termsFingerprint: string }) => Promise<SubmittedPayee>,
     authorize: AuthorizeFreshTransfer,
     retryWindowMs: number = X402_SETTLEMENT_RETRY_WINDOW_MS,
   ): Promise<PaymentResult | null> {
@@ -1444,7 +1539,7 @@ export class X402Client {
     }
     const confirming = (async (): Promise<SettlementConfirmation> => {
       try {
-        const settledHash = await this.waitForSettlementReceipt(txHash);
+        const settledHash = await this.waitForSettlementReceipt(txHash, entry.payeeTransfer);
         if (this.paymentSettlements.get(key) === entry) {
           if (entry.log) {
             entry.log.txHash = settledHash;
@@ -1523,7 +1618,12 @@ export class X402Client {
    * Treat `replaced` as unknown so the reservation stays and a retry cannot
    * pay again. A hash mismatch without `onReplaced` is also unknown.
    */
-  private async waitForSettlementReceipt(txHash: Hash): Promise<Hash> {
+  /** Classify a receipt against the phase transfer (see classifyX402SettlementReceipt). */
+  private classifyReceipt(receipt: SettlementReceipt | null, transfer: PreparedTransfer | undefined): X402ReceiptClassification {
+    return classifyX402SettlementReceipt(receipt, this.wallet?.address, transfer);
+  }
+
+  private async waitForSettlementReceipt(txHash: Hash, transfer: PreparedTransfer | undefined): Promise<Hash> {
     if (!EVM_TX_HASH.test(txHash)) {
       throw new X402SettlementUnknownError(undefined, 'x402 submission did not return a valid transaction hash');
     }
@@ -1589,7 +1689,7 @@ export class X402Client {
       // Keep the original hash so later reconfirm still observes the replacement
       // relationship. Adopting replacementHash would let a later wait treat the
       // unrelated success receipt as the payment.
-      if (receipt && x402SettlementReceiptIsQueued(receipt, this.wallet?.address)) {
+      if (receipt && this.classifyReceipt(receipt, transfer) === 'queued') {
         throw new X402SettlementQueuedError(replacementOutcomeHash);
       }
       throw new X402SettlementUnknownError(
@@ -1605,8 +1705,16 @@ export class X402Client {
           : `x402 settlement receipt missing (${txHash})`,
       );
     }
-    if (x402SettlementReceiptIsQueued(receipt, this.wallet?.address)) {
+    const classification = this.classifyReceipt(receipt, transfer);
+    if (classification === 'queued') {
       throw new X402SettlementQueuedError(adoptedHash);
+    }
+    if (classification !== 'settled') {
+      // A successful outer receipt is not payment: without this transfer's
+      // token Transfer (or its own queue entry) the outcome stays unknown.
+      throw new X402SettlementUnknownError(txHash,
+        `x402 settlement receipt ${adoptedHash} has no matching token Transfer or queued entry; outcome unknown`,
+      );
     }
     if (!EVM_TX_HASH.test(adoptedHash)) {
       throw new X402SettlementUnknownError(txHash, 'x402 replacement receipt has no valid transaction hash');
@@ -1827,7 +1935,7 @@ export class X402Client {
       );
     }
     try {
-      entry.txHash = await this.waitForSettlementReceipt(entry.txHash);
+      entry.txHash = await this.waitForSettlementReceipt(entry.txHash, entry.transfer);
       entry.status = 'confirmed';
     } catch (error) {
       if (error instanceof X402SettlementQueuedError) {
@@ -1903,7 +2011,7 @@ export class X402Client {
   private async executePayment(
     req: X402PaymentRequirements,
     intent?: { key: string; termsFingerprint: string },
-  ): Promise<{ txHash: Hash }> {
+  ): Promise<SubmittedPayee> {
     if (req.scheme !== 'exact') {
       throw new X402PaymentError(
         `Unsupported payment scheme "${req.scheme}"; only "exact" transfers are implemented`,
@@ -1992,7 +2100,7 @@ export class X402Client {
     // Execute the ERC20 transfer via AgentWallet (full amount to payee)
     const txHash = await this.submitTransfer(payeeTransfer, 'payee', intent?.key, req);
 
-    return { txHash };
+    return { txHash, transfer: payeeTransfer };
   }
 
   private prepareTransfer(token: Address, to: Address, amount: bigint): PreparedTransfer {
@@ -2092,9 +2200,11 @@ export class X402Client {
         ) {
           throw unknown('x402 reconciliation transaction does not match the attempted wallet transfer');
         }
+        // Later reconfirmations of this payee hash classify against its transfer.
+        if (phase === 'payee') entry.payeeTransfer = pending.transfer;
         let settledHash: Hash;
         try {
-          settledHash = await this.waitForSettlementReceipt(txHash);
+          settledHash = await this.waitForSettlementReceipt(txHash, pending.transfer);
         } catch (error) {
           if (error instanceof X402SettlementRevertedError) {
             if (phase === 'fee') this.feePhases.delete(key);

@@ -150,11 +150,11 @@ describe('setOperator', () => {
   });
 });
 
-function executedLog(target: Address, value: bigint, emitter: Address = ACCOUNT) {
+function executedLog(target: Address, value: bigint, emitter: Address = ACCOUNT, callData: `0x${string}` = '0x') {
   return {
     address: emitter,
     topics: encodeEventTopics({ abi: AgentAccountV2Abi, eventName: 'TransactionExecuted', args: { target: target.toLowerCase() as Address, executor: OPERATOR.toLowerCase() as Address } }),
-    data: encodeAbiParameters([{ type: 'uint256' }, { type: 'bytes' }], [value, '0x']),
+    data: encodeAbiParameters([{ type: 'uint256' }, { type: 'bytes' }], [value, callData]),
   };
 }
 
@@ -196,7 +196,7 @@ describe('agentExecute', () => {
 
   it('passes custom data', async () => {
     mockWriteFns.agentExecute = vi.fn().mockResolvedValue(TX_HASH);
-    mockWaitForReceipt.mockResolvedValue({ status: 'success', logs: [executedLog(TOKEN, 0n)] });
+    mockWaitForReceipt.mockResolvedValue({ status: 'success', logs: [executedLog(TOKEN, 0n, ACCOUNT, '0xdeadbeef')] });
     await agentExecute(makeWallet(), { to: TOKEN, value: 0n, data: '0xdeadbeef' });
     expect(mockWriteFns.agentExecute).toHaveBeenCalledWith([TOKEN, 0n, '0xdeadbeef'], expect.objectContaining({ value: 0n, chain: expect.objectContaining({ id: 8453 }) }));
   });
@@ -221,6 +221,19 @@ describe('agentExecute', () => {
       data: encodeAbiParameters([{ type: 'uint256' }, { type: 'address' }, { type: 'uint256' }], [0n, TOKEN.toLowerCase() as Address, 10n]),
     }] });
     expect(await agentExecute(makeWallet(), { to: OPERATOR })).toMatchObject({ executed: false, pendingTxId: 7n, txHash: TX_HASH });
+  });
+
+  it('does not report executed from a same-target, same-value event with different calldata (Codex round 3)', async () => {
+    mockWriteFns.agentExecute = vi.fn().mockResolvedValue(TX_HASH);
+    mockWaitForReceipt.mockResolvedValue({ status: 'success', logs: [executedLog(TOKEN, 0n, ACCOUNT, '0xcafebabe')] });
+    await expect(agentExecute(makeWallet(), { to: TOKEN, value: 0n, data: '0xdeadbeef' }))
+      .rejects.toMatchObject({ executionStatus: 'unknown', txHash: TX_HASH });
+  });
+
+  it('matches calldata case-insensitively', async () => {
+    mockWriteFns.agentExecute = vi.fn().mockResolvedValue(TX_HASH);
+    mockWaitForReceipt.mockResolvedValue({ status: 'success', logs: [executedLog(TOKEN, 0n, ACCOUNT, '0xdeadbeef')] });
+    expect(await agentExecute(makeWallet(), { to: TOKEN, value: 0n, data: '0xDEADBEEF' })).toMatchObject({ executed: true });
   });
 
   // ── Finding 3 ──

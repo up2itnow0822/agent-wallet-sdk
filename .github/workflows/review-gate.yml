@@ -331,6 +331,22 @@ jobs:
             // this, so every base move invalidates earlier review evidence.
             // Unknown => Infinity: a stable, fail-closed value (no evidence
             // can qualify) that keeps snapshots comparable between reads.
+            // BEGIN latestBaseMoveMs
+            // Time (ms) the base branch last moved TO `baseSha`, from the
+            // repository activity list (GET /repos/{o}/{r}/activity; each
+            // entry has `after` and an ISO-8601 `timestamp`). No matching
+            // entry or no valid time => +Infinity (fail closed).
+            function latestBaseMoveMs(activities, baseSha) {
+              const want = typeof baseSha === 'string' && /^[0-9a-f]{40}$/i.test(baseSha) ? baseSha.toLowerCase() : '';
+              if (!want || !Array.isArray(activities)) return Number.POSITIVE_INFINITY;
+              const times = activities
+                .filter(a => a && typeof a.after === 'string' && a.after.toLowerCase() === want && typeof a.timestamp === 'string')
+                .map(a => Date.parse(a.timestamp))
+                .filter(Number.isFinite);
+              return times.length ? Math.max(...times) : Number.POSITIVE_INFINITY;
+            }
+            // END latestBaseMoveMs
+
             async function baseShaSinceMs(pr) {
               const baseSha = await baseTipSha(pr);
               const baseRef = pr.base && pr.base.ref;
@@ -342,12 +358,7 @@ jobs:
                   ref: `refs/heads/${baseRef}`,
                   per_page: 100,
                 });
-                const hit = (Array.isArray(data) ? data : [])
-                  .filter(a => sameSha(a.after, baseSha) && a.timestamp)
-                  .map(a => Date.parse(a.timestamp))
-                  .filter(Number.isFinite)
-                  .sort((x, y) => y - x)[0];
-                return hit === undefined ? Number.POSITIVE_INFINITY : hit;
+                return latestBaseMoveMs(data, baseSha);
               } catch (err) {
                 core.warning(`base activity lookup failed (${err.message}); failing closed`);
                 return Number.POSITIVE_INFINITY;

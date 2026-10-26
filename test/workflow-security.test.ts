@@ -29,7 +29,8 @@ describe('review-gate evidence binding (finding 19)', () => {
 
   it('dates evidence against the base SHA move (activity log) and fails closed', () => {
     expect(src).toContain("GET /repos/{owner}/{repo}/activity");
-    expect(src).toMatch(/hit === undefined \? Number\.POSITIVE_INFINITY : hit/);
+    // Fail-closed parsing is behaviour-tested below (latestBaseMoveMs).
+    expect(src).toMatch(/return times\.length \? Math\.max\(\.\.\.times\) : Number\.POSITIVE_INFINITY;/);
     expect(src).toContain("title: 'Base change time unavailable'");
     expect(src).toMatch(/timelineFacts\(prNumber, pr\)/);
   });
@@ -86,5 +87,34 @@ describe('review-gate accepts a clean Codex pass by full SHA (review follow-up)'
 
   it('still accepts a legacy table row with the full SHA', () => {
     expect(codexCleanSummaryShas(summary('{}', `\`${HEAD}\``))).toEqual([HEAD]);
+  });
+});
+
+describe('review-gate reads base-move time from the real activity payload (Codex round 3)', () => {
+  const src = readFileSync(join(WF, 'review-gate.yml'), 'utf8');
+  const fn = /\/\/ BEGIN latestBaseMoveMs\n([\s\S]*?)\/\/ END latestBaseMoveMs/.exec(src)?.[1];
+  // eslint-disable-next-line @typescript-eslint/no-implied-eval
+  const latestBaseMoveMs = new Function(`${fn}\nreturn latestBaseMoveMs;`)() as (a: unknown, sha: string) => number;
+  // Verbatim fields from GET /repos/up2itnow0822/agent-wallet-sdk/activity?ref=refs/heads/main (2026-10-26).
+  const REAL = [
+    { activity_type: 'pr_merge', after: '8a8b3a4a62b384d618b58a894fdec0640480ad50', before: 'ccc1418da46e92a0d5f33573f75fa61623b96390', id: 47583923740, ref: 'refs/heads/main', timestamp: '2026-10-24T00:51:11Z' },
+    { activity_type: 'pr_merge', after: 'ccc1418da46e92a0d5f33573f75fa61623b96390', before: 'fb8f3a6c9e09c5e2beeb108dc790df9bb7593933', id: 47582748220, ref: 'refs/heads/main', timestamp: '2026-10-24T00:31:51Z' },
+  ];
+
+  it('is used by baseShaSinceMs', () => {
+    expect(fn).toBeTruthy();
+    expect(src).toMatch(/return latestBaseMoveMs\(data, baseSha\);/);
+  });
+
+  it('returns the documented `timestamp` of the move to the current base tip', () => {
+    expect(latestBaseMoveMs(REAL, '8a8b3a4a62b384d618b58a894fdec0640480ad50')).toBe(Date.parse('2026-10-24T00:51:11Z'));
+    expect(latestBaseMoveMs(REAL, 'CCC1418DA46E92A0D5F33573F75FA61623B96390')).toBe(Date.parse('2026-10-24T00:31:51Z'));
+  });
+
+  it('fails closed (Infinity) for an unknown tip, short SHA, missing time or bad payload', () => {
+    expect(latestBaseMoveMs(REAL, 'f'.repeat(40))).toBe(Infinity);
+    expect(latestBaseMoveMs(REAL, '8a8b3a4')).toBe(Infinity);
+    expect(latestBaseMoveMs([{ ...REAL[0], timestamp: undefined }], REAL[0].after)).toBe(Infinity);
+    expect(latestBaseMoveMs({ message: 'Not Found' }, REAL[0].after)).toBe(Infinity);
   });
 });

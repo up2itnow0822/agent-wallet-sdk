@@ -1,5 +1,5 @@
 // [MAX-ADDED] Tests for x402 Client — protocol parsing and payment selection
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import {
   X402Client,
   X402BudgetExceededError,
@@ -23,6 +23,7 @@ import {
   X402SettlementBacklogError,
 } from '../client.js';
 import { USDC_ADDRESSES } from '../types.js';
+import { stubReceiptEvidence } from './receipt-evidence.js';
 import type { X402PaymentRequired, X402PaymentRequirements } from '../types.js';
 
 type X402ClientPaymentInternals = {
@@ -41,6 +42,13 @@ const mockWallet = walletOnChain(8453, {
     waitForTransactionReceipt: async () => ({ status: 'success' }),
   },
 });
+
+// These are protocol state-machine tests: like executePayment above, the
+// chain-evidence layer is stubbed. A successful receipt counts as settled
+// unless the wallet emitted TransactionQueued. Receipt classification against
+// the exact transfer (Transfer / matching queue entry) is covered by
+// funds-safety.test.ts and the classifyX402SettlementReceipt tests below.
+beforeEach(() => { stubReceiptEvidence(); });
 
 afterEach(() => {
   vi.useRealTimers();

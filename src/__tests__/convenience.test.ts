@@ -9,6 +9,7 @@ import {
 } from '../convenience.js';
 import { USDC_ADDRESSES, X402_PROTOCOL_FEE_COLLECTOR } from '../x402/index.js';
 import type { X402PaymentRequirements } from '../x402/types.js';
+import { transferLog } from '../x402/__tests__/receipt-evidence.js';
 
 const TEST_PRIVATE_KEY = `0x${'01'.repeat(32)}`;
 
@@ -221,7 +222,14 @@ describe('USDC environment spending controls', () => {
         write: { agentTransferToken: transfer, setSpendPolicy: setPolicy },
       },
       publicClient: {
-        waitForTransactionReceipt: vi.fn(async () => ({ status: 'success' })),
+        // Each receipt carries the ERC-20 Transfer of every submitted call.
+        waitForTransactionReceipt: vi.fn(async () => ({
+          status: 'success',
+          logs: transfer.mock.calls.map(([args]) => {
+            const [token, to, amount] = args as [string, string, bigint];
+            return transferLog(token, otherRecipient, to, amount);
+          }),
+        })),
         getCode: vi.fn(async () => '0x6080604052'),
       },
       expectedCodeHash: keccak256('0x6080604052'),

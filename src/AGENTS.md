@@ -70,9 +70,12 @@
   (RPC errors included) is an `AgentWalletVerificationError`
   (`src/wallet-verification-error.ts`): a definite pre-broadcast failure, so
   x402 releases its reservation. Execution is classified only from wallet
-  events matching the requested call (`TransactionExecuted`, or
-  `TransactionQueued` matching recipient/value and, for `agentTransferToken`,
-  token/amount) or a matching ERC-20 `Transfer`; anything else is `unknown`.
+  events matching the requested call (`TransactionExecuted` with matching
+  target/value/calldata, or `TransactionQueued` matching recipient/value and,
+  for token transfers, token/amount) or a matching ERC-20 `Transfer`;
+  anything else is `unknown`. x402 classifies every settlement receipt
+  against its phase's prepared transfer (`classifyX402SettlementReceipt`): a
+  successful outer receipt alone is never payment proof.
 - `SpendingPolicy` snapshots intents once (`snapshotPaymentIntent`). A locked
   reservation is released only by `reconcileLocked` against the submission
   identity and call binding recorded once at lock time; multi-phase
@@ -82,6 +85,11 @@
   are checked from the transmitter-emitted `MessageSent`; post-hash failures
   carry frozen recovery; `usedNonces` is checked before `receiveMessage`;
   reported recipients/amounts come from attested bytes.
+- The package has one entry point (`dist/index.js`): every public module API,
+  including the EVM↔Solana bridge and its recovery (`resumeEVMToSolana`),
+  is re-exported from `src/index.ts`.
+- UAID registration and UAID builders default to the chain's own
+  `KNOWN_REGISTRY_ADDRESSES` identity registry (the one `verify()` trusts).
 - UAID `verify()` returns `verified` only after on-chain ERC-8004 checks;
   broker claims are `brokerAttested`. The resolution cache is a bounded LRU.
 - Stellar auto-pay requires a spend policy reserved before signing; Horizon

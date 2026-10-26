@@ -476,7 +476,12 @@ export class UAIDResolver {
     }
 
     const chainId = EVM_CHAIN_IDS[params.chain];
-    const uaid = `uaid:aid:eip155:${chainId}:${params.registryAddress ?? '0x8004A169FB4a3325136EB29fA0ceB6D2e539a432'};uid=${params.agentId};proto=erc8004`;
+    // The same chain-specific registry verify() trusts; never a cross-chain default.
+    const registry = params.registryAddress ?? KNOWN_REGISTRY_ADDRESSES[params.chain]?.identity;
+    if (!chainId || !registry) {
+      throw new Error(`UAIDResolver: no ERC-8004 identity registry known for chain "${String(params.chain)}"; pass registryAddress`);
+    }
+    const uaid = `uaid:aid:eip155:${chainId}:${registry};uid=${params.agentId};proto=erc8004`;
 
     const response = await this.brokerRequest('POST', '/agents/register', {
       uaid,
@@ -486,7 +491,7 @@ export class UAIDResolver {
       name: params.name,
       description: params.description,
       capabilities: params.capabilities ?? [],
-      registryAddress: params.registryAddress ?? '0x8004A169FB4a3325136EB29fA0ceB6D2e539a432',
+      registryAddress: registry,
     });
 
     if (!response.ok) {

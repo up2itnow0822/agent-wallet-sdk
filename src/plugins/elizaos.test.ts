@@ -7,6 +7,7 @@ import type { AgentWalletPluginConfig } from './elizaos.js';
 import { USDC_ADDRESSES } from '../x402/types.js';
 import { X402_PROTOCOL_FEE_COLLECTOR } from '../x402/fee.js';
 import type { X402Fetch } from '../x402/middleware.js';
+import { transferLog } from '../x402/__tests__/receipt-evidence.js';
 
 const { createWalletMock, transfer, receipt, transaction } = vi.hoisted(() => ({
   createWalletMock: vi.fn(), transfer: vi.fn(), receipt: vi.fn(), transaction: vi.fn(),
@@ -70,6 +71,8 @@ function respondWithPayment(opts: { nonce?: string; asset?: string } = {}) {
   });
 }
 
+const sent: Array<{ from: string; args: [string, string, bigint] }> = [];
+
 beforeEach(() => {
   createWalletMock.mockReset().mockImplementation((config) => ({
     address: config.accountAddress,
@@ -81,7 +84,12 @@ beforeEach(() => {
         tokenContract: async () => ADDRESS_A,
         tokenId: async () => 1n,
       },
-      write: { agentTransferToken: transfer },
+      write: {
+        agentTransferToken: (args: [string, string, bigint], opts: unknown) => {
+          sent.push({ from: config.accountAddress, args });
+          return transfer(args, opts);
+        },
+      },
     },
     publicClient: {
       waitForTransactionReceipt: receipt,
@@ -91,7 +99,13 @@ beforeEach(() => {
     expectedCodeHash: keccak256('0x6080604052'),
   }));
   transfer.mockReset().mockImplementation(async () => `0x${'ab'.repeat(32)}`);
-  receipt.mockReset().mockResolvedValue({ status: 'success' });
+  sent.length = 0;
+  // A successful receipt carries the ERC-20 Transfer of every submitted
+  // agentTransferToken call (x402 requires each phase transfer's evidence).
+  receipt.mockReset().mockImplementation(async () => ({
+    status: 'success',
+    logs: sent.map(({ from, args: [token, to, amount] }) => transferLog(token, from, to, amount)),
+  }));
   transaction.mockReset();
 });
 

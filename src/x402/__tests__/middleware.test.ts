@@ -1,8 +1,9 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi, beforeEach } from 'vitest';
 import { X402Client } from '../client.js';
 import { createX402Fetch, wrapWithX402 } from '../middleware.js';
+import { stubReceiptEvidence } from './receipt-evidence.js';
 
 type RecordedRequest = {
   method: string;
@@ -44,6 +45,8 @@ const wallet = {
     waitForTransactionReceipt: async () => ({ status: 'success' }),
   },
 } as any;
+// Payment execution is stubbed below, so stub the receipt-evidence layer too.
+beforeEach(() => { stubReceiptEvidence(); });
 const recorded: RecordedRequest[] = [];
 const servers: Array<ReturnType<typeof createServer>> = [];
 

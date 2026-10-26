@@ -10,10 +10,12 @@ export {
   X402SettlementBacklogError,
   X402IntentTermsConflictError,
   x402SettlementReceiptIsQueued,
+  classifyX402SettlementReceipt,
   X402_TRANSACTION_QUEUED_TOPIC,
   encodeX402PaymentHeader,
   decodeX402PaymentHeader,
 } from './client.js';
+export type { X402SettlementTransfer, X402ReceiptClassification } from './client.js';
 export { X402BudgetTracker } from './budget.js';
 export {
   X402_PROTOCOL_FEE_BPS,

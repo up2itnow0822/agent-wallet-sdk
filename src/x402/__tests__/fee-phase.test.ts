@@ -5,13 +5,14 @@ import {
   X402SettlementQueuedError,
   X402SettlementRevertedError,
   X402SettlementUnknownError,
-  X402_TRANSACTION_QUEUED_TOPIC,
 } from '../client.js';
+import { createEvidence, queuedLog } from './receipt-evidence.js';
 
 const FEE_COLLECTOR = '0xff86829393C6C26A4EC122bE0Cc3E466Ef876AdD';
 const USDC = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
 const PAY_TO = '0x1111111111111111111111111111111111111111';
 const URL = 'https://api.example.com/premium/data';
+const WALLET = '0x2222222222222222222222222222222222222222';
 
 const { transfer, onChainBudget } = vi.hoisted(() => ({
   transfer: vi.fn(),
@@ -82,32 +83,34 @@ describe('X402Client protocol-fee phase (#50)', () => {
 
     const remainingFee = [...feeHashes];
     const remainingPayee = [...payeeHashes];
-    transfer.mockImplementation(async (_wallet: unknown, args: { to: string }) => {
+    const ev = createEvidence(WALLET);
+    transfer.mockImplementation(async (_wallet: unknown, args: { token: string; to: string; amount: bigint }) => {
       if (isFeeTransfer(args)) {
         const next = remainingFee.shift();
         if (!next) throw new Error('unexpected extra fee transfer');
-        return next;
+        return ev.record(next, args);
       }
       const next = remainingPayee.shift();
       if (!next) throw new Error('unexpected extra payee transfer');
-      return next;
+      return ev.record(next, args);
     });
     onChainBudget.mockResolvedValue({
       perTxLimit: 10n ** 18n,
       remainingInPeriod: 10n ** 18n,
     });
     const wallet = {
+      address: WALLET,
       chain: { id: 8453 },
       publicClient: {
-        waitForTransactionReceipt: async ({ hash: txHash }: { hash: string }) => {
+        waitForTransactionReceipt: async ({ hash: txHash }: { hash: string }): Promise<Record<string, unknown>> => {
           const status = receiptByHash.get(txHash);
           if (!status) throw new Error(`missing receipt for ${txHash}`);
-          return { status };
+          return status === 'success' ? ev.paid(txHash) : { status };
         },
       },
     };
     mock402ThenPaid(opts.unkeyed ? {} : undefined);
-    return { wallet, feeHashes, payeeHashes };
+    return { wallet, feeHashes, payeeHashes, ev };
   }
 
   it('refuses both transfers when remaining on-chain budget cannot cover amount plus protocol fee', async () => {
@@ -427,14 +430,14 @@ describe('X402Client protocol-fee phase (#50)', () => {
   });
 
   it('single-flights concurrent retries while an unkeyed fee receipt is pending', async () => {
-    const { wallet, feeHashes } = setupTransfers({
+    const { wallet, feeHashes, ev } = setupTransfers({
       feeReceipts: ['success'],
       payeeReceipts: ['success'],
       unkeyed: true,
     });
     let feeReceiptAttempts = 0;
-    let releaseFeeReceipt: (receipt: { status: 'success' | 'reverted' }) => void = () => {};
-    const delayedFeeReceipt = new Promise<{ status: 'success' | 'reverted' }>((resolve) => {
+    let releaseFeeReceipt: (receipt: Record<string, unknown>) => void = () => {};
+    const delayedFeeReceipt = new Promise<Record<string, unknown>>((resolve) => {
       releaseFeeReceipt = resolve;
     });
     const originalWait = wallet.publicClient.waitForTransactionReceipt;
@@ -458,7 +461,7 @@ describe('X402Client protocol-fee phase (#50)', () => {
       client.fetch(URL, { method: 'POST' }),
     ]);
     await vi.waitFor(() => expect(feeReceiptAttempts).toBe(2));
-    releaseFeeReceipt({ status: 'success' });
+    releaseFeeReceipt(ev.paid(feeHashes[0]));
 
     const responses = await retries;
     expect(responses.map((response) => response.status)).toEqual([200, 200]);
@@ -516,7 +519,9 @@ describe('X402Client protocol-fee phase (#50)', () => {
     const originalWait = wallet.publicClient.waitForTransactionReceipt;
     wallet.publicClient.waitForTransactionReceipt = async ({ hash: txHash }: { hash: string }) => {
       if (txHash === feeHashes[0]) {
-        return { status: 'success', logs: [{ topics: [X402_TRANSACTION_QUEUED_TOPIC] }] };
+        // The wallet parked exactly this fee transfer for owner approval.
+        const [, fee] = transfer.mock.calls.find((call) => isFeeTransfer(call[1]))!;
+        return { status: 'success', logs: [queuedLog(WALLET, fee)] };
       }
       return originalWait({ hash: txHash });
     };

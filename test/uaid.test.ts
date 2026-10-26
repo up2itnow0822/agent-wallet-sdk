@@ -283,3 +283,40 @@ describe('UAID review follow-ups (N2, N3, N8, cache config)', () => {
     expect(() => new UAIDResolver({ cacheTtlMs: -1 })).toThrow();
   });
 });
+
+describe('registration uses the chain-specific identity registry (Codex round 3)', () => {
+  afterEach(() => vi.unstubAllGlobals());
+  const SEPOLIA_REGISTRY = '0x8004A818BFB912233c491871b3d84c89A494BD9e';
+  const OWNER_ADDR = '0x1111111111111111111111111111111111111111' as `0x${string}`;
+  const WALLET_ADDR = '0x2222222222222222222222222222222222222222' as `0x${string}`;
+
+  it('registers base-sepolia agents against its own registry, and verify() accepts the returned UAID', async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
+      if (init?.method === 'POST') {
+        bodies.push(JSON.parse(String(init.body)));
+        return new Response(JSON.stringify({}));
+      }
+      return new Response(JSON.stringify({ uaid: bodies[0]?.uaid, protocol: 'erc8004', agentId: '7' }));
+    }));
+    const resolver = new UAIDResolver({
+      apiKey: 'k',
+      onChainLookup: vi.fn(async () => ({ owner: OWNER_ADDR, agentWallet: WALLET_ADDR, blockNumber: 1n })),
+    });
+    const uaid = await resolver.registerERC8004Agent({ agentId: 7n, chain: 'base-sepolia', name: 'n', description: 'd' });
+    expect(uaid).toBe(`uaid:aid:eip155:84532:${SEPOLIA_REGISTRY};uid=7;proto=erc8004`);
+    expect(bodies[0].registryAddress).toBe(SEPOLIA_REGISTRY);
+    const v = await resolver.verify(uaid);
+    expect(v.verified).toBe(true);
+  });
+
+  it('keeps the mainnet registry for mainnet chains and honors an explicit registry', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({}))));
+    const resolver = new UAIDResolver({ apiKey: 'k' });
+    expect(await resolver.registerERC8004Agent({ agentId: 1n, chain: 'base', name: 'n', description: 'd' }))
+      .toBe('uaid:aid:eip155:8453:0x8004A169FB4a3325136EB29fA0ceB6D2e539a432;uid=1;proto=erc8004');
+    const custom = '0x3333333333333333333333333333333333333333';
+    expect(await resolver.registerERC8004Agent({ agentId: 1n, chain: 'base', registryAddress: custom, name: 'n', description: 'd' }))
+      .toBe(`uaid:aid:eip155:8453:${custom};uid=1;proto=erc8004`);
+  });
+});

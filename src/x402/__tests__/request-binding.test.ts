@@ -5,6 +5,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { X402Client, X402IntentTermsConflictError } from '../client.js';
 import { wrapWithX402 } from '../middleware.js';
+import { createEvidence } from './receipt-evidence.js';
 
 const URL = 'https://merchant.example/purchase';
 const TOKEN = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
@@ -20,12 +21,13 @@ vi.mock('../../index.js', () => ({
 }));
 
 function wallet() {
-  transfer.mockReset().mockImplementation(async (_w, args: { to: string }) =>
-    args.to.toLowerCase() === PAYEE.toLowerCase() ? PAYEE_HASH : FEE_HASH);
+  const ev = createEvidence(WALLET);
+  transfer.mockReset().mockImplementation(async (_w, args: { token: string; to: string; amount: bigint }) =>
+    ev.record(args.to.toLowerCase() === PAYEE.toLowerCase() ? PAYEE_HASH : FEE_HASH, args));
   checkBudget.mockResolvedValue({ perTxLimit: 2n ** 255n, remainingInPeriod: 2n ** 255n });
   return {
     address: WALLET, chain: { id: 8453 },
-    publicClient: { waitForTransactionReceipt: vi.fn(async () => ({ status: 'success' })), getTransaction: vi.fn() },
+    publicClient: { waitForTransactionReceipt: vi.fn(async ({ hash }: { hash: string }) => ev.paid(hash)), getTransaction: vi.fn() },
   };
 }
 

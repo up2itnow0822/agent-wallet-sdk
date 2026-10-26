@@ -340,7 +340,10 @@ export async function agentExecute(
     return { executed: false, txHash: hash, pendingTxId: queuedLog.args.txId };
   }
   const executedLog = parseEventLogs({ abi: AgentAccountV2Abi, eventName: 'TransactionExecuted', logs: walletLogs })
-    .find(log => log.args.target.toLowerCase() === params.to.toLowerCase() && log.args.value === value);
+    .find(log =>
+      log.args.target.toLowerCase() === params.to.toLowerCase() &&
+      log.args.value === value &&
+      log.args.data.toLowerCase() === data.toLowerCase());
   if (executedLog) {
     return { executed: true, txHash: hash };
   }
@@ -835,6 +838,30 @@ export {
 } from './bridge/index.js';
 export { TokenMessengerV2Abi, MessageTransmitterV2Abi, ERC20BridgeAbi } from './bridge/index.js';
 export type { BridgeChain, BridgeOptions, BurnResult, BridgeResult, BridgeRecovery, CctpAttestedMessage } from './bridge/index.js';
+export { decodeCctpV2Message, assertBurnTerms } from './bridge/index.js';
+export type { DecodedCctpV2Message, ExpectedBurnTerms, AttestationSelector } from './bridge/index.js';
+// EVM↔Solana CCTP V2 (Solana-side execution needs the optional @solana/web3.js).
+export {
+  bridgeEVMToSolana,
+  resumeEVMToSolana,
+  receiveFromSolanaOnEVM,
+  verifySolanaUsdcTokenAccount,
+  bytes32ToSolanaPubkey,
+  solanaPubkeyToBytes32,
+  SolanaBridgeError,
+  SOLANA_CCTP_DOMAIN,
+} from './bridge/index.js';
+export type {
+  EVMToSolanaOptions,
+  EVMToSolanaResult,
+  SolanaToEVMOptions,
+  SolanaToEVMBurnParams,
+  SolanaToEVMResult,
+  SolanaBridgeErrorCode,
+  SolanaBridgeRecovery,
+  SolanaMintRecovery,
+  VerifySolanaUsdcAccountOptions,
+} from './bridge/index.js';
 
 // x402 already exported above from original index.ts
 

@@ -2,7 +2,7 @@
  * @module bridge
  * Re-exports for the bridge module: EVM↔EVM CCTP V2 bridge and EVM↔Solana bridge.
  *
- * Import from 'agentwallet-sdk/bridge' or 'agentwallet-sdk' (re-exported from root).
+ * Import from 'agentwallet-sdk' (the package root re-exports this module's public API).
  *
  * EVM↔EVM: use BridgeModule or createBridge()
  * EVM↔Solana: use bridgeEVMToSolana() and receiveFromSolanaOnEVM()
