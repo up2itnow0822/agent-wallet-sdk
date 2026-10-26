@@ -416,7 +416,7 @@ export class SolanaWallet {
       if (typeof amount === 'bigint') {
         rawAmount = parseExactAmount(amount, pinned ?? 0);
       } else {
-        if (pinned == null) {
+        if (pinned === undefined || pinned === null) {
           throw new Error(
             'string amounts for this mint require options.expectedDecimals ' +
               '(or pass raw base units as a bigint); RPC mint decimals never choose the scale',
@@ -445,7 +445,7 @@ export class SolanaWallet {
     } catch (err) {
       throw new SolanaTransferSafetyError(`SolanaWallet: could not read mint: ${(err as Error).message}`);
     }
-    if (pinned != null && mintDecimals !== pinned) {
+    if ((pinned !== undefined && pinned !== null) && mintDecimals !== pinned) {
       throw new SolanaTransferSafetyError(
         `SolanaWallet: mint reports ${mintDecimals} decimals but ${pinned} are pinned for this transfer`,
       );
@@ -498,12 +498,12 @@ export class SolanaWallet {
 
   private pinnedDecimals(mintAddress: string, options: SendSplTokenOptions): number | undefined {
     const expected =
-      options.expectedDecimals != null
+      (options.expectedDecimals !== undefined && options.expectedDecimals !== null)
         ? assertTokenDecimals(options.expectedDecimals, 'expectedDecimals')
         : undefined;
     const known =
       this.cluster === 'mainnet-beta' ? PINNED_MAINNET_MINT_DECIMALS.get(mintAddress) : undefined;
-    if (known != null && expected != null && known !== expected) {
+    if ((known !== undefined && known !== null) && (expected !== undefined && expected !== null) && known !== expected) {
       throw new SolanaTransferSafetyError(
         `SolanaWallet: expectedDecimals ${expected} does not match pinned decimals ${known} for ${mintAddress}`,
       );

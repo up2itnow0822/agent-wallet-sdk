@@ -13,7 +13,6 @@
 import {
   pollCircleAttestation,
   assertBurnTerms,
-  decodeCctpV2Message,
   isDefinitelyNotBroadcast,
   BURN_SUBMISSION_UNKNOWN_HINT,
   type CctpAttestedMessage,

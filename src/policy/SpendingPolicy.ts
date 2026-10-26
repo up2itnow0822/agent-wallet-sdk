@@ -511,7 +511,7 @@ export class SpendingPolicy {
         reason: 'no submission hash was recorded; the hold stays locked (commit it to let it age out)',
       };
     }
-    if (submission.chainId == null) {
+    if (submission.chainId === undefined || submission.chainId === null) {
       return { status: 'unresolved', reason: 'submission chain was not recorded' };
     }
     try {

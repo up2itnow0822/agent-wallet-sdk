@@ -123,7 +123,7 @@ export function createWallet(config: AgentWalletConfig & { walletClient: WalletC
     throw new Error('createWallet: accountAddress is not a valid address');
   }
   const signerChainId = config.walletClient?.chain?.id;
-  if (signerChainId != null && signerChainId !== chain.id) {
+  if ((signerChainId !== undefined && signerChainId !== null) && signerChainId !== chain.id) {
     throw new Error(`createWallet: walletClient chain ${signerChainId} differs from ${config.chain} (${chain.id})`);
   }
 
@@ -176,11 +176,11 @@ export async function verifyAgentWallet(wallet: Wallet): Promise<void> {
     const fail = (msg: string): never => { throw new AgentWalletVerificationError(`agent wallet ${wallet.address}: ${msg}`); };
     if (typeof wallet.address !== 'string' || !isAddress(wallet.address, { strict: false })) fail('invalid address');
     const signerChain = wallet.walletClient?.chain?.id;
-    if (signerChain != null && signerChain !== wallet.chain.id) {
+    if ((signerChain !== undefined && signerChain !== null) && signerChain !== wallet.chain.id) {
       fail(`signer chain ${signerChain} differs from wallet chain ${wallet.chain.id}`);
     }
     const readChain = wallet.publicClient?.chain?.id;
-    if (readChain != null && readChain !== wallet.chain.id) {
+    if ((readChain !== undefined && readChain !== null) && readChain !== wallet.chain.id) {
       fail(`read client chain ${readChain} differs from wallet chain ${wallet.chain.id}`);
     }
     const code = await wallet.publicClient.getCode({ address: wallet.address });

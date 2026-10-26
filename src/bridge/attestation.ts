@@ -272,10 +272,10 @@ export function validateCircleBody(raw: unknown): CircleV2MessagesResponse {
     const e = entry as Record<string, unknown>;
     const message = e.message;
     const attestation = e.attestation;
-    if (message != null && (typeof message !== 'string' || message.length > MAX_MESSAGE_HEX)) {
+    if ((message !== undefined && message !== null) && (typeof message !== 'string' || message.length > MAX_MESSAGE_HEX)) {
       throw new Error(`Circle message ${i} has an invalid or oversized message`);
     }
-    if (attestation != null && (typeof attestation !== 'string' || attestation.length > MAX_ATTESTATION_HEX)) {
+    if ((attestation !== undefined && attestation !== null) && (typeof attestation !== 'string' || attestation.length > MAX_ATTESTATION_HEX)) {
       throw new Error(`Circle message ${i} has an invalid or oversized attestation`);
     }
     return {

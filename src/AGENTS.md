@@ -55,6 +55,34 @@
   Recovery never creates a second burn. A retained destination mint hash is
   reconciled before another `receiveMessage` submission.
 
+- Untrusted endpoints (RPC, Circle, UAID brokers, Horizon, quoters, x402
+  merchants) never choose a signed scale, chain, recipient or settlement
+  status. Read their HTTP bodies only through `src/net/bounded-fetch.ts`
+  (one deadline over request + body, byte cap); never await a tee'd clone's
+  `cancel()`.
+- Token transfers pin decimals (registry or caller `expectedDecimals`) and
+  bind signer/read/requested chains; Solana signs only after the genesis-hash
+  cluster check and uses `TransferChecked`. Amounts never truncate.
+- Every AgentAccountV2 write first passes `verifyAgentWallet`. Execution is
+  classified only from matching wallet events (`TransactionExecuted` /
+  `TransactionQueued`) or, for `agentTransferToken`, a matching ERC-20
+  `Transfer`; anything else is `unknown`.
+- `SpendingPolicy` snapshots intents once (`snapshotPaymentIntent`). A locked
+  reservation is released only by `reconcileLocked` against its recorded
+  submission identity; there is no caller override.
+- CCTP: attestations are always bound to a known source message; burn terms
+  are checked from the transmitter-emitted `MessageSent`; post-hash failures
+  carry frozen recovery; `usedNonces` is checked before `receiveMessage`;
+  reported recipients/amounts come from attested bytes.
+- UAID `verify()` returns `verified` only after on-chain ERC-8004 checks;
+  broker claims are `brokerAttested`. The resolution cache is a bounded LRU.
+- Stellar auto-pay requires a spend policy reserved before signing; Horizon
+  must report the configured network; success needs the signed-XDR hash,
+  `successful === true` and a ledger confirmation.
+- Swaps require a caller `minAmountOut`. Explicit unknown chains throw.
+- x402 binds origin+path+query, bounds the 402 body, binds explicit intents to
+  the request fingerprint, and wrappers snapshot before the first hop.
+
 ## Work Guidance
 
 - Treat bridge, swap, escrow, token transfer, and transaction-submitting paths
@@ -68,4 +96,5 @@
 
 ## Child DOX Index
 
-- No child contracts are currently defined.
+- No child contracts are currently defined. `src/net/` (bounded HTTP helper)
+  is governed by this file.

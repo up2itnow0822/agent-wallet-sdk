@@ -11,10 +11,16 @@ Maintainers own verification and merge-gate workflows for the SDK.
   shell or JavaScript interpolation. Pass commit SHAs through validated inputs.
 - PR code runs with read-only permissions and checkout credentials removed.
 - `review-gate` runs from trusted default-branch code and never executes PR code.
+- Every `uses:` reference is pinned to a full 40-character commit SHA with a
+  version comment; update pins only through reviewed PRs (Dependabot).
+- `review-gate` evidence must post-date the base branch's move to its current
+  SHA (repository activity log; unknown means fail closed). Its only `push`
+  trigger is the protected `main` branch.
 - Live required-check rules are configured separately in GitHub. Do not claim
   a ruleset was changed solely because a workflow was edited.
 
 ## Verification
 
-Run `npm test -- test/security-scan.test.ts` for scanner changes and the root
-verification commands for changes to job behavior.
+Run `npm test -- test/security-scan.test.ts` for scanner changes,
+`npm test -- test/workflow-security.test.ts` for workflow pins and review-gate
+binding, and the root verification commands for changes to job behavior.

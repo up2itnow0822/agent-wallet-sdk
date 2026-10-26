@@ -2,10 +2,11 @@
 
 ## Review scope
 
-Security fixes in this repository target the current 6.x source. An older
-published package does not acquire these fixes until a patched release is
-published and installed. See `docs/security-remediation.md` for migration
-requirements and the remaining external deployment boundaries.
+Security fixes in this repository target the current 8.x source. Published
+7.0.0 and earlier do not include the October 25, 2026 repairs; an installed
+package does not acquire fixes until a patched release is published and
+installed. See `docs/security-remediation.md` for migration requirements and
+the remaining external deployment boundaries.
 
 ## Reporting a vulnerability
 
@@ -25,6 +26,10 @@ isolated signing service, or immunity to orchestration-layer vulnerabilities.
 For isolation, supply a signer backed by a separately secured service or
 hardware wallet and enforce its authorization outside the compromised host.
 
+Before any agent or owner write, the SDK verifies that the configured account
+has non-delegated contract code that answers the AgentAccountV2 views on the
+signer's chain; supply `deployment` (trusted factory + token binding) or
+`expectedCodeHash` to `createWallet()` for a strong deployment identity.
 On-chain restrictions depend on the actual deployed wallet contract and its
 configuration. This repository supplies ABIs, not audited Solidity sources or
 a deployment manifest. The local `SpendingPolicy` and x402 budgets are in-memory
@@ -51,9 +56,21 @@ redirect policy, DNS and private-address restrictions, connection pinning,
 and response limits. The SDK does not make that network transport safe by
 accepting an arbitrary fetch callback.
 
+## External data is untrusted
+
+RPC endpoints, Circle attestation endpoints, UAID brokers, Stellar Horizon,
+quoters and x402 merchants are treated as adversarial. The SDK never lets
+their responses choose a signed token scale, chain, recipient or settlement
+status: token decimals are pinned, chains are bound, swap minimums require a
+caller floor, attestations are bound to the known burn message, broker
+identity claims are reported as `brokerAttested` and verified on-chain
+separately, and every untrusted HTTP read has a deadline and a size cap.
+
 ## Dependency and release checks
 
 The verification workflows run the build, tests, lint and dependency audit.
+All workflow actions are pinned to full commit SHAs. The `review-gate` check
+requires Codex evidence newer than the base branch's current SHA.
 High and critical advisory results fail verification. GitHub ruleset settings
 must independently require the intended verification and review checks;
 workflow definitions alone do not enforce merge policy.

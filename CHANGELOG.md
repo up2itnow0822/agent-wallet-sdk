@@ -1,3 +1,30 @@
+## [8.0.0] — Unreleased
+
+Security release for the October 25, 2026 assessment of 7.0.0 (29 findings,
+all repaired with regression tests). See `docs/security-remediation.md`.
+
+### Breaking
+- `agentTransferToken()` confirms and returns `{ status: 'executed' | 'queued', txHash, pendingTxId? }`; new `submitAgentTransferToken()` returns the bare submission hash.
+- Agent/owner writes require a verified AgentAccountV2 deployment (`verifyAgentWallet`); `agentExecute()` needs a matching wallet event to report executed.
+- `SpendingPolicy.release()` no longer accepts `{ reconciled }`; use `lock(reservation, submission)` + `reconcileLocked()`.
+- `sendToken()` requires `expectedDecimals` for string amounts of unlisted tokens; amounts never truncate.
+- `SolanaWallet` binds to a cluster by genesis hash (default `mainnet-beta`); `sendSplToken()` uses `TransferChecked` and pinned decimals.
+- `SwapModule.swap()` requires `minAmountOut`.
+- `UAIDResolver.verify()` verifies ERC-8004 identities on-chain; broker claims move to `brokerAttested`.
+- `stellarX402Pay()` requires a `policy`.
+- Unknown `CHAIN_NAME`/`CHAIN_ID` values throw instead of using Base mainnet.
+- x402 challenges must bind the exact resource including its query.
+
+### Fixed
+- Bridge: bounded Circle polling, receipt-bound attestations, burn-term checks, Solana recipient verification, frozen recovery and `resumeEVMToSolana()`, mint ambiguity codes and `usedNonces` reconciliation, recipient/amount derived from attested bytes.
+- x402: bounded 402 body parsing, explicit intents bound to the request fingerprint, `wrapWithX402` snapshots before the first hop.
+- Stellar: exact chain matching, configured Horizon with network check, bounded I/O, verified settlement, spend budget.
+- UAID: strict broker schema, bounded broker I/O, bounded LRU cache.
+- Examples default to Base Sepolia and never auto-run.
+- CI: actions pinned to commit SHAs; review-gate evidence bound to the base SHA.
+
+---
+
 ## [7.0.0] — 2026-10-23
 
 Security release. Lifts the security-maintenance pause.

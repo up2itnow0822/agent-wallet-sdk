@@ -156,11 +156,11 @@ function resolveBoundChainId(ctx: TransferContext, options: TransferOptions): nu
   ];
   let bound: number | undefined;
   for (const [label, id] of candidates) {
-    if (id == null) continue;
+    if (id === undefined || id === null) continue;
     if (!Number.isSafeInteger(id) || id <= 0) {
       throw new TokenTransferSafetyError(`${label} is not a valid chain id`);
     }
-    if (bound == null) bound = id;
+    if (bound === undefined || bound === null) bound = id;
     else if (bound !== id) {
       throw new TokenTransferSafetyError(
         `chain mismatch: ${label}=${id} differs from bound chain ${bound}`,
@@ -182,15 +182,15 @@ async function resolvePinnedDecimals(
   options: TransferOptions,
 ): Promise<number> {
   const registryEntry =
-    chainId != null ? getGlobalRegistry().getTokenByAddress(tokenAddress, chainId) : undefined;
+    (chainId !== undefined && chainId !== null) ? getGlobalRegistry().getTokenByAddress(tokenAddress, chainId) : undefined;
   const expected =
-    options.expectedDecimals != null
+    (options.expectedDecimals !== undefined && options.expectedDecimals !== null)
       ? assertTokenDecimals(options.expectedDecimals, 'expectedDecimals')
       : undefined;
 
   if (registryEntry) {
     const registryDecimals = assertTokenDecimals(registryEntry.decimals, 'registry decimals');
-    if (expected != null && expected !== registryDecimals) {
+    if ((expected !== undefined && expected !== null) && expected !== registryDecimals) {
       throw new TokenTransferSafetyError(
         `expectedDecimals ${expected} does not match registry decimals ${registryDecimals}`,
       );
@@ -198,7 +198,7 @@ async function resolvePinnedDecimals(
     return registryDecimals;
   }
 
-  if (expected == null) {
+  if (expected === undefined || expected === null) {
     throw new TokenTransferSafetyError(
       'string amounts for tokens outside the registry require options.expectedDecimals ' +
         '(or pass a raw bigint amount); RPC-reported decimals are never trusted to choose the scale',
@@ -311,7 +311,7 @@ export async function getNativeBalance(
 
   // Determine native token symbol from registry if chainId is known
   let symbol = 'ETH';
-  if (ctx.chainId != null) {
+  if (ctx.chainId !== undefined && ctx.chainId !== null) {
     const native = getGlobalRegistry().getTokenByAddress(zeroAddress, ctx.chainId);
     symbol = native?.symbol ?? 'ETH';
   }
@@ -339,7 +339,7 @@ export async function getBalances(
 
   // If no addresses provided and chainId is known, use all registry tokens
   if (!addresses || addresses.length === 0) {
-    if (ctx.chainId != null) {
+    if (ctx.chainId !== undefined && ctx.chainId !== null) {
       const tokens = getGlobalRegistry().listTokens(ctx.chainId);
       addresses = tokens
         .filter(t => !t.isNative)
@@ -374,10 +374,10 @@ async function fetchTokenDecimals(
 
 function buildGasOptions(options: TransferOptions) {
   const gas: Record<string, bigint> = {};
-  if (options.gas != null)                gas.gas = options.gas;
-  if (options.gasPrice != null)           gas.gasPrice = options.gasPrice;
-  if (options.maxFeePerGas != null)       gas.maxFeePerGas = options.maxFeePerGas;
-  if (options.maxPriorityFeePerGas != null) gas.maxPriorityFeePerGas = options.maxPriorityFeePerGas;
+  if (options.gas !== undefined && options.gas !== null)                gas.gas = options.gas;
+  if (options.gasPrice !== undefined && options.gasPrice !== null)           gas.gasPrice = options.gasPrice;
+  if (options.maxFeePerGas !== undefined && options.maxFeePerGas !== null)       gas.maxFeePerGas = options.maxFeePerGas;
+  if (options.maxPriorityFeePerGas !== undefined && options.maxPriorityFeePerGas !== null) gas.maxPriorityFeePerGas = options.maxPriorityFeePerGas;
   return gas;
 }
 
