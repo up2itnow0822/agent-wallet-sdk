@@ -1,5 +1,125 @@
 # Security remediation and migration
 
+## October 25, 2026 assessment (8.0.0)
+
+The 8.0.0 branch repairs all 29 findings (11 high, 18 medium) of the
+whole-repository scan of frozen revision
+`8a8b3a4a62b384d618b58a894fdec0640480ad50` (published as 7.0.0). Each finding
+has a regression test that reproduces the reported input against mocked
+signing and network boundaries.
+
+| # | Finding | Repair |
+| --- | --- | --- |
+| 1 | Solana SPL scale chosen by RPC | Pinned mint decimals (or caller `expectedDecimals`), RPC value compared only, `TransferChecked`, genesis-hash cluster binding (`cluster`/`expectedGenesisHash`). |
+| 2 | Accessor-backed `PaymentIntent` TOCTOU | `snapshotPaymentIntent()` reads each field once into a frozen, validated object used for every check, record and result. |
+| 3 | Unverified smart-wallet address | `verifyAgentWallet()` before every write: chain agreement, nonempty non-7702 code, AgentAccountV2 views, optional `expectedCodeHash` and factory `deployment` identity. Execution requires a matching `TransactionExecuted`/`TransactionQueued` event. |
+| 4 | EVM decimals from RPC | Registry or `expectedDecimals` pins the scale; RPC decimals must match; signer/public/requested chains must agree. |
+| 5 | Lost EVM→Solana burn on post-hash failure | Every post-hash error carries frozen `recovery`; `resumeEVMToSolana()` never burns again. |
+| 6 | Broker assertion treated as verified identity | Strict broker schema bound to the canonical UAID; `brokerAttested` reported separately; `verify()` reads trusted ERC-8004 registry owner and wallet at one block. |
+| 7 | Substring Stellar chain match | Exact chain-id token required. |
+| 8 | Unbound locked-reservation release | `release({ reconciled })` removed; `lock()` records submission identity; `reconcileLocked()` checks the recorded hashes on the recorded chain. |
+| 9 | Unverified Solana mint recipient | Canonical base58 + on-chain check that the recipient is an initialized mainnet USDC token account (optionally owned by `solanaRecipientOwner`) before approve/burn. |
+| 10 | Stellar auto-pay without policy | `stellarX402Pay` requires `StellarSpendPolicy` (cap, allowlist, approval, `StellarSpendBudget`) enforced before signing. |
+| 11 | Swap minimum from RPC quote | `minAmountOut` (independent floor) required; optional `referenceAmountOut` deviation bound; chain-bound clients. |
+| 12 | Unbounded attestation polling | `bounded-fetch` deadline over body, 256 KiB cap, strict message/field limits, overall deadline. |
+| 13 | `agentTransferToken` hash as payment | Returns `{ status: 'executed' \| 'queued' }` after receipt + matching ERC-20 `Transfer`; `submitAgentTransferToken` is the submit-only primitive. |
+| 14 | Unrelated single attested message | Attestations must match a known source message; `waitForAttestation` decodes the burn receipt (transmitter-emitted log only). |
+| 15 | Unknown chain falls back to Base | Explicit unknown/malformed chains throw; conflicting `CHAIN_NAME`/`CHAIN_ID` throw. |
+| 16 | Mutable action tags with `checks:write` | All actions pinned to commit SHAs; Dependabot proposes pin updates. |
+| 17 | Ignored Horizon override | Configured Horizon used everywhere and must report the configured network passphrase; https only. |
+| 18 | Unbounded UAID bodies | Broker requests use one deadline over the body and a size cap; error bodies truncated. |
+| 19 | review-gate not bound to base SHA | Resolved by removal: the `review-gate` workflow is deleted at the maintainer's direction. Codex reviews every PR automatically, and no merge gate consumes Codex evidence. |
+| 20 | Examples spend real funds | Examples default to Base Sepolia, need `AGENT_EXAMPLE_LIVE_ACK` for mainnet, verify the installed policy, and never auto-run on import. |
+| 21 | Unbounded Horizon I/O | Deadlines and size caps; ambiguous submission ⇒ `StellarSubmissionUnknownError` with the expected hash. |
+| 22 | Unchecked Solana→EVM recipient | Source domain, message hash, destination, burn token, remote sender and mint recipient validated; returned values derived from attested bytes. |
+| 23 | Query ignored in resource binding | Origin, path and query must match. |
+| 24 | Ambiguous mint reported as failure | `MINT_SUBMISSION_UNKNOWN`, `MINT_UNCONFIRMED`, `MINT_ALREADY_RECEIVED` (`usedNonces` checked first) with retained recovery state. |
+| 25 | Unbounded 402 JSON body | 64 KiB / 10 s bounded read; ≤16 options and bounded fields. |
+| 26 | Unverified Stellar 2xx | Expected hash from the signed XDR, strict `successful === true`, ledger confirmation read. |
+| 27 | Explicit intent replay across requests | Explicit intents bind the full request fingerprint; mismatch ⇒ `X402IntentTermsConflictError`. |
+| 28 | Late `wrapWithX402` snapshot | Snapshot taken before the first hop and reused for settlement and retry. |
+| 29 | Unbounded UAID cache | Bounded LRU (`cacheMaxEntries`), expired entries deleted, malformed keys never cached. |
+
+### 8.0.0 caller migrations
+
+- `agentTransferToken()` now resolves to `{ status, txHash, pendingTxId? }` and
+  throws `AgentExecutionError` for reverted/unknown receipts. Use
+  `submitAgentTransferToken()` only when you confirm receipts yourself.
+- Agent writes call `verifyAgentWallet()` and REQUIRE a deployment identity:
+  pass `deployment` (`factoryAddress`, `tokenContract`, `tokenId`) or
+  `expectedCodeHash` to `createWallet()` (env/Eliza settings:
+  `AGENT_WALLET_FACTORY` + `AGENT_WALLET_TOKEN_CONTRACT` + `AGENT_WALLET_TOKEN_ID`,
+  or `AGENT_WALLET_CODE_HASH`). `allowUnverifiedDeployment: true`
+  (`AGENT_WALLET_ALLOW_UNVERIFIED=true`) is an explicit unsafe opt-out.
+  `createWallet()` returns a frozen handle. `agentExecute()` throws `unknown`
+  when the receipt has neither a matching executed nor queued event.
+- `batchAgentTransfer()` returns `AgentTransferResult[]` (confirmed and
+  classified); on failure `error.completed` lists the transfers already done.
+- `SpendingPolicy.release()` no longer accepts `{ reconciled }`. Record every
+  submitted phase and the call binding once, at lock time —
+  `lock(reservation, { chainId, txHashes, from, to, data, value })` or
+  `applyOutcome(reservation, outcome, { from, to, data, value })` — then call
+  `reconcileLocked(reservation, publicClient)`. Phases with different
+  calldata (e.g. protocol fee and payee) each go in `calls: [{ hash, from, to,
+  data, value }]`. Identity cannot be attached later; a hash without a binding
+  keeps the lock until committed. If a phase may have broadcast without a
+  usable hash, pass `incomplete: true` (malformed or empty entries and
+  `SpendOutcome.incompleteEvidence` set it automatically): such a lock commits
+  on success evidence but is never released.
+- `sendToken()`/`sendNative()` require a chain-bound wallet client; string
+  amounts for tokens outside the registry need `expectedDecimals`;
+  over-precision amounts throw instead of truncating.
+- `SolanaWallet` verifies the RPC cluster (default `mainnet-beta`). Set
+  `cluster: 'devnet'` (or `expectedGenesisHash`) for other clusters.
+  `sendSplToken()` needs `expectedDecimals` for unlisted mints.
+- An unknown `stellarX402Pay()` reservation is freed or committed only by
+  `budget.reconcile(id, adapter)`, from ledger evidence for the recorded hash
+  and network. No Horizon rejection or result code frees a reservation by
+  itself: a non-2xx submit is decided from the ledger, so a genuine rejection
+  stays held (as unknown) until the envelope's `maxTime` passes and
+  `reconcile()` proves it was never applied. The Stellar API
+  (`StellarSpendBudget`, `stellarX402Pay`, …) is exported from the package
+  root; install the optional peer `@stellar/stellar-sdk` (>= 14) to use it.
+- `SwapModule.swap()` requires `minAmountOut` from an independent source, and
+  its read client must answer `getChainId()` with the configured chain.
+- The runnable examples need the wallet's deployment identity env
+  (`AGENT_WALLET_CODE_HASH`, or `AGENT_WALLET_FACTORY` +
+  `AGENT_WALLET_TOKEN_CONTRACT` + `AGENT_WALLET_TOKEN_ID`).
+- `UAIDResolver.verify()` returns `verified: true` only after on-chain ERC-8004
+  verification; configure `rpcUrls`/`onChainLookup`. Broker claims are in
+  `brokerAttested`.
+- `stellarX402Pay()` requires `policy` with a `StellarSpendBudget`. The signed
+  envelope must hash to the policy-checked transaction; both Horizons are
+  verified before broadcast; submissions are confirmed in a ledger.
+- `UAIDResolver.buildERC8004UAID()` / `erc8004ToUniversal()` now put the
+  identity registry (not the owner) in the `aid`, matching `verify()`. A
+  verified identity carries only on-chain values (owner, wallet, `agentURI`);
+  `registrationFile` is null — resolve it through `ERC8004Client`.
+- x402 explicit intents bind the request's headers too. A retry of the same
+  intent with different headers (e.g. a fresh `traceparent` or rotated
+  `Authorization`) is a terms conflict, never a second payment; resend the
+  original headers, or use `reconcileSubmission` for a lost response.
+- `walletFromEnv()` / `resolveWalletChain()` throw on unknown chains.
+- x402 challenges must name the full resource URL including the query.
+- `BridgeModule.waitForAttestation(burnTxHash)` reads the burn receipt from the
+  module's source-chain RPC. `bridgeEVMToSolana` verifies the Solana recipient
+  token account first; on failure after the burn, call
+  `resumeEVMToSolana(error.recovery)`. A Solana→EVM `MINT_UNCONFIRMED` /
+  `MINT_SUBMISSION_UNKNOWN` error is resumed with
+  `resumeSolanaToEVM(walletClient, error.mintRecovery)`, which never mints
+  while the retained transaction is unresolved; a recovery without a
+  `mintTxHash` mints again only with `{ originalSubmissionReconciled: true }`.
+- Custom wallet/ERC-8004 read clients must implement `getChainId()`; the RPC
+  endpoint must serve the configured chain.
+
+### Version note
+
+npm `7.0.0` contains the vulnerable code. After 8.0.0 is published, deprecate
+7.0.0 (`npm deprecate agentwallet-sdk@7.0.0 "Security issues fixed in 8.0.0"`)
+— a maintainer action outside this repository.
+
+## October 13, 2026 assessment
+
 This branch repairs the October 2026 assessment of source commit
 `8f6ef0236625df64f7a9ac327eee7ac17db8f3b5`. These changes do not update an
 installed npm package or establish the safety of external contracts.
@@ -8,7 +128,7 @@ installed npm package or establish the safety of external contracts.
 
 | Assessment ID | Repair |
 | --- | --- |
-| 1 | The existing required `build` job now runs build, tests, lint and dependency audit. Requiring `verify` and `review-gate` remains a live GitHub ruleset action; see below. |
+| 1 | The required `build` job runs build, tests, lint and dependency audit; the live ruleset now also requires `verify` (see below). |
 | 2 | The security scanner reads NUL-delimited filenames through filesystem APIs, never interpolates them into shell source, and uses read-only PR permissions. |
 | 4 | Environment x402 budgets accept only the configured wallet chain's exact USDC address. |
 | 5 | Generic or malformed spend outcomes retain the hold. Confirmed payments remain charged after HTTP delivery errors. |
@@ -142,31 +262,22 @@ The settlement test server is a read-only Base Sepolia demo. It does not
 forward fees or accept an untrusted receipt as settlement authorization.
 A production endpoint needs durable, atomic challenge and transfer consumption.
 
-## Live GitHub ruleset action
+## Live GitHub ruleset
 
-The inspected active ruleset `23222371` requires only `build`. Workflow files
-cannot change that administrative setting, and the connected GitHub tools do
-not expose a ruleset update operation.
-
-Preserve its PR-only, no-bypass, no-deletion, no-force-push and resolved-thread
-rules. Require these contexts from GitHub Actions (integration ID `15368`):
-
-- `build`
-- `verify`
-- `review-gate`
-
-Require branches to be up to date before merging. Confirm that a PR with
-missing verification or review evidence remains blocked. Do not waive the
-review gate simply to publish these repairs. This setting remains outstanding
-until an administrator applies and verifies it.
+Verified through the API on 2026-10-26: active ruleset `23222371` on `main`
+requires a pull request with every review thread resolved, blocks deletion and
+force-pushes, and requires the `build` and `verify` checks from GitHub Actions
+(integration ID `15368`) with branches up to date. Workflow files cannot change
+these settings; re-check them after any ruleset edit.
 
 ## Verification and limits
 
 Regressions reproduce the assessed failures with harmless fixtures and mocked
-signing/network boundaries. Verification on October 13, 2026 passed 690 tests
-across 27 files, the TypeScript build and lint (zero errors, 148 warnings).
-The dependency audit reported zero advisories at every severity. The baseline
-had 334 passing tests. Run:
+signing/network boundaries. Three independent fresh-context reviews were run
+over the repairs; every follow-up they raised was fixed or dispositioned in
+the commit history. Verification of the 8.0.0 repairs passed 833 tests
+across 34 files (baseline at the assessed revision: 676 tests across 28 files),
+the TypeScript build and lint with zero errors. Run:
 
 ```sh
 npm ci --ignore-scripts

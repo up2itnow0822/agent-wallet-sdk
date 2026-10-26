@@ -17,18 +17,26 @@
 - Never use live funds, production credentials, or irreversible chain actions
   in default tests.
 - Keep npm metadata, README install commands, GitHub releases, and package
-  behavior consistent.
+  behavior consistent. Every lazily imported package is a dependency or an
+  optional peer with a tested `>=` floor (`test/package-peers.test.ts`).
 - Treat generated `dist/`, coverage, and dependency folders as build outputs.
 - Changes to `main` land only through a pull request. The required deployment
-  policy is green `build`, `verify`, and `review-gate` checks, with every review
-  thread resolved. Verify these separately in the live GitHub ruleset; workflow
-  files do not configure branch protection. No direct pushes, force-pushes, or
-  branch deletion.
+  policy is green `build` and `verify` checks, with every review thread
+  resolved (live ruleset `23222371`; workflow files do not configure branch
+  protection). Codex reviews each PR automatically; evaluate its findings, but
+  do not request or wait for a second Codex pass. No direct pushes,
+  force-pushes, or branch deletion.
 - Environment and plugin USDC budgets must accept only USDC on the configured
   wallet chain. Client recipient allowlists must not be described as on-chain
   enforcement or isolated signing.
 - Persist and reconcile in-flight intents outside these in-memory clients
   before restarting a payment service or replacing its configuration.
+- Examples default to testnet, require `AGENT_EXAMPLE_LIVE_ACK` for mainnet,
+  build wallets with a deployment identity (`exampleDeploymentIdentity()`;
+  the unsafe opt-out is refused), verify the advertised on-chain policy
+  (caps no looser, period at least one day) before spending, and never run on import (`test/examples-safety.test.ts`).
+- Breaking security changes take a new major version; never republish a
+  vulnerable version number.
 
 ## Work Guidance
 

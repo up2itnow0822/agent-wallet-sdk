@@ -139,3 +139,50 @@ export function parseAmount(amount: string | bigint, decimals: number): bigint {
   if (typeof amount === 'bigint') return amount;
   return toRaw(amount, decimals);
 }
+
+/** Largest decimals value accepted for a pinned token scale. */
+export const MAX_TOKEN_DECIMALS = 36;
+
+/**
+ * Validate a token decimals value supplied by a caller, a registry, or an RPC.
+ * Returns the value when it is an integer in [0, MAX_TOKEN_DECIMALS]; throws otherwise.
+ */
+export function assertTokenDecimals(value: unknown, label = 'decimals'): number {
+  if (typeof value === 'bigint') value = Number(value);
+  if (
+    typeof value !== 'number' ||
+    !Number.isInteger(value) ||
+    value < 0 ||
+    value > MAX_TOKEN_DECIMALS
+  ) {
+    throw new Error(`${label} must be an integer between 0 and ${MAX_TOKEN_DECIMALS}`);
+  }
+  return value;
+}
+
+/**
+ * Strict, signing-safe conversion of a human-readable amount to raw units.
+ *
+ * Unlike {@link toRaw}, this never truncates: more fractional digits than the
+ * token scale, negative, zero, exponent or otherwise malformed values throw.
+ * Bigint inputs must be positive.
+ */
+export function parseExactAmount(amount: string | bigint, decimals: number): bigint {
+  const scale = assertTokenDecimals(decimals);
+  if (typeof amount === 'bigint') {
+    if (amount <= 0n) throw new Error('amount must be positive');
+    return amount;
+  }
+  if (typeof amount !== 'string') throw new Error('amount must be a string or bigint');
+  const str = amount.trim();
+  if (str.length === 0 || str.length > 100 || !/^\d+(\.\d+)?$/.test(str)) {
+    throw new Error(`invalid amount "${amount}"`);
+  }
+  const [intPart, fracPart = ''] = str.split('.');
+  if (fracPart.length > scale) {
+    throw new Error(`amount "${amount}" has more than ${scale} fractional digits`);
+  }
+  const raw = BigInt(intPart) * 10n ** BigInt(scale) + BigInt(fracPart.padEnd(scale, '0') || '0');
+  if (raw <= 0n) throw new Error('amount must be positive');
+  return raw;
+}

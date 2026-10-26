@@ -10,11 +10,34 @@ export {
   X402SettlementBacklogError,
   X402IntentTermsConflictError,
   x402SettlementReceiptIsQueued,
+  classifyX402SettlementReceipt,
   X402_TRANSACTION_QUEUED_TOPIC,
   encodeX402PaymentHeader,
   decodeX402PaymentHeader,
 } from './client.js';
+export type { X402SettlementTransfer, X402ReceiptClassification } from './client.js';
 export { X402BudgetTracker } from './budget.js';
+export {
+  StellarX402Adapter,
+  StellarSpendBudget,
+  stellarX402Pay,
+  stellarAmountToStroops,
+  StellarSubmissionUnknownError,
+  StellarPaymentPolicyError,
+  StellarTransactionRejectedError,
+  STELLAR_NETWORK,
+  STELLAR_USDC,
+  STELLAR_RECONCILE_HISTORY_MARGIN_S,
+} from './chains/stellar/index.js';
+export type {
+  StellarNetwork,
+  StellarPaymentConfig,
+  StellarPaymentRequest,
+  StellarPaymentResult,
+  StellarSpendPolicy,
+  StellarTransactionLookup,
+  StellarReconcileResult,
+} from './chains/stellar/index.js';
 export {
   X402_PROTOCOL_FEE_BPS,
   X402_PROTOCOL_FEE_COLLECTOR,

@@ -22,7 +22,6 @@
   "exclude": [
     "node_modules",
     "dist",
-    "src/plugins",
-    "src/x402/chains/stellar"
+    "src/plugins"
   ]
 }

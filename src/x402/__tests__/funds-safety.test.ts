@@ -3,13 +3,17 @@ import { encodeFunctionData } from 'viem';
 import { AgentAccountV2Abi } from '../../abi.js';
 import {
   X402Client,
+  X402SettlementQueuedError,
   X402SettlementUnknownError,
+  classifyX402SettlementReceipt,
   X402_MAX_CACHED_SETTLEMENTS,
   X402_SETTLEMENT_RETRY_WINDOW_MS,
 } from '../client.js';
 import { X402_PROTOCOL_FEE_COLLECTOR } from '../fee.js';
 import { createX402Fetch, wrapWithX402 } from '../middleware.js';
 import { parseNetworkChainId } from '../multi-asset.js';
+import { AgentWalletVerificationError } from '../../wallet-verification-error.js';
+import { createEvidence, queuedLog, transferLog } from './receipt-evidence.js';
 
 const URL = 'https://merchant.example/purchase';
 const TOKEN = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
@@ -22,7 +26,7 @@ const { transfer, checkBudget } = vi.hoisted(() => ({
   checkBudget: vi.fn(),
 }));
 vi.mock('../../index.js', () => ({
-  agentTransferToken: (...args: unknown[]) => transfer(...args),
+  submitAgentTransferToken: (...args: unknown[]) => transfer(...args),
   checkBudget: (...args: unknown[]) => checkBudget(...args),
 }));
 
@@ -39,23 +43,24 @@ function challenge(unkeyed = true) {
 
 function setup() {
   const debits: Array<{ to: string; amount: bigint; data: string }> = [];
+  const ev = createEvidence(WALLET);
   transfer.mockImplementation(async (_wallet, args) => {
     const data = encodeFunctionData({
       abi: AgentAccountV2Abi, functionName: 'agentTransferToken',
       args: [args.token, args.to, args.amount],
     });
     debits.push({ ...args, data });
-    return args.to === X402_PROTOCOL_FEE_COLLECTOR ? FEE_HASH : PAYEE_HASH;
+    return ev.record(args.to === X402_PROTOCOL_FEE_COLLECTOR ? FEE_HASH : PAYEE_HASH, args);
   });
   checkBudget.mockResolvedValue({ perTxLimit: 2n ** 256n - 1n, remainingInPeriod: 2n ** 256n - 1n });
   const wallet = {
     address: WALLET, chain: { id: 8453 },
     publicClient: {
-      waitForTransactionReceipt: vi.fn(async (_args: { hash: string }) => ({ status: 'success' })),
+      waitForTransactionReceipt: vi.fn(async (args: { hash: string }) => ev.paid(args.hash) as Record<string, unknown>),
       getTransaction: vi.fn(),
     },
   };
-  return { wallet, debits };
+  return { wallet, debits, ev };
 }
 
 function merchant(required: ReturnType<typeof challenge>, paidFailure?: Error) {
@@ -67,7 +72,10 @@ function merchant(required: ReturnType<typeof challenge>, paidFailure?: Error) {
       if (paidFailure) throw paidFailure;
       return new Response('paid', { status: 200 });
     }
-    return new Response(JSON.stringify(required), { status: 402 });
+    // A well-formed challenge names the exact resource requested, query included.
+    const search = typeof _input === 'string' ? new globalThis.URL(_input).search : '';
+    const bound = { ...required, resource: { ...required.resource, url: required.resource.url + search } };
+    return new Response(JSON.stringify(bound), { status: 402 });
   });
   vi.spyOn(globalThis, 'fetch').mockImplementation(fetchFn);
   return { fetchFn, proofs };
@@ -340,6 +348,33 @@ describe('x402 funds-safety regressions', () => {
     expect(debits).toHaveLength(2);
   });
 
+  it('releases the reservation when wallet verification fails before any write (Codex P2)', async () => {
+    const { wallet, debits } = setup();
+    merchant(challenge(false));
+    transfer.mockImplementationOnce(async () => {
+      throw new AgentWalletVerificationError('agent wallet: deployment identity required');
+    });
+    const client = new X402Client(wallet);
+    const err = await client.fetch(URL).catch((e) => e);
+    expect(err).toMatchObject({ name: 'X402PaymentError' });
+    expect(err).not.toBeInstanceOf(X402SettlementUnknownError);
+    expect(err.cause).toBeInstanceOf(AgentWalletVerificationError);
+    expect(debits).toEqual([]);
+    expect(client.budgetTracker.getReservedSummary().global).toBe(0n);
+    // Nothing is left to reconcile: a corrected wallet can pay the same intent.
+    expect((await client.fetch(URL)).status).toBe(200);
+    expect(debits).toHaveLength(2);
+  });
+
+  it('still holds the reservation for an unclassified submission error', async () => {
+    const { wallet } = setup();
+    merchant(challenge(false));
+    transfer.mockImplementationOnce(async () => { throw new Error('socket hang up'); });
+    const client = new X402Client(wallet);
+    await expect(client.fetch(URL)).rejects.toBeInstanceOf(X402SettlementUnknownError);
+    expect(client.budgetTracker.getReservedSummary().global).toBeGreaterThan(0n);
+  });
+
   it('retains an unmatched receipt instead of trusting its reverted status to release the fee', async () => {
     const { wallet, debits } = setup();
     merchant(challenge(false));
@@ -354,7 +389,7 @@ describe('x402 funds-safety regressions', () => {
   });
 
   it('retains a background-confirmed unkeyed payment until proof is actually delivered', async () => {
-    const { wallet, debits } = setup();
+    const { wallet, debits, ev } = setup();
     merchant(challenge());
     let firstPayee = true;
     wallet.publicClient.waitForTransactionReceipt.mockImplementation(async ({ hash }: any) => {
@@ -362,7 +397,7 @@ describe('x402 funds-safety regressions', () => {
         firstPayee = false;
         throw new Error('receipt polling failed');
       }
-      return { status: 'success' };
+      return ev.paid(hash);
     });
     const client = new X402Client(wallet);
     await expect(client.fetch(URL)).rejects.toBeInstanceOf(X402SettlementUnknownError);
@@ -406,7 +441,7 @@ describe('x402 funds-safety regressions', () => {
   });
 
   it.each(['unknown', 'fee-only'] as const)('rejects changed terms for the same unkeyed request after %s payment', async state => {
-    const { wallet, debits } = setup();
+    const { wallet, debits, ev } = setup();
     const required = challenge();
     merchant(required);
     if (state === 'unknown') {
@@ -416,9 +451,9 @@ describe('x402 funds-safety regressions', () => {
         throw new Error('RPC response lost');
       });
     } else {
-      wallet.publicClient.waitForTransactionReceipt.mockImplementation(async ({ hash }: any) => ({
-        status: hash === PAYEE_HASH ? 'reverted' : 'success',
-      }));
+      wallet.publicClient.waitForTransactionReceipt.mockImplementation(async ({ hash }: any) => (
+        hash === PAYEE_HASH ? { status: 'reverted' } : ev.paid(hash)
+      ));
     }
     const client = new X402Client(wallet);
     await expect(client.fetch(URL)).rejects.toThrow();
@@ -496,5 +531,70 @@ describe('x402 funds-safety regressions', () => {
     required.accepts[0].extra = { nonce: 'unrelated-intent' };
     await expect(retainedFetch(URL)).rejects.toThrow(/global daily limit/);
     expect(debits).toHaveLength(2);
+  });
+});
+
+describe('x402 receipts must evidence the exact phase transfer (Codex round 3)', () => {
+  type Args = { token: string; to: string; amount: bigint };
+  const payeeArgs = (): Args => transfer.mock.calls.map(([, a]) => a as Args).find((a) => a.to === PAYEE)!;
+
+  it('never sends payment proof for a successful receipt without the payee Transfer', async () => {
+    const { wallet, ev } = setup();
+    const { proofs } = merchant(challenge(false));
+    wallet.publicClient.waitForTransactionReceipt.mockImplementation(async ({ hash }: { hash: string }) => (
+      hash === PAYEE_HASH ? { status: 'success', logs: [] } : ev.paid(hash)
+    ));
+    const client = new X402Client(wallet);
+    await expect(client.fetch(URL)).rejects.toBeInstanceOf(X402SettlementUnknownError);
+    expect(proofs).toHaveLength(0);
+    expect(client.budgetTracker.getReservedSummary().global).toBeGreaterThan(0n);
+  });
+
+  it.each([
+    ['recipient', (a: Args) => transferLog(a.token, WALLET, FEE_HASH.slice(0, 42), a.amount)],
+    ['amount', (a: Args) => transferLog(a.token, WALLET, a.to, a.amount - 1n)],
+    ['sender', (a: Args) => transferLog(a.token, PAYEE, a.to, a.amount)],
+    ['token', (a: Args) => transferLog(PAYEE, WALLET, a.to, a.amount)],
+  ])('treats a Transfer with the wrong %s as unknown, not payment', async (_field, log) => {
+    const { wallet, ev } = setup();
+    const { proofs } = merchant(challenge(false));
+    wallet.publicClient.waitForTransactionReceipt.mockImplementation(async ({ hash }: { hash: string }) => (
+      hash === PAYEE_HASH ? { status: 'success', logs: [log(payeeArgs())] } : ev.paid(hash)
+    ));
+    await expect(new X402Client(wallet).fetch(URL)).rejects.toBeInstanceOf(X402SettlementUnknownError);
+    expect(proofs).toHaveLength(0);
+  });
+
+  it('settles despite an unrelated wallet queue entry next to the matching Transfer', async () => {
+    const { wallet, ev } = setup();
+    merchant(challenge(false));
+    wallet.publicClient.waitForTransactionReceipt.mockImplementation(async ({ hash }: { hash: string }) => (
+      hash === PAYEE_HASH
+        ? { status: 'success', logs: [queuedLog(WALLET, { ...payeeArgs(), amount: 1n }), ...ev.logsFor(hash)] }
+        : ev.paid(hash)
+    ));
+    expect((await new X402Client(wallet).fetch(URL)).status).toBe(200);
+  });
+
+  it('reports queued only for this transfer\'s own queue entry', async () => {
+    const { wallet, ev } = setup();
+    const { proofs } = merchant(challenge(false));
+    wallet.publicClient.waitForTransactionReceipt.mockImplementation(async ({ hash }: { hash: string }) => (
+      hash === PAYEE_HASH ? { status: 'success', logs: [queuedLog(WALLET, payeeArgs())] } : ev.paid(hash)
+    ));
+    await expect(new X402Client(wallet).fetch(URL)).rejects.toBeInstanceOf(X402SettlementQueuedError);
+    expect(proofs).toHaveLength(0);
+  });
+
+  it('classifyX402SettlementReceipt fails closed without a wallet, transfer or logs', () => {
+    const t = { token: TOKEN, to: PAYEE, amount: 5n };
+    const ok = { status: 'success', logs: [transferLog(TOKEN, WALLET, PAYEE, 5n)] };
+    expect(classifyX402SettlementReceipt(ok, WALLET, t)).toBe('settled');
+    expect(classifyX402SettlementReceipt(ok, undefined, t)).toBe('unknown');
+    expect(classifyX402SettlementReceipt(ok, WALLET, undefined)).toBe('unknown');
+    expect(classifyX402SettlementReceipt({ status: 'success' }, WALLET, t)).toBe('unknown');
+    expect(classifyX402SettlementReceipt({ status: 'success', logs: [queuedLog(PAYEE, t)] }, WALLET, t)).toBe('unknown');
+    expect(classifyX402SettlementReceipt({ status: 'success', logs: [queuedLog(WALLET, t, { value: 1n })] }, WALLET, t)).toBe('unknown');
+    expect(classifyX402SettlementReceipt({ status: 'success', logs: [queuedLog(WALLET, t)] }, WALLET, t)).toBe('queued');
   });
 });

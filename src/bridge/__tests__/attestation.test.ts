@@ -18,9 +18,9 @@ describe('#44 CCTP V2 attestation lookup', () => {
     expect(parseAttestationResponse({ messages: [{ status: 'pending_confirmations', attestation: 'PENDING', message: '0x' }] }, fail)).toBe('pending');
   });
 
-  it('returns Circle attested message + attestation when complete', () => {
-    expect(parseAttestationResponse({ messages: [{ status: 'complete', attestation: '0xaa', message: '0xbb' }] }, fail))
-      .toEqual({ message: '0xbb', attestation: '0xaa' });
+  it('refuses a complete attestation that is not bound to a source message (finding 14)', () => {
+    expect(() => parseAttestationResponse({ messages: [{ status: 'complete', attestation: '0xaa', message: '0xbb' }] }, fail))
+      .toThrow(/source message is required/);
   });
 
   it('throws on error status', () => {
@@ -66,7 +66,8 @@ describe('parseAttestationResponse multi-message + eventNonce (#93 review)', () 
     expect(() => parseAttestationResponse(body, fail)).toThrow(/required/);
   });
   it('normalizes a decimal eventNonce to 32-byte hex', () => {
-    const r = parseAttestationResponse({ messages: [{ status: 'complete', message: att1, attestation: '0xb1', eventNonce: '255' }] }, fail);
+    const r = parseAttestationResponse({ messages: [{ status: 'complete', message: att1, attestation: '0xb1', eventNonce: '255' }] }, fail, src1);
+    expect(r).not.toBe('pending');
     if (r !== 'pending') expect(r.eventNonce).toBe('0x' + 'ff'.padStart(64, '0'));
   });
 });

@@ -7,7 +7,8 @@ The `agentwallet-sdk` npm package is a TypeScript library for policy-aware
 agent payments. It is non-custodial: callers supply their own viem
 `WalletClient`, and the SDK does not store keys or operate a custodial service.
 
-The current npm package is `agentwallet-sdk` v7.0.0. That is the only
+This source is `agentwallet-sdk` 8.0.0. Published versions 7.0.0 and earlier
+lack the October 25, 2026 security repairs. `agentwallet-sdk` is the only
 npm name this project publishes. `@agentwallet/sdk` is a different
 package owned by an unrelated maintainer and is not part of this SDK.
 
@@ -64,6 +65,10 @@ policy.applyOutcome(reserved.reservation, outcome);
 // settled → commit  |  released → retry-safe release  |  hold-unknown → lock, no auto-retry
 ```
 
+A locked (`hold-unknown`) reservation is released only by
+`policy.reconcileLocked(reservation, publicClient)`, which checks the recorded
+transaction hashes on the recorded chain.
+
 `check()` still exists as a reserve-then-commit wrapper. Prefer reserve / execute / `applyOutcome()` so an unknown broadcast cannot free the hold. A timer never unlocks `hold-unknown`.
 
 Only `reserved` authorizes a new execution. `existing` returns the earlier
@@ -85,6 +90,13 @@ npm install @solana/web3.js @solana/spl-token
 
 `@solana/web3.js` supports native SOL operations. Install
 `@solana/spl-token` as well when using SPL-token balance or transfer helpers.
+
+Stellar x402 payments (`StellarX402Adapter`, `stellarX402Pay`) use an optional
+peer dependency, version 14 or later:
+
+```bash
+npm install @stellar/stellar-sdk
+```
 
 ## Connect to an existing smart wallet
 
@@ -133,8 +145,11 @@ console.log({
 ```
 
 This example reads policy state. Functions such as `setSpendPolicy()`,
-`agentExecute()`, bridge, swap, and escrow methods can submit transactions and
-consume gas.
+`agentExecute()`, `agentTransferToken()`, bridge, swap, and escrow methods can
+submit transactions and consume gas. `agentTransferToken()` resolves to
+`{ status: "executed" | "queued" }` — a queued transfer moved no tokens.
+Upgrading from 7.x? Read the 8.0.0 migrations in
+[`docs/security-remediation.md`](docs/security-remediation.md).
 
 ## Contract and network boundaries
 
@@ -148,6 +163,11 @@ consume gas.
   runtime clients in [`src/index.ts`](src/index.ts).
 - `walletFromEnv()` maps `CHAIN_NAME` / `CHAIN_ID` onto those keys. It does not
   pass viem display names such as `"arbitrum one"` into `createWallet()`.
+  Unknown or conflicting chain settings throw; Base is used only when no chain
+  is configured.
+- Every agent/owner write first verifies the account (`verifyAgentWallet`).
+  Pass `deployment` and/or `expectedCodeHash` to `createWallet()` for a strong
+  deployment identity.
 - `setPolicyFromEnv()` copies a single configured spend limit onto the omitted
   dimension. A missing env var is not written as `0` (the on-chain disable-all
   sentinel).

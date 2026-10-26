@@ -1,100 +1,105 @@
 /**
- * Trading Agent Example — Polymarket
+ * Trading Agent Example — spend-limited USDC transfers
  *
- * Demonstrates an autonomous trading agent with:
- *   - $100/tx limit, $2000/day budget
- *   - USDC spend policy on Base
- *   - Auto-queues over-limit trades for owner approval
+ * Demonstrates an autonomous agent operating under an on-chain policy:
+ *   - $100/tx limit, $2000/day budget (must already be installed by the owner)
+ *   - Over-limit trades are queued for owner approval and reported as such
+ *
+ * Safety: runs on Base Sepolia by default. Base mainnet requires
+ * AGENT_EXAMPLE_NETWORK=base and AGENT_EXAMPLE_LIVE_ACK (see _example-safety.ts).
+ * Nothing runs on import; execute this file directly to run it.
+ *
+ * Env: AGENT_PRIVATE_KEY, AGENT_WALLET, TRADE_COUNTERPARTY, RPC_URL (optional),
+ *      deployment identity: AGENT_WALLET_CODE_HASH, or AGENT_WALLET_FACTORY +
+ *      AGENT_WALLET_TOKEN_CONTRACT + AGENT_WALLET_TOKEN_ID (required).
  */
 
-import { createWalletClient, http, parseUnits, type Address } from 'viem';
+import { createWalletClient, http, parseUnits, isAddress, type Address } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
-import { base } from 'viem/chains';
 import {
   createWallet,
-  setSpendPolicy,
   agentTransferToken,
   checkBudget,
-  deployWallet,
   onTransactionQueued,
-  NATIVE_TOKEN,
+  AgentExecutionError,
 } from '../src/index.js';
+import {
+  assertInstalledSpendPolicy,
+  isDirectRun,
+  requireEnv,
+  resolveExampleNetwork,
+  exampleDeploymentIdentity,
+} from './_example-safety.js';
 
-// ─── Config ───
-const AGENT_PRIVATE_KEY = process.env.AGENT_PRIVATE_KEY as `0x${string}`;
-const WALLET_ADDRESS = process.env.AGENT_WALLET as Address;
-const USDC = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' as Address; // USDC on Base
-const POLYMARKET_CTF_EXCHANGE = '0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E' as Address; // example
-
-const LIMITS = {
+export const LIMITS = {
   perTx: parseUnits('100', 6),       // $100 max per trade
   perDay: parseUnits('2000', 6),     // $2,000 daily budget
 };
 
-async function main() {
-  // 1. Create agent signer
-  const agentAccount = privateKeyToAccount(AGENT_PRIVATE_KEY);
+export async function main(): Promise<void> {
+  const network = resolveExampleNetwork();
+  const counterparty = requireEnv('TRADE_COUNTERPARTY');
+  if (!isAddress(counterparty)) throw new Error('TRADE_COUNTERPARTY must be an address');
+
+  const agentAccount = privateKeyToAccount(requireEnv('AGENT_PRIVATE_KEY') as `0x${string}`);
   const walletClient = createWalletClient({
     account: agentAccount,
-    chain: base,
+    chain: network.chain,
     transport: http(process.env.RPC_URL),
   });
 
-  // 2. Connect to the AgentAccountV2
   const wallet = createWallet({
-    accountAddress: WALLET_ADDRESS,
-    chain: 'base',
+    accountAddress: requireEnv('AGENT_WALLET') as Address,
+    chain: network.chainKey,
     rpcUrl: process.env.RPC_URL,
     walletClient,
+    ...exampleDeploymentIdentity(),
   });
 
-  console.log(`🤖 Trading agent connected to wallet: ${wallet.address}`);
+  console.log(`🤖 Trading agent on ${network.chainKey}${network.live ? ' (LIVE FUNDS)' : ''}: ${wallet.address}`);
+  await assertInstalledSpendPolicy(wallet, network.usdc, LIMITS);
 
-  // 3. Check current budget
-  const budget = await checkBudget(wallet, USDC);
-  console.log(`💰 Budget remaining: $${Number(budget.remainingInPeriod) / 1e6} / $2000`);
-  console.log(`   Per-tx limit: $${Number(budget.perTxLimit) / 1e6}`);
+  const budget = await checkBudget(wallet, network.usdc);
+  console.log(`💰 Budget remaining: ${budget.remainingInPeriod} / per-tx ${budget.perTxLimit} (base units)`);
 
-  // 4. Listen for queued transactions (over-limit trades)
   const unwatch = onTransactionQueued(wallet, (event) => {
-    console.log(`⚠️  Trade queued for owner approval!`);
-    console.log(`   TxId: ${event.txId}, Amount: $${Number(event.amount) / 1e6}`);
-    console.log(`   → Notify owner via push notification / Telegram / etc.`);
+    console.log(`⚠️  Trade queued for owner approval (txId ${event.txId}, amount ${event.amount})`);
   });
 
-  // 5. Simulate trading loop
-  const markets = [
-    { name: 'BTC > $150k by March', outcome: 'YES', size: parseUnits('50', 6) },
-    { name: 'Fed cuts rates in Q1', outcome: 'YES', size: parseUnits('75', 6) },
-    { name: 'ETH flips BTC', outcome: 'NO', size: parseUnits('25', 6) },
-    { name: 'Big whale trade attempt', outcome: 'YES', size: parseUnits('500', 6) }, // over limit!
+  const trades = [
+    { name: 'Position A', size: parseUnits('50', 6) },
+    { name: 'Position B', size: parseUnits('75', 6) },
+    { name: 'Over-limit attempt', size: parseUnits('500', 6) }, // expected to queue
   ];
 
-  for (const market of markets) {
-    console.log(`\n📊 Trading: ${market.name} — ${market.outcome} — $${Number(market.size) / 1e6}`);
-
-    try {
-      // In production, this would encode the actual Polymarket CTF exchange calldata.
-      // Here we show the spend-limit flow with a simple USDC transfer.
-      const hash = await agentTransferToken(wallet, {
-        token: USDC,
-        to: POLYMARKET_CTF_EXCHANGE,
-        amount: market.size,
-      });
-      console.log(`   ✅ Executed: ${hash}`);
-    } catch (err: any) {
-      console.log(`   ❌ Error: ${err.message}`);
+  try {
+    for (const trade of trades) {
+      console.log(`\n📊 ${trade.name}: ${trade.size} base units`);
+      try {
+        const result = await agentTransferToken(wallet, {
+          token: network.usdc,
+          to: counterparty,
+          amount: trade.size,
+        });
+        if (result.status === 'executed') console.log(`   ✅ Executed: ${result.txHash}`);
+        else console.log(`   ⏸️  Queued (txId ${result.pendingTxId}); no tokens moved`);
+      } catch (err) {
+        if (err instanceof AgentExecutionError && err.executionStatus === 'unknown') {
+          // Never resubmit an unknown transfer; reconcile its hash first.
+          console.log(`   ❓ Outcome unknown for ${err.txHash}; stopping until reconciled`);
+          break;
+        }
+        console.log(`   ❌ ${(err as Error).message}`);
+      }
     }
-
-    // Brief pause between trades
-    await new Promise((r) => setTimeout(r, 1000));
+  } finally {
+    unwatch();
   }
-
-  // 6. Final budget check
-  const finalBudget = await checkBudget(wallet, USDC);
-  console.log(`\n📈 Final budget remaining: $${Number(finalBudget.remainingInPeriod) / 1e6}`);
-
-  unwatch();
 }
 
-main().catch(console.error);
+if (isDirectRun(import.meta.url)) {
+  main().catch((err) => {
+    console.error(err);
+    process.exitCode = 1;
+  });
+}

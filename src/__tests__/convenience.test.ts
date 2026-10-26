@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { getAddress } from 'viem';
+import { getAddress, keccak256 } from 'viem';
 import {
   resolveEnvSpendLimits,
   resolveWalletChain,
@@ -9,6 +9,7 @@ import {
 } from '../convenience.js';
 import { USDC_ADDRESSES, X402_PROTOCOL_FEE_COLLECTOR } from '../x402/index.js';
 import type { X402PaymentRequirements } from '../x402/types.js';
+import { transferLog } from '../x402/__tests__/receipt-evidence.js';
 
 const TEST_PRIVATE_KEY = `0x${'01'.repeat(32)}`;
 
@@ -42,10 +43,13 @@ describe('resolveWalletChain', () => {
     expect(resolveWalletChain('worldchain').walletChain).toBe('worldchain');
   });
 
-  it('keeps the documented unknown-id fallback on Base', () => {
-    const resolved = resolveWalletChain(99999);
-    expect(resolved.chain.id).toBe(8453);
-    expect(resolved.walletChain).toBe('base');
+  // Finding 15: explicit but unknown/malformed chains fail closed instead of using Base mainnet.
+  it.each([99999, 0, -1, 1.5, Number.NaN])('rejects unknown or malformed chain id %s', (id) => {
+    expect(() => resolveWalletChain(id)).toThrow();
+  });
+
+  it.each(['basee', 'sepolia-ish', '   ', 'solana'])('rejects unknown chain name %j', (name) => {
+    expect(() => resolveWalletChain(name)).toThrow();
   });
 });
 
@@ -123,6 +127,56 @@ describe('walletFromEnv', () => {
 
     expect(wallet.chain.id).toBe(84532);
   });
+
+  it.each([['CHAIN_ID', '999999'], ['CHAIN_NAME', 'basee'], ['CHAIN_ID', '-1']])(
+    'refuses %s=%s instead of silently using Base mainnet (finding 15)', (key, value) => {
+      process.env.AGENT_PRIVATE_KEY = TEST_PRIVATE_KEY;
+      process.env.AGENT_WALLET_ADDRESS = '0x0000000000000000000000000000000000000001';
+      delete process.env.CHAIN_NAME;
+      delete process.env.CHAIN_ID;
+      process.env[key] = value;
+      expect(() => walletFromEnv()).toThrow();
+    });
+
+  it('rejects a blank explicit chain option instead of falling back', () => {
+    process.env.AGENT_PRIVATE_KEY = TEST_PRIVATE_KEY;
+    process.env.AGENT_WALLET_ADDRESS = '0x0000000000000000000000000000000000000001';
+    expect(() => walletFromEnv({ chain: '  ' })).toThrow(/non-empty/);
+  });
+
+  it('reads deployment identity from env and rejects partial or malformed settings', () => {
+    process.env.AGENT_PRIVATE_KEY = TEST_PRIVATE_KEY;
+    process.env.AGENT_WALLET_ADDRESS = '0x0000000000000000000000000000000000000001';
+    delete process.env.CHAIN_NAME; delete process.env.CHAIN_ID;
+    process.env.AGENT_WALLET_CODE_HASH = '0x' + 'ab'.repeat(32);
+    try {
+      expect(walletFromEnv().expectedCodeHash).toBe('0x' + 'ab'.repeat(32));
+      process.env.AGENT_WALLET_FACTORY = '0x' + '11'.repeat(20);
+      expect(() => walletFromEnv()).toThrow(/must all be set/);
+      process.env.AGENT_WALLET_CODE_HASH = 'nope';
+      delete process.env.AGENT_WALLET_FACTORY;
+      expect(() => walletFromEnv()).toThrow(/32-byte/);
+    } finally {
+      delete process.env.AGENT_WALLET_CODE_HASH;
+      delete process.env.AGENT_WALLET_FACTORY;
+    }
+  });
+
+  it('rejects CHAIN_NAME and CHAIN_ID that disagree', () => {
+    process.env.AGENT_PRIVATE_KEY = TEST_PRIVATE_KEY;
+    process.env.AGENT_WALLET_ADDRESS = '0x0000000000000000000000000000000000000001';
+    process.env.CHAIN_NAME = 'base';
+    process.env.CHAIN_ID = '84532';
+    expect(() => walletFromEnv()).toThrow(/disagree/);
+  });
+
+  it('treats blank chain settings as absent and uses the documented Base default', () => {
+    process.env.AGENT_PRIVATE_KEY = TEST_PRIVATE_KEY;
+    process.env.AGENT_WALLET_ADDRESS = '0x0000000000000000000000000000000000000001';
+    process.env.CHAIN_NAME = '  ';
+    process.env.CHAIN_ID = '';
+    expect(walletFromEnv().chain.id).toBe(8453);
+  });
 });
 
 describe('USDC environment spending controls', () => {
@@ -160,10 +214,26 @@ describe('USDC environment spending controls', () => {
       chain: { id: chainId, name: 'Test chain' },
       walletClient: { account: { address: otherRecipient } },
       contract: {
-        read: { remainingBudget: vi.fn(async () => [10n ** 18n, 10n ** 18n]) },
+        read: {
+          remainingBudget: vi.fn(async () => [10n ** 18n, 10n ** 18n]),
+          tokenContract: vi.fn(async () => otherRecipient),
+          tokenId: vi.fn(async () => 1n),
+        },
         write: { agentTransferToken: transfer, setSpendPolicy: setPolicy },
       },
-      publicClient: { waitForTransactionReceipt: vi.fn(async () => ({ status: 'success' })) },
+      publicClient: {
+        // Each receipt carries the ERC-20 Transfer of every submitted call.
+        waitForTransactionReceipt: vi.fn(async () => ({
+          status: 'success',
+          logs: transfer.mock.calls.map(([args]) => {
+            const [token, to, amount] = args as [string, string, bigint];
+            return transferLog(token, otherRecipient, to, amount);
+          }),
+        })),
+        getCode: vi.fn(async () => '0x6080604052'),
+        getChainId: vi.fn(async () => chainId),
+      },
+      expectedCodeHash: keccak256('0x6080604052'),
     } as unknown as Parameters<typeof x402FromEnv>[0];
     return { wallet, transfer, setPolicy };
   }

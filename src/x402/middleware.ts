@@ -63,14 +63,17 @@ export function wrapWithX402(
 
   const fetch: typeof globalThis.fetch = async (input: string | URL | Request, init?: RequestInit) => {
     const { url, init: replayInit } = await toReplayableFetchArgs(input, init);
-    const requestInit = withFailClosedRedirect(replayInit, init);
-    const response = await fetchFn(url, requestInit);
+    // Snapshot every mutable request input BEFORE the first hop. A merchant
+    // that delays its 402 cannot let caller-side mutation change the bytes
+    // that get paid for or retried.
+    const snapshot = withFailClosedRedirect(wrappedClient.snapshotRequestInitForRetry(replayInit), init);
+    const response = await fetchFn(url, wrappedClient.snapshotRequestInitForRetry(snapshot));
 
     if (response.status !== 402) {
       return response;
     }
 
-    return wrappedClient.settle402AndRetry(response, url, requestInit, fetchFn);
+    return wrappedClient.settle402AndRetry(response, url, snapshot, fetchFn);
   };
   return Object.assign(fetch, { reconcileSubmission: wrappedClient.reconcileSubmission.bind(wrappedClient) });
 }

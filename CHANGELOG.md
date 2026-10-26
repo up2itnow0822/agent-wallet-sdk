@@ -1,3 +1,42 @@
+## [8.0.0] — Unreleased
+
+Security release for the October 25, 2026 assessment of 7.0.0 (29 findings,
+all repaired with regression tests). See `docs/security-remediation.md`.
+
+### Breaking
+- `agentTransferToken()` confirms and returns `{ status: 'executed' | 'queued', txHash, pendingTxId? }`; new `submitAgentTransferToken()` returns the bare submission hash.
+- Agent/owner writes require a deployment identity (`deployment` or `expectedCodeHash`, or explicit unsafe `allowUnverifiedDeployment`) verified by `verifyAgentWallet`; `agentExecute()` needs a matching wallet event to report executed; `createWallet()` returns a frozen handle.
+- `batchAgentTransfer()` returns classified `AgentTransferResult[]`.
+- `sendToken()`/`sendNative()` require a chain-bound wallet client.
+- `SpendingPolicy.release()` no longer accepts `{ reconciled }`; record the submission and call binding at lock time (`lock()` / `applyOutcome(r, outcome, call)`) and use `reconcileLocked()`.
+- `sendToken()` requires `expectedDecimals` for string amounts of unlisted tokens; amounts never truncate.
+- `SolanaWallet` binds to a cluster by genesis hash (default `mainnet-beta`); `sendSplToken()` uses `TransferChecked` and pinned decimals.
+- `SwapModule.swap()` requires `minAmountOut`.
+- `UAIDResolver.verify()` verifies ERC-8004 identities on-chain; broker claims move to `brokerAttested`.
+- `stellarX402Pay()` requires a `policy` with a `StellarSpendBudget`.
+- `buildERC8004UAID()` / `erc8004ToUniversal()` emit the identity registry in the `aid`.
+- Unknown `CHAIN_NAME`/`CHAIN_ID` values throw instead of using Base mainnet.
+- x402 challenges must bind the exact resource including its query.
+
+### Fixed
+- Bridge: bounded Circle polling, receipt-bound attestations, burn-term checks, Solana recipient verification, frozen recovery and `resumeEVMToSolana()`, mint ambiguity codes and `usedNonces` reconciliation, recipient/amount derived from attested bytes.
+- x402: bounded 402 body parsing, explicit intents bound to the request fingerprint, `wrapWithX402` snapshots before the first hop.
+- Stellar: exact chain matching, configured Horizon with network check, bounded I/O, verified settlement, spend budget.
+- UAID: strict broker schema, bounded broker I/O, bounded LRU cache.
+- Examples default to Base Sepolia and never auto-run.
+- CI: actions pinned to commit SHAs. The `review-gate` workflow is removed (finding 19 resolved by removal): Codex reviews every PR automatically, so there is no second Codex gate.
+- Review round 1 (Codex): `SubmissionIdentity.calls` binds each multi-phase hash to its own call; `StellarSpendBudget.reconcile()` frees unknown Stellar reservations from ledger evidence; wallet-verification failures are typed pre-broadcast errors that release x402 reservations; queued events must match the requested transfer; the Solana cluster is re-checked before every transfer.
+- Review round 3 (Codex): x402 settlement receipts must carry the phase transfer's ERC-20 `Transfer` (or its own queue entry) — `classifyX402SettlementReceipt()`; `agentExecute()` also matches calldata; the EVM↔Solana bridge (incl. `resumeEVMToSolana`) is exported from the package root; UAID registration uses the chain's own identity registry.
+- Review round 4 (Codex): new `resumeSolanaToEVM()` resolves a retained mint before any new `receiveMessage`; Stellar re-checks the Horizon network before every submission; `SwapModule` verifies the read client's RPC chain; runnable examples require a deployment identity; broker UAIDs compare EVM registry addresses case-insensitively.
+- Review round 5 (Codex): wallet verification and ERC-8004 binding reads require the read RPC's `getChainId()` to match; Solana re-checks the cluster immediately before signing; Stellar reconciliation re-checks the Horizon network after its reads; a hashless ambiguous Solana→EVM mint stays held until `originalSubmissionReconciled`.
+- Review round 6 (Codex): Solana signs over a blockhash fetched before the cluster check and submits raw bytes; wallet verification and ERC-8004 binding reads re-check the RPC chain after their reads; example policy checks reject sub-daily periods.
+- Review round 7 (Codex): burn-term checks cover `maxFee` and `minFinalityThreshold` (kept in EVM→Solana recovery); Solana recipient verification re-checks the cluster after the account read; the x402 example verifies the on-chain policy before paying.
+- Review round 8 (Codex): Stellar 4xx rejections release only for envelope-deterministic result codes, otherwise the ledger decides; Stellar reconciliation requires the recorded network; the Stellar x402 API is exported from the package root; `agentExecute` queues must be native (`NATIVE_TOKEN`); a Solana confirmation without a result is unknown; a retained Solana→EVM mint hash must be this message's `receiveMessage`.
+- Review round 9 (Codex): no Stellar submit response or result code releases a reservation — every non-2xx is decided from the ledger (`STELLAR_DETERMINISTIC_REJECTIONS` removed; `tx_too_early` and the other codes describe bytes that can still apply or can be reported falsely); `reconcileLocked` and Solana→EVM retained-mint reconciliation require the receipt and transaction body to name the requested hash; `@stellar/stellar-sdk` (>= 14) is a declared optional peer.
+- Review round 10 (Codex): a lock whose evidence dropped a phase (malformed or empty hash or call; new `SpendOutcome.incompleteEvidence`, `SubmissionIdentity.incomplete`) is never released by `reconcileLocked`, only committed on success.
+
+---
+
 ## [7.0.0] — 2026-10-23
 
 Security release. Lifts the security-maintenance pause.
