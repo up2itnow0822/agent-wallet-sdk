@@ -449,6 +449,18 @@ async function completeEVMToSolana(
     throw withRecovery(code, err instanceof Error ? err.message : String(err), { messageBytes });
   }
 
+  try {
+    assertBurnTerms(attested.message, {
+      sourceDomain: recovery.sourceDomain,
+      destinationDomain: recovery.destinationDomain,
+      burnToken: recovery.burnToken,
+      mintRecipient: recovery.mintRecipient,
+      amount: recovery.amount,
+    });
+  } catch (err) {
+    throw withRecovery('ATTESTATION_ERROR', `Attested message does not match the burn: ${(err as Error).message}.`, { messageBytes });
+  }
+
   return {
     burnTxHash: recovery.burnTxHash,
     // Hash of the attested bytes returned below (nonce filled in by Circle).
@@ -602,8 +614,16 @@ export async function receiveFromSolanaOnEVM(
   };
 
   // Reconcile the nonce first: a used nonce means the mint already happened.
-  const used = await transmitter.read.usedNonces([decoded.nonce]).catch(() => undefined) as bigint | undefined;
-  if (typeof used === 'bigint' && used !== 0n) {
+  let used: bigint;
+  try {
+    used = await transmitter.read.usedNonces([decoded.nonce]) as bigint;
+  } catch (err) {
+    throw fail('MINT_FAILED', `could not read usedNonces(${decoded.nonce}) on ${toChain}: ${err instanceof Error ? err.message : String(err)}. Nothing was submitted; retry later.`);
+  }
+  if (typeof used !== 'bigint') {
+    throw fail('MINT_FAILED', `usedNonces(${decoded.nonce}) returned an invalid value; nothing was submitted.`);
+  }
+  if (used !== 0n) {
     throw fail('MINT_ALREADY_RECEIVED', `CCTP nonce ${decoded.nonce} was already received on ${toChain}; do not resubmit.`);
   }
 

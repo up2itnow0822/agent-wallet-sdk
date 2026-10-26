@@ -40,3 +40,36 @@ describe('boundedFetch', () => {
     expect(err.code).toBe('TOO_LARGE');
   });
 });
+
+describe('boundedFetch cancellation (review follow-ups)', () => {
+  it('rejects immediately when the caller signal is already aborted, even if fetch ignores it', async () => {
+    const ac = new AbortController();
+    ac.abort();
+    const started = Date.now();
+    const err = await boundedFetch('https://x', {}, {
+      timeoutMs: 5_000, maxBytes: 10, signal: ac.signal,
+      fetchImpl: (() => new Promise(() => undefined)) as unknown as typeof fetch,
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(BoundedFetchError);
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  it('honours a signal passed in init', async () => {
+    const ac = new AbortController();
+    const p = boundedFetch('https://x', { signal: ac.signal }, {
+      timeoutMs: 5_000, maxBytes: 10,
+      fetchImpl: (() => new Promise(() => undefined)) as unknown as typeof fetch,
+    }).catch((e) => e);
+    ac.abort();
+    expect((await p).code).toBe('NETWORK');
+  });
+
+  it('readBoundedText cancels the locked stream on timeout', async () => {
+    let cancelled = false;
+    const stream = new ReadableStream({ cancel() { cancelled = true; } });
+    const err = await readBoundedText(new Response(stream), { timeoutMs: 20, maxBytes: 10 }).catch((e) => e);
+    expect(err.code).toBe('TIMEOUT');
+    await new Promise((r) => setTimeout(r, 10));
+    expect(cancelled).toBe(true);
+  });
+});

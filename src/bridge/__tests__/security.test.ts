@@ -368,3 +368,48 @@ describe('bounded attestation polling (finding 12)', () => {
     expect(err2.message).toMatch(/oversized/);
   });
 });
+
+// ── Review follow-ups ─────────────────────────────────────────────────────
+describe('review follow-ups', () => {
+  it('EVM bridge: a successful burn without a transmitter MessageSent is BURN_UNCONFIRMED with recovery, never BURN_FAILED', async () => {
+    h.depositForBurn.mockResolvedValue(BURN_TX);
+    const msg = buildMessage({
+      src: CCTP_DOMAIN_IDS.base, dst: CCTP_DOMAIN_IDS.arbitrum, sender: '0x' + '28'.repeat(20),
+      burnToken: USDC_CONTRACT.base, mintRecipient: EVM_ME, amount: 5n,
+    });
+    h.receipt.mockResolvedValue({ status: 'success', logs: [{
+      address: EVM_OTHER, topics: [MESSAGE_SENT_TOPIC], data: encodeAbiParameters([{ type: 'bytes' }], [msg]),
+    }] });
+    const err = await new BridgeModule(walletClient, 'base').bridge(5n, 'arbitrum').catch((e) => e);
+    expect(err.code).toBe('BURN_UNCONFIRMED');
+    expect(err.recovery?.burnTxHash).toBe(BURN_TX);
+  });
+
+  it('rejects non-hex completed Circle messages', async () => {
+    const good = buildMessage({ src: 6, dst: 3, sender: '0x01', burnToken: '0x02', mintRecipient: '0x03', amount: 1n });
+    const junk = good.slice(0, 2 + 24) + 'zz' + good.slice(2 + 26);
+    const err = await pollCircleAttestation({
+      burnTx: BURN_TX, sourceDomain: 6, apiUrl: 'https://iris-api.circle.com', expectedMessage: good,
+      maxPolls: 1, intervalMs: 1, sleep: async () => undefined,
+      makeError: (code: string, message: string) => Object.assign(new Error(message), { code }),
+      fetchImpl: (async () => new Response(JSON.stringify({ messages: [{ status: 'complete', message: junk, attestation: '0xaa' }] }))) as never,
+    }).catch((e) => e);
+    expect(err.code).toBe('ATTESTATION_ERROR');
+  });
+
+  it('does not submit receiveMessage when usedNonces cannot be read', async () => {
+    const msg = buildMessage({
+      src: 5, dst: CCTP_DOMAIN_IDS.arbitrum, sender: solanaPubkeyToBytes32(SOLANA_TOKEN_MESSENGER),
+      burnToken: solanaPubkeyToBytes32(SOLANA_USDC_MINT), mintRecipient: EVM_ME, amount: 5n,
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      messages: [{ status: 'complete', message: msg, attestation: '0x' + 'ab'.repeat(65) }],
+    }))));
+    h.usedNonces.mockRejectedValue(new Error('rpc down'));
+    const err = await receiveFromSolanaOnEVM(walletClient, {
+      messageBytes: msg, messageHash: keccak256(msg), sourceDomain: 5, burnTxSignature: '5'.repeat(88),
+    }, { toChain: 'arbitrum' }).catch((e) => e);
+    expect(err.code).toBe('MINT_FAILED');
+    expect(h.receiveMessage).not.toHaveBeenCalled();
+  });
+});

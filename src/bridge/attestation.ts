@@ -250,6 +250,7 @@ export const ATTESTATION_MAX_MESSAGES = 16;
 const MAX_MESSAGE_HEX = 2 + 2 * 32 * 1024;   // 32 KiB message bytes (incl. hookData)
 const MAX_ATTESTATION_HEX = 2 + 2 * 4 * 1024; // 4 KiB of signatures
 const MAX_SHORT_FIELD = 128;
+const HEX_BYTES = /^0x(?:[0-9a-fA-F]{2})*$/;
 const MAX_ERROR_TEXT = 512;
 
 function shortString(value: unknown, max: number): string | undefined {
@@ -272,10 +273,13 @@ export function validateCircleBody(raw: unknown): CircleV2MessagesResponse {
     const e = entry as Record<string, unknown>;
     const message = e.message;
     const attestation = e.attestation;
-    if ((message !== undefined && message !== null) && (typeof message !== 'string' || message.length > MAX_MESSAGE_HEX)) {
+    const ready = e.status === 'complete';
+    if ((message !== undefined && message !== null) && (typeof message !== 'string' || message.length > MAX_MESSAGE_HEX ||
+        (ready && !HEX_BYTES.test(message)))) {
       throw new Error(`Circle message ${i} has an invalid or oversized message`);
     }
-    if ((attestation !== undefined && attestation !== null) && (typeof attestation !== 'string' || attestation.length > MAX_ATTESTATION_HEX)) {
+    if ((attestation !== undefined && attestation !== null) && (typeof attestation !== 'string' || attestation.length > MAX_ATTESTATION_HEX ||
+        (ready && !HEX_BYTES.test(attestation)))) {
       throw new Error(`Circle message ${i} has an invalid or oversized attestation`);
     }
     return {

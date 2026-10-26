@@ -173,8 +173,11 @@ export class BridgeModule {
     } catch (err) {
       throw new BridgeError('BURN_UNCONFIRMED', `Could not read burn receipt ${burnTxHash}: ${(err as Error).message}. Retry waitForAttestation with the same hash; never burn again.`);
     }
+    if (receipt.status === 'reverted') {
+      throw new BridgeError('BURN_FAILED', `burn transaction ${burnTxHash} reverted; nothing to attest.`);
+    }
     if (receipt.status !== 'success') {
-      throw new BridgeError('BURN_FAILED', `burn transaction ${burnTxHash} did not succeed; nothing to attest.`);
+      throw new BridgeError('BURN_UNCONFIRMED', `burn transaction ${burnTxHash} status is not confirmed; retry with the same hash, never burn again.`);
     }
     const { messageBytes } = this.extractMessageSent(receipt);
     if (options.expectedMessage && options.expectedMessage.toLowerCase() !== messageBytes.toLowerCase()) {
@@ -320,7 +323,9 @@ export class BridgeModule {
         return { messageBytes, messageHash, nonce };
       }
     }
-    throw new BridgeError('BURN_FAILED', 'Could not find MessageSent event in burn transaction receipt.');
+    // The burn transaction succeeded, so funds may be burned: never report a
+    // definite (retry-safe) failure here.
+    throw new BridgeError('BURN_UNCONFIRMED', 'Could not find a MessageSent event from the CCTP MessageTransmitter in the burn receipt; verify the burn on-chain before any action.');
   }
 
   private async pollForAttestation(burnTxHash: Hash, fromChain: EVMBridgeChain, apiUrl: string, expectedMessage: Hex): Promise<CctpAttestedMessage> {
@@ -353,8 +358,17 @@ export class BridgeModule {
       throw new BridgeError('MINT_FAILED', `attested message targets domain ${decoded.destinationDomain}, not ${toChain}.`);
     }
     // Reconcile the nonce before (re)submitting: a used nonce means the mint already happened.
-    const used = await transmitter.read.usedNonces([decoded.nonce]).catch(() => undefined) as bigint | undefined;
-    if (typeof used === 'bigint' && used !== 0n) {
+    let used: bigint;
+    try {
+      used = await transmitter.read.usedNonces([decoded.nonce]) as bigint;
+    } catch (err) {
+      // Nothing was submitted; fail closed rather than mint without reconciliation.
+      throw new BridgeError('MINT_FAILED', `could not read usedNonces(${decoded.nonce}) on ${toChain}: ${err instanceof Error ? err.message : String(err)}. Nothing was submitted; retry later.`);
+    }
+    if (typeof used !== 'bigint') {
+      throw new BridgeError('MINT_FAILED', `usedNonces(${decoded.nonce}) returned an invalid value; nothing was submitted.`);
+    }
+    if (used !== 0n) {
       throw new BridgeError('MINT_ALREADY_RECEIVED', `CCTP message nonce ${decoded.nonce} was already received on ${toChain}; do not resubmit.`);
     }
 

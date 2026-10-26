@@ -55,19 +55,14 @@ export async function boundedFetch(
   const controller = new AbortController();
   let timedOut = false;
   let internalAbort = false;
+  let activeReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   const abortInternally = () => { internalAbort = true; controller.abort(); };
-  const timer = setTimeout(() => {
-    timedOut = true;
-    controller.abort();
-  }, timeoutMs);
-  const onCallerAbort = () => controller.abort();
-  if (options.signal) {
-    if (options.signal.aborted) controller.abort();
-    else options.signal.addEventListener('abort', onCallerAbort, { once: true });
-  }
+  // Register the deadline listener BEFORE anything can abort the controller,
+  // so an already-aborted caller signal still rejects immediately.
   const deadline = new Promise<never>((_, reject) => {
     controller.signal.addEventListener('abort', () => {
       if (internalAbort) return; // our own size-limit abort reports TOO_LARGE itself
+      void activeReader?.cancel().catch(() => undefined);
       reject(new BoundedFetchError(timedOut ? 'TIMEOUT' : 'NETWORK', timedOut
         ? `request to ${url} exceeded ${timeoutMs} ms`
         : `request to ${url} was cancelled`));
@@ -75,6 +70,19 @@ export async function boundedFetch(
   });
   // Avoid an unhandled rejection when the work finishes first.
   deadline.catch(() => undefined);
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+  // Both an options.signal and an init.signal from the caller cancel the request.
+  const callerSignals = [options.signal, init.signal ?? undefined].filter(
+    (sig): sig is AbortSignal => !!sig,
+  );
+  const onCallerAbort = () => controller.abort();
+  for (const sig of callerSignals) {
+    if (sig.aborted) controller.abort();
+    else sig.addEventListener('abort', onCallerAbort, { once: true });
+  }
 
   const doFetch = options.fetchImpl ?? fetch;
   try {
@@ -87,7 +95,10 @@ export async function boundedFetch(
       abortInternally();
       throw new BoundedFetchError('TOO_LARGE', `response from ${url} declares ${declared} bytes (limit ${maxBytes})`);
     }
-    const text = await Promise.race([readCapped(response, maxBytes, abortInternally, url), deadline]);
+    const text = await Promise.race([
+      readCapped(response, maxBytes, abortInternally, url, (r) => { activeReader = r; }),
+      deadline,
+    ]);
     return { ok: response.ok, status: response.status, headers: response.headers, text };
   } catch (err) {
     if (err instanceof BoundedFetchError) throw err;
@@ -97,7 +108,7 @@ export async function boundedFetch(
     throw new BoundedFetchError('NETWORK', `request to ${url} failed: ${(err as Error)?.message ?? String(err)}`, err);
   } finally {
     clearTimeout(timer);
-    options.signal?.removeEventListener('abort', onCallerAbort);
+    for (const sig of callerSignals) sig.removeEventListener('abort', onCallerAbort);
   }
 }
 
@@ -106,10 +117,12 @@ async function readCapped(
   maxBytes: number,
   abort: () => void,
   url: string,
+  onReader?: (reader: ReadableStreamDefaultReader<Uint8Array>) => void,
 ): Promise<string> {
   const body = (response as { body?: ReadableStream<Uint8Array> | null }).body;
   if (body && typeof body.getReader === 'function') {
     const reader = body.getReader();
+    onReader?.(reader);
     const chunks: Uint8Array[] = [];
     let total = 0;
     for (;;) {
@@ -148,20 +161,23 @@ export async function readBoundedText(
   response: Response,
   options: { timeoutMs: number; maxBytes: number; label?: string },
 ): Promise<string> {
-  const controller = new AbortController();
   const label = options.label ?? 'response';
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
-      controller.abort();
-      const body = (response as { body?: ReadableStream | null }).body;
-      body?.cancel?.().catch?.(() => undefined);
+      // Cancel through the reader that holds the stream lock so the pending
+      // read and the underlying connection are actually released.
+      void reader?.cancel().catch(() => undefined);
       reject(new BoundedFetchError('TIMEOUT', `${label} body exceeded ${options.timeoutMs} ms`));
     }, options.timeoutMs);
   });
   deadline.catch(() => undefined);
   try {
-    return await Promise.race([readCapped(response, options.maxBytes, () => controller.abort(), label), deadline]);
+    return await Promise.race([
+      readCapped(response, options.maxBytes, () => { void reader?.cancel().catch(() => undefined); }, label, (r) => { reader = r; }),
+      deadline,
+    ]);
   } finally {
     clearTimeout(timer);
   }
