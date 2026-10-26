@@ -1,0 +1,202 @@
+/**
+ * Stellar x402 regression tests — findings 7, 10, 17, 21, 26.
+ * @stellar/stellar-sdk is mocked; no network or funds are used.
+ */
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+vi.mock('@stellar/stellar-sdk', () => {
+  class Account { constructor(readonly id: string, readonly seq: string) {} }
+  class Asset { constructor(readonly code: string, readonly issuer: string) {} }
+  class TransactionBuilder {
+    ops: unknown[] = [];
+    constructor(readonly account: Account, readonly opts: { networkPassphrase: string }) {}
+    addOperation(op: unknown) { this.ops.push(op); return this; }
+    addMemo() { return this; }
+    setTimeout() { return this; }
+    build() { return { toXDR: () => `XDR|${this.opts.networkPassphrase}|${JSON.stringify(this.ops)}` }; }
+    static fromXDR(xdr: string, passphrase: string) {
+      if (!xdr.includes(passphrase)) throw new Error('network mismatch');
+      return { hash: () => Buffer.from('ab'.repeat(32), 'hex') };
+    }
+  }
+  return {
+    Account, Asset, TransactionBuilder, BASE_FEE: '100',
+    Operation: { payment: (p: unknown) => ({ type: 'payment', ...(p as object) }) },
+    Memo: { text: (t: string) => t },
+  };
+});
+
+const {
+  StellarX402Adapter, stellarX402Pay, StellarSpendBudget, StellarSubmissionUnknownError,
+  StellarPaymentPolicyError, STELLAR_NETWORK,
+} = await import('../../src/x402/chains/stellar/index.js');
+
+const HASH = 'ab'.repeat(32);
+const SRC = 'G' + 'A'.repeat(55);
+const DEST = 'G' + 'B'.repeat(55);
+const OTHER = 'G' + 'C'.repeat(55);
+
+type Route = (url: string, init?: RequestInit) => Response | Promise<Response>;
+function horizon(opts: {
+  passphrase?: string;
+  submit?: Route;
+  confirm?: Route;
+} = {}) {
+  const calls: string[] = [];
+  const impl = vi.fn(async (url: string, init?: RequestInit) => {
+    calls.push(`${init?.method ?? 'GET'} ${url}`);
+    if (url.endsWith('/') && !url.includes('/transactions')) {
+      return new Response(JSON.stringify({ network_passphrase: opts.passphrase ?? STELLAR_NETWORK.pubnet.networkPassphrase }));
+    }
+    if (url.includes('/accounts/')) return new Response(JSON.stringify({ sequence: '123' }));
+    if (init?.method === 'POST') {
+      return opts.submit ? opts.submit(url, init) : new Response(JSON.stringify({ hash: HASH, ledger: 9, successful: true }));
+    }
+    if (url.includes(`/transactions/${HASH}`)) {
+      return opts.confirm ? opts.confirm(url, init) : new Response(JSON.stringify({ hash: HASH, ledger: 9, successful: true }));
+    }
+    return new Response('not found', { status: 404 });
+  });
+  return { impl: impl as unknown as typeof fetch, calls };
+}
+
+const headers = (chains: string, amount = '1.5', dest = DEST) => ({
+  'X-Payment-Chains': chains, 'X-Payment-Amount': amount, 'X-Payment-Destination': dest,
+});
+const signer = vi.fn(async (xdr: string) => xdr);
+
+beforeEach(() => signer.mockClear());
+
+describe('exact Stellar chain matching (finding 7)', () => {
+  const pubnet = new StellarX402Adapter({ network: 'pubnet' });
+  it.each(['stellar:testnet', 'stellar', 'stellar:pubnetx', 'mystellar:pubnet', 'eip155:8453'])('rejects %s on a pubnet adapter', (chains) => {
+    expect(pubnet.parseX402Response(headers(chains)).supported).toBe(false);
+  });
+  it('accepts the exact chain id in a list', () => {
+    expect(pubnet.parseX402Response(headers('eip155:8453, stellar:pubnet')).supported).toBe(true);
+  });
+  it('never pays a testnet challenge with a pubnet adapter', async () => {
+    const { impl } = horizon();
+    await expect(stellarX402Pay({
+      responseHeaders: headers('stellar:testnet'), sourcePublicKey: SRC, sign: signer,
+      policy: { maxPerPayment: '5' }, adapter: { fetchImpl: impl },
+    })).rejects.toBeInstanceOf(StellarPaymentPolicyError);
+    expect(signer).not.toHaveBeenCalled();
+  });
+});
+
+describe('mandatory spending policy (finding 10)', () => {
+  it('refuses to auto-pay without a policy', async () => {
+    await expect(stellarX402Pay({ responseHeaders: headers('stellar:pubnet'), sourcePublicKey: SRC, sign: signer } as never))
+      .rejects.toThrow(/spending policy/);
+    expect(signer).not.toHaveBeenCalled();
+  });
+  it('enforces per-payment cap, allowlist, approval and cumulative budget before signing', async () => {
+    const { impl } = horizon();
+    const base = { sourcePublicKey: SRC, sign: signer, adapter: { fetchImpl: impl } };
+    await expect(stellarX402Pay({ ...base, responseHeaders: headers('stellar:pubnet', '1000'), policy: { maxPerPayment: '5' } }))
+      .rejects.toThrow(/exceeds/);
+    await expect(stellarX402Pay({ ...base, responseHeaders: headers('stellar:pubnet', '1', OTHER), policy: { maxPerPayment: '5', allowedDestinations: [DEST] } }))
+      .rejects.toThrow(/not allowed/);
+    await expect(stellarX402Pay({ ...base, responseHeaders: headers('stellar:pubnet', '1'), policy: { maxPerPayment: '5', approve: () => false } }))
+      .rejects.toThrow(/not approved/);
+    const budget = new StellarSpendBudget('2');
+    await stellarX402Pay({ ...base, responseHeaders: headers('stellar:pubnet', '1.5'), policy: { maxPerPayment: '5', budget } });
+    await expect(stellarX402Pay({ ...base, responseHeaders: headers('stellar:pubnet', '1'), policy: { maxPerPayment: '5', budget } }))
+      .rejects.toThrow(/budget exceeded/);
+    expect(signer).toHaveBeenCalledTimes(1);
+  });
+  it('rejects malformed amounts and destinations', async () => {
+    const { impl } = horizon();
+    for (const [amount, dest] of [['1e3', DEST], ['-1', DEST], ['0.00000001', DEST], ['1', 'not-an-account']]) {
+      await expect(stellarX402Pay({
+        responseHeaders: headers('stellar:pubnet', amount, dest), sourcePublicKey: SRC, sign: signer,
+        policy: { maxPerPayment: '5' }, adapter: { fetchImpl: impl },
+      })).rejects.toBeInstanceOf(StellarPaymentPolicyError);
+    }
+    expect(signer).not.toHaveBeenCalled();
+  });
+});
+
+describe('configured Horizon is used and must match the network (finding 17)', () => {
+  it('sends every call to the configured Horizon', async () => {
+    const { impl, calls } = horizon();
+    const adapter = new StellarX402Adapter({ horizonUrl: 'https://private-horizon.example', fetchImpl: impl });
+    const xdr = await adapter.buildPaymentTransaction({ destination: DEST, amount: '1', sourcePublicKey: SRC });
+    await adapter.submitTransaction(xdr);
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls.every((c) => c.includes('https://private-horizon.example'))).toBe(true);
+  });
+  it('refuses a Horizon that serves another network', async () => {
+    const { impl } = horizon({ passphrase: STELLAR_NETWORK.testnet.networkPassphrase });
+    const adapter = new StellarX402Adapter({ horizonUrl: 'https://private-horizon.example', fetchImpl: impl });
+    await expect(adapter.buildPaymentTransaction({ destination: DEST, amount: '1', sourcePublicKey: SRC }))
+      .rejects.toThrow(/does not serve the pubnet/);
+  });
+  it('refuses non-https Horizon URLs', () => {
+    expect(() => new StellarX402Adapter({ horizonUrl: 'http://horizon.example' })).toThrow(/https/);
+  });
+});
+
+describe('bounded Horizon I/O and ambiguous submission (finding 21)', () => {
+  it('times out a stalled submission and reports unknown with the expected hash', async () => {
+    const { impl } = horizon({
+      submit: () => new Response(new ReadableStream({ start() { /* stall */ } })),
+      confirm: () => new Response('{}', { status: 404 }),
+    });
+    const adapter = new StellarX402Adapter({ fetchImpl: impl, timeoutMs: 30 });
+    const xdr = await adapter.buildPaymentTransaction({ destination: DEST, amount: '1', sourcePublicKey: SRC });
+    const err = await adapter.submitTransaction(xdr).catch((e) => e);
+    expect(err).toBeInstanceOf(StellarSubmissionUnknownError);
+    expect(err.expectedHash).toBe(HASH);
+  });
+  it('keeps the budget reservation for an unknown submission', async () => {
+    const { impl } = horizon({ submit: () => new Response('gateway timeout', { status: 504 }), confirm: () => new Response('{}', { status: 404 }) });
+    const budget = new StellarSpendBudget('3');
+    await expect(stellarX402Pay({
+      responseHeaders: headers('stellar:pubnet', '2'), sourcePublicKey: SRC, sign: signer,
+      policy: { maxPerPayment: '5', budget }, adapter: { fetchImpl: impl },
+    })).rejects.toBeInstanceOf(StellarSubmissionUnknownError);
+    expect(budget.unresolved()).toHaveLength(1);
+    expect(budget.occupiedStroops).toBe(20_000_000n);
+  });
+});
+
+describe('settlement verification (finding 26)', () => {
+  it('does not treat a 2xx body without successful=true as settled', async () => {
+    const { impl } = horizon({
+      submit: () => new Response(JSON.stringify({ hash: HASH, ledger: 9 })),
+      confirm: () => new Response('{}', { status: 404 }),
+    });
+    const adapter = new StellarX402Adapter({ fetchImpl: impl });
+    const xdr = await adapter.buildPaymentTransaction({ destination: DEST, amount: '1', sourcePublicKey: SRC });
+    await expect(adapter.submitTransaction(xdr)).rejects.toBeInstanceOf(StellarSubmissionUnknownError);
+  });
+  it('does not accept a 2xx body for a different transaction hash', async () => {
+    const { impl } = horizon({
+      submit: () => new Response(JSON.stringify({ hash: 'cd'.repeat(32), ledger: 9, successful: true })),
+      confirm: () => new Response('{}', { status: 404 }),
+    });
+    const adapter = new StellarX402Adapter({ fetchImpl: impl });
+    const xdr = await adapter.buildPaymentTransaction({ destination: DEST, amount: '1', sourcePublicKey: SRC });
+    await expect(adapter.submitTransaction(xdr)).rejects.toBeInstanceOf(StellarSubmissionUnknownError);
+  });
+  it('requires ledger confirmation of the signed transaction', async () => {
+    const { impl } = horizon({ confirm: () => new Response(JSON.stringify({ hash: HASH, successful: true })) });
+    const adapter = new StellarX402Adapter({ fetchImpl: impl });
+    const xdr = await adapter.buildPaymentTransaction({ destination: DEST, amount: '1', sourcePublicKey: SRC });
+    await expect(adapter.submitTransaction(xdr)).rejects.toBeInstanceOf(StellarSubmissionUnknownError);
+  });
+  it('returns a confirmed result only after the confirmation read', async () => {
+    const { impl } = horizon();
+    const adapter = new StellarX402Adapter({ fetchImpl: impl });
+    const xdr = await adapter.buildPaymentTransaction({ destination: DEST, amount: '1', sourcePublicKey: SRC });
+    expect(await adapter.submitTransaction(xdr)).toEqual({ hash: HASH, ledger: 9, successful: true, network: 'pubnet' });
+  });
+  it('rejects a signed envelope for another network', async () => {
+    const { impl } = horizon();
+    const adapter = new StellarX402Adapter({ fetchImpl: impl });
+    await expect(adapter.submitTransaction(`XDR|${STELLAR_NETWORK.testnet.networkPassphrase}|[]`))
+      .rejects.toBeInstanceOf(StellarPaymentPolicyError);
+  });
+});
