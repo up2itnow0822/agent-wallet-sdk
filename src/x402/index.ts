@@ -14,6 +14,7 @@ export {
   X402_TRANSACTION_QUEUED_TOPIC,
   encodeX402PaymentHeader,
   decodeX402PaymentHeader,
+  X402_MAX_CHALLENGE_DEPTH,
 } from './client.js';
 export type { X402SettlementTransfer, X402ReceiptClassification } from './client.js';
 export { X402BudgetTracker } from './budget.js';

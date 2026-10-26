@@ -3,7 +3,7 @@
  * Transfers are mocked; no network or funds are used.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { X402Client, X402IntentTermsConflictError } from '../client.js';
+import { X402_MAX_CHALLENGE_DEPTH, X402Client, X402IntentTermsConflictError } from '../client.js';
 import { wrapWithX402 } from '../middleware.js';
 import { createEvidence } from './receipt-evidence.js';
 
@@ -159,5 +159,40 @@ describe('pathological 402 nesting (review follow-up)', () => {
     const res = await new X402Client(w).fetch(URL);
     expect(res.status).toBe(402);
     expect(transfer).not.toHaveBeenCalled();
+  });
+  // Runtime-independent bound: whether re-serialization overflows depends on
+  // the JS engine (Node 26's JSON.stringify did not, and a later step failed
+  // after payment). Depth is now refused explicitly, before any transfer.
+  // The challenge itself is depth 4 at `extra` (object → accepts → option → extra).
+  const nested = (levels: number) => {
+    let v: Record<string, unknown> = {};
+    for (let i = 1; i < levels; i += 1) v = { a: v };
+    return v;
+  };
+  const paysFor = async (extra: Record<string, unknown>, via: 'header' | 'body') => {
+    const w = wallet();
+    const text = JSON.stringify(challenge('/purchase', extra));
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_i, init) => {
+      if (new Headers(init?.headers).has('X-PAYMENT')) return new Response('ok');
+      return via === 'header'
+        ? new Response(null, { status: 402, headers: { 'payment-required': btoa(text) } })
+        : new Response(text, { status: 402 });
+    });
+    const res = await new X402Client(w).fetch(URL);
+    return { status: res.status, paid: transfer.mock.calls.length > 0 };
+  };
+
+  it.each(['header', 'body'] as const)('refuses a %s challenge one level deeper than the limit, before paying', async (via) => {
+    const r = await paysFor(nested(X402_MAX_CHALLENGE_DEPTH - 3 + 1), via);
+    expect(r).toEqual({ status: 402, paid: false });
+  });
+
+  it.each(['header', 'body'] as const)('still pays a %s challenge exactly at the limit', async (via) => {
+    const r = await paysFor(nested(X402_MAX_CHALLENGE_DEPTH - 3), via);
+    expect(r).toEqual({ status: 200, paid: true });
+  });
+
+  it('keeps the limit small enough for any engine stack', () => {
+    expect(X402_MAX_CHALLENGE_DEPTH).toBe(32);
   });
 });

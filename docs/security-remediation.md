@@ -34,7 +34,7 @@ signing and network boundaries.
 | 22 | Unchecked Solana→EVM recipient | Source domain, message hash, destination, burn token, remote sender and mint recipient validated; returned values derived from attested bytes. |
 | 23 | Query ignored in resource binding | Origin, path and query must match. |
 | 24 | Ambiguous mint reported as failure | `MINT_SUBMISSION_UNKNOWN`, `MINT_UNCONFIRMED`, `MINT_ALREADY_RECEIVED` (`usedNonces` checked first) with retained recovery state. |
-| 25 | Unbounded 402 JSON body | 64 KiB / 10 s bounded read; ≤16 options and bounded fields. |
+| 25 | Unbounded 402 JSON body | 64 KiB / 10 s bounded read; ≤16 options and bounded fields; nesting deeper than `X402_MAX_CHALLENGE_DEPTH` (32) is refused before payment, on every JS engine. |
 | 26 | Unverified Stellar 2xx | Expected hash from the signed XDR, strict `successful === true`, ledger confirmation read. |
 | 27 | Explicit intent replay across requests | Explicit intents bind the full request fingerprint; mismatch ⇒ `X402IntentTermsConflictError`. |
 | 28 | Late `wrapWithX402` snapshot | Snapshot taken before the first hop and reused for settlement and retry. |

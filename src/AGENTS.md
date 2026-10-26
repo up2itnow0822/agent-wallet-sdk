@@ -128,7 +128,9 @@
   unknown chains throw.
 - Broker UAIDs match the requested UAID component-wise (protocol, uid,
   nativeId exact; EVM registry address case-insensitive).
-- x402 binds origin+path+query, bounds the 402 body, binds explicit intents to
+- x402 binds origin+path+query, bounds the 402 body and its nesting
+  (`X402_MAX_CHALLENGE_DEPTH`, checked iteratively; never rely on an engine
+  stack overflow to refuse a challenge), binds explicit intents to
   the request fingerprint, and wrappers snapshot before the first hop.
 
 ## Work Guidance
