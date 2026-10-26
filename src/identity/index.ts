@@ -26,5 +26,5 @@ export type {
 export { UAIDResolver } from './uaid.js';
 export type {
   UAIDProtocol, ParsedUAID, UAIDResolution, UniversalAgentIdentity,
-  UAIDResolverConfig, RegisterUAIDParams,
+  UAIDResolverConfig, RegisterUAIDParams, UAIDVerification,
 } from './uaid.js';

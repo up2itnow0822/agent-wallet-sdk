@@ -355,6 +355,25 @@ export class ERC8004Client {
     return this.lookupAgentIdentityAtBlock(agentId);
   }
 
+  /** Registry address this client reads. */
+  get registryAddress(): Address {
+    return this.config.registryAddress;
+  }
+
+  /**
+   * Read owner and agent wallet for `agentId` at ONE block snapshot (no
+   * metadata fetch). Used to independently verify broker-supplied identity.
+   */
+  async readAgentBinding(agentId: bigint): Promise<{ owner: Address; agentWallet: Address; blockNumber: bigint }> {
+    const blockNumber = await this.publicClient.getBlockNumber();
+    const contract = this.getReadContract();
+    const [owner, agentWallet] = await Promise.all([
+      contract.read.ownerOf([agentId], { blockNumber }),
+      contract.read.getAgentWallet([agentId], { blockNumber }),
+    ]);
+    return { owner: owner as Address, agentWallet: agentWallet as Address, blockNumber };
+  }
+
   private async lookupAgentIdentityAtBlock(agentId: bigint, blockNumber?: bigint): Promise<AgentIdentity> {
     const contract = this.getReadContract();
     const readOptions = blockNumber === undefined ? undefined : { blockNumber };

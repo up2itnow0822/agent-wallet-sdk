@@ -744,7 +744,7 @@ export type {
 export { UAIDResolver } from './identity/uaid.js';
 export type {
   UAIDProtocol, ParsedUAID, UAIDResolution, UniversalAgentIdentity,
-  UAIDResolverConfig, RegisterUAIDParams,
+  UAIDResolverConfig, RegisterUAIDParams, UAIDVerification,
 } from './identity/uaid.js';
 
 // ─── SwapModule — Uniswap V3 token swap aggregator ──────────────────────────
