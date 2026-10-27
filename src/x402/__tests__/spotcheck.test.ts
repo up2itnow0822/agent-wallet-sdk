@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { X402Client } from '../client.js';
 import { withSpotCheck } from '../spotcheck.js';
 import type { X402PaymentRequirements, X402TransactionLog } from '../types.js';
+import { stubReceiptEvidence } from './receipt-evidence.js';
 
 const SRC = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'spotcheck.ts'), 'utf8');
 
@@ -216,6 +217,7 @@ describe('withSpotCheck', () => {
     const afterPay = vi.fn(async () => ({ status: 'landed', safe_to_resign: false }));
     const onAfterPay = vi.fn();
     const userComplete = vi.fn();
+    stubReceiptEvidence();
     vi.spyOn(X402Client.prototype as unknown as { executePayment: () => Promise<{ txHash: `0x${string}` }> }, 'executePayment').mockResolvedValue({ txHash: TX_HASH });
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
       if (new Headers(init?.headers).get('X-PAYMENT')) throw new TypeError('fetch failed');
