@@ -32,7 +32,7 @@ export interface SpotCheckDecision {
 }
 
 export interface SpotCheckChecker {
-  checkBeforePay?: (url: string, opts: Record<string, unknown>) => Promise<SpotCheckPeerDecision> | SpotCheckPeerDecision;
+  checkBeforePay?: (url: string, opts: Record<string, unknown>) => Promise<SpotCheckPeerDecision | null | undefined> | SpotCheckPeerDecision | null | undefined;
   afterPay?: (ref: { txHash: string }, opts: Record<string, unknown>) => Promise<unknown>;
   needsAfterPay?: (outcome: unknown) => boolean;
 }
@@ -86,11 +86,19 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   });
 }
 
+function nonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim() !== '';
+}
+
 function hasListingConstraint(check: Record<string, unknown>): boolean {
   return typeof check.expected === 'function'
     || (check.price !== undefined && check.price !== null)
-    || typeof check.payTo === 'string'
-    || typeof check.network === 'string';
+    || nonEmptyString(check.payTo)
+    || nonEmptyString(check.network);
+}
+
+function checkerAllows(d: SpotCheckPeerDecision | null | undefined): boolean {
+  return !!d && d.allowed === true && d.verdict !== 'skip';
 }
 
 function resolveChecker(opts: SpotCheckOptions): (() => Promise<SpotCheckChecker>) | undefined {
@@ -249,11 +257,15 @@ export function withSpotCheck(config: X402ClientConfig = {}, opts: SpotCheckOpti
           report({ allowed: false, verdict: 'skip', reason: String((e as Error)?.message ?? e) }, req, url);
           return false;
         }
-      } else if ((check.price !== undefined && check.price !== null) || typeof check.payTo === 'string' || typeof check.network === 'string') {
+        if (!listing) {
+          report({ allowed: false, verdict: 'skip', reason_code: 'listing_missing', reason: 'expected returned no listing' }, req, url);
+          return false;
+        }
+      } else if ((check.price !== undefined && check.price !== null) || nonEmptyString(check.payTo) || nonEmptyString(check.network)) {
         listing = {
           ...(check.price !== undefined && check.price !== null ? { price: Number(check.price) } : {}),
-          ...(typeof check.payTo === 'string' ? { payTo: check.payTo } : {}),
-          ...(typeof check.network === 'string' ? { network: check.network } : {}),
+          ...(nonEmptyString(check.payTo) ? { payTo: check.payTo } : {}),
+          ...(nonEmptyString(check.network) ? { network: check.network } : {}),
         };
       }
       const mismatch = listingMismatch(req, listing, solana);
@@ -279,8 +291,8 @@ export function withSpotCheck(config: X402ClientConfig = {}, opts: SpotCheckOpti
         ...(listing?.network ? { network: judgedSpotCheckNetwork(listing.network, solana) ?? peerNetwork } : {}),
         accepts: [accept],
       })), timeoutMs);
-      if (d && d.allowed === false) {
-        report({ ...(d as SpotCheckDecision), allowed: false }, req, url);
+      if (!checkerAllows(d)) {
+        report({ ...(d ?? {}), allowed: false, verdict: (d as SpotCheckDecision | undefined)?.verdict ?? 'skip' }, req, url);
         return false;
       }
       if (d && typeof d.fits === 'function') {

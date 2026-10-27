@@ -82,6 +82,17 @@ describe('withSpotCheck', () => {
   it('fails closed when no checker is supplied', async () => {
     await expect(withSpotCheck({}).onBeforePayment!(REQ, URL_)).resolves.toBe(false);
     await expect(withSpotCheck({}, { check: { mode: 'local' } }).onBeforePayment!(REQ, URL_)).resolves.toBe(false);
+    await expect(withSpotCheck({}, { check: { payTo: '', network: '' } }).onBeforePayment!(REQ, URL_)).resolves.toBe(false);
+  });
+
+  it('fails closed when expected returns no listing', async () => {
+    await expect(withSpotCheck({}, { check: { expected: () => undefined } }).onBeforePayment!(REQ, URL_)).resolves.toBe(false);
+  });
+
+  it('fails closed unless the caller-supplied checker explicitly allows', async () => {
+    await expect(withSpotCheck({}, { load: async () => ({ checkBeforePay: async () => ({}) }) }).onBeforePayment!(REQ, URL_)).resolves.toBe(false);
+    await expect(withSpotCheck({}, { load: async () => ({ checkBeforePay: async () => ({ verdict: 'skip' }) }) }).onBeforePayment!(REQ, URL_)).resolves.toBe(false);
+    await expect(withSpotCheck({}, { load: async () => ({ checkBeforePay: async () => undefined }) }).onBeforePayment!(REQ, URL_)).resolves.toBe(false);
   });
 
   it('fails closed when the checker is missing, throws, or times out', async () => {

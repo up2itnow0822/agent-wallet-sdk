@@ -37,6 +37,9 @@ all repaired with regression tests). See `docs/security-remediation.md`.
 - Review round 9 (Codex): no Stellar submit response or result code releases a reservation — every non-2xx is decided from the ledger (`STELLAR_DETERMINISTIC_REJECTIONS` removed; `tx_too_early` and the other codes describe bytes that can still apply or can be reported falsely); `reconcileLocked` and Solana→EVM retained-mint reconciliation require the receipt and transaction body to name the requested hash; `@stellar/stellar-sdk` (>= 14) is a declared optional peer.
 - Review round 10 (Codex): a lock whose evidence dropped a phase (malformed or empty hash or call; new `SpendOutcome.incompleteEvidence`, `SubmissionIdentity.incomplete`) is never released by `reconcileLocked`, only committed on success.
 
+### Added
+- Optional `withSpotCheck(config, opts)` for x402 clients. It is opt-in and uses in-SDK listing checks plus an optional caller-supplied `checker` (or `load`). Before paying, it runs your `onBeforePayment` first, then a terms check (local rules by default, no network). `check.expected` is evaluated and a mismatched price, payTo, or network declines the payment. A missing listing from `expected` declines. SDK `base:8453` is converted to `eip155:8453`; unrecognized networks fail closed. A denial short-circuits `fits()`, and a throw from `fits()` declines. After paying, it is off unless `afterPay: true`: receipt failures, paid-request failures, and failed-log completions with a tx hash are looked up and the result goes to `onAfterPay`. If no checker is supplied, or the checker does not explicitly allow, errors, or times out, the payment does not proceed.
+
 ---
 
 ## [7.0.0] — 2026-10-23
@@ -52,9 +55,6 @@ Security release. Lifts the security-maintenance pause.
 - **x402 (#94, supersedes #26, #27, #30, #31, #32, #55):** fails closed on queued transfers, waits for the settlement receipt before retrying, counts the protocol fee in budget checks, refuses payment after a cross-origin redirect, binds payment to the exact resource, rejects zero amounts, and transfers the resolved token address.
 - **Escrow (#94, supersedes #49):** `MutualStakeEscrow` returns the vault from the factory `VaultCreated` event.
 - Hardened SpendingPolicy, SwapModule, ERC-8004 identity, outcomes and the ElizaOS plugin. CI hardened; `npm audit` reports 0 issues.
-
-### Added
-- Optional `withSpotCheck(config, opts)` for x402 clients. It is opt-in and uses in-SDK listing checks plus an optional caller-supplied `checker` (or `load`). Before paying, it runs your `onBeforePayment` first, then a terms check (local rules by default, no network). `check.expected` is evaluated and a mismatched price, payTo, or network declines the payment. SDK `base:8453` is converted to `eip155:8453`; unrecognized networks fail closed. A denial short-circuits `fits()`, and a throw from `fits()` declines. After paying, it is off unless `afterPay: true`: receipt failures, paid-request failures, and failed-log completions with a tx hash are looked up and the result goes to `onAfterPay`. If no checker is supplied, or the checker errors or times out, the payment does not proceed.
 
 ### Security
 - Removed `smithery.yaml`. Its start command ran `npx -y @agentwallet/sdk mcp` and passed the user's agent key as `AGENT_PRIVATE_KEY`. `@agentwallet/sdk` is a third-party npm package, not this project's `agentwallet-sdk`. MCP belongs in [agentpay-mcp](https://github.com/up2itnow0822/agentpay-mcp). Rotate any wallet key ever entered through that Smithery listing.

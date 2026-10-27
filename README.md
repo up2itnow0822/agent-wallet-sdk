@@ -100,7 +100,7 @@ npm install @stellar/stellar-sdk
 
 ### Optional: check x402 terms before paying
 
-`withSpotCheck` wraps an x402 client config with an opt-in, in-SDK check. Before paying, it evaluates `check.expected` and declines a mismatched price, payTo, or network. SDK networks such as `base:8453` are converted to CAIP (`eip155:8453`); a network the checker cannot judge is declined. Extra `checkBeforePay` / `fits` / `afterPay` logic comes from a caller-supplied `checker` (or `load`) — the SDK does not import a spot-check package at runtime. After paying (`afterPay: true`), it looks up receipt failures and paid-request failures (including a throw before `onPaymentComplete` and an `X402PaidRequestError` after a `success: true` completion). If no checker is supplied, or the checker errors, the payment does not proceed.
+`withSpotCheck` wraps an x402 client config with an opt-in, in-SDK check. Before paying, it evaluates `check.expected` and declines a mismatched or missing listing (price, payTo, or network). SDK networks such as `base:8453` are converted to CAIP (`eip155:8453`); a network the checker cannot judge is declined. Extra `checkBeforePay` / `fits` / `afterPay` logic comes from a caller-supplied `checker` (or `load`) — the SDK does not import a spot-check package at runtime. After paying (`afterPay: true`), it looks up receipt failures and paid-request failures (including a throw before `onPaymentComplete` and an `X402PaidRequestError` after a `success: true` completion). If no checker or listing constraint is supplied, or the checker does not explicitly allow, errors, or times out, the payment does not proceed.
 
 ```ts
 import { createX402Fetch, withSpotCheck } from 'agentwallet-sdk';
