@@ -1,20 +1,24 @@
 /**
  * @module x402/spotcheck
- * Optional, opt-in pre-pay and after-pay checks via x402-spotcheck (optional peer, >= 1.2.0).
+ * Optional, opt-in pre-pay and after-pay checks. Listing rules (expected /
+ * network / fits) run in-SDK. Extra checkBeforePay / afterPay logic comes from
+ * a caller-supplied `checker` (or `load`). Nothing is imported at runtime.
  *
  * withSpotCheck(config, opts) returns a new X402ClientConfig whose
- *  - onBeforePayment first runs your own hook (a `false` still declines), then asks x402-spotcheck
- *    whether the selected payment terms look wrong (local rules by default, no network calls; or
- *    the 402xAgent service with `check: { mode: 'service' }`). A `skip` verdict declines the payment.
- *    `check.expected` is evaluated here. A listing mismatch, or a network the peer cannot judge,
- *    declines the payment. A denial short-circuits `fits()`; a throw from `fits()` declines.
- *  - onPaymentComplete runs your own hook, then (only with `afterPay: true`) asks whether a failed
- *    or unconfirmed transfer actually landed on-chain, reporting the answer to `onAfterPay`.
- *    After-pay also watches the client's fetch/settle paths so receipt throws (before the
- *    completion hook) and paid-request failures (after a success:true completion) are looked up.
+ *  - onBeforePayment first runs your own hook (a `false` still declines), then
+ *    checks whether the selected payment terms look wrong. A `skip` verdict
+ *    declines the payment. `check.expected` is evaluated here. A listing
+ *    mismatch, or a network the checker cannot judge, declines the payment.
+ *    A denial short-circuits `fits()`; a throw from `fits()` declines.
+ *  - onPaymentComplete runs your own hook, then (only with `afterPay: true`)
+ *    asks a supplied checker whether a failed or unconfirmed transfer actually
+ *    landed on-chain, reporting the answer to `onAfterPay`. After-pay also
+ *    watches the client's fetch/settle paths so receipt throws (before the
+ *    completion hook) and paid-request failures (after a success:true
+ *    completion) are looked up.
  *
- * Fail-open: if x402-spotcheck is not installed, times out, or `checkBeforePay` throws, the
- * pre-pay check lets the payment proceed. Expected, network, and `fits()` denials fail closed.
+ * Fail-closed: if no checker is supplied and no local listing constraint is
+ * present, or the checker errors or times out, the payment does not proceed.
  */
 import { X402Client } from './client.js';
 import type { X402ClientConfig, X402PaymentRequirements, X402TransactionLog } from './types.js';
@@ -27,29 +31,31 @@ export interface SpotCheckDecision {
   [k: string]: unknown;
 }
 
+export interface SpotCheckChecker {
+  checkBeforePay?: (url: string, opts: Record<string, unknown>) => Promise<SpotCheckPeerDecision> | SpotCheckPeerDecision;
+  afterPay?: (ref: { txHash: string }, opts: Record<string, unknown>) => Promise<unknown>;
+  needsAfterPay?: (outcome: unknown) => boolean;
+}
+
 export interface SpotCheckOptions {
   /** Run the pre-pay check (default true). */
   prePay?: boolean;
   /** Run the after-pay check for failed/unconfirmed transfers (default false). */
   afterPay?: boolean;
-  /** Options passed to x402-spotcheck checkBeforePay (e.g. { mode: 'service', client, expected }). */
+  /** Listing constraints and extra fields forwarded to a supplied checker. */
   check?: Record<string, unknown>;
-  /** Options passed to x402-spotcheck afterPay. */
+  /** Options passed to a supplied checker's afterPay. */
   afterPayOptions?: Record<string, unknown>;
-  /** Hard timeout for the pre-pay check; on timeout the payment proceeds (default 2000 ms). */
+  /** Hard timeout for the pre-pay check; on timeout the payment is declined (default 2000 ms). */
   timeoutMs?: number;
   /** Observer for every pre-pay decision (never blocks). */
-  onDecision?: (d: SpotCheckDecision | { allowed: true; error: string }, req: X402PaymentRequirements, url: string) => void;
+  onDecision?: (d: SpotCheckDecision | { allowed: false; error: string }, req: X402PaymentRequirements, url: string) => void;
   /** Receives the after-pay answer (status, safe_to_resign, receipt, ...). */
   onAfterPay?: (result: unknown, log: X402TransactionLog) => void;
-  /** Module loader (tests / bundlers). Defaults to import('x402-spotcheck'). */
-  load?: () => Promise<SpotCheckModule>;
-}
-
-interface SpotCheckModule {
-  checkBeforePay?: (url: string, opts: Record<string, unknown>) => Promise<SpotCheckPeerDecision> | SpotCheckPeerDecision;
-  afterPay?: (ref: { txHash: string }, opts: Record<string, unknown>) => Promise<unknown>;
-  needsAfterPay?: (outcome: unknown) => boolean;
+  /** Caller-supplied checker. There is no default loader and no runtime import. */
+  checker?: SpotCheckChecker | (() => Promise<SpotCheckChecker>);
+  /** Loader for a caller-supplied checker (same as a function `checker`). */
+  load?: () => Promise<SpotCheckChecker>;
 }
 
 interface SpotCheckPeerDecision {
@@ -72,16 +78,29 @@ const BASE_CAIP = 'eip155:8453';
 const SOLANA_CAIP = 'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp';
 const USDC_BASE = '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913';
 const AFTER_PAY_WATCH = Symbol('x402SpotCheckAfterPay');
-const loadDefault = () => import(/* webpackIgnore: true */ 'x402-spotcheck' as string) as Promise<SpotCheckModule>;
 
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error('x402-spotcheck timeout')), ms);
+    const t = setTimeout(() => reject(new Error('spot-check timeout')), ms);
     p.then((v) => { clearTimeout(t); resolve(v); }, (e) => { clearTimeout(t); reject(e); });
   });
 }
 
-/** Map an SDK or CAIP network to the id the peer actually judges, or null to fail closed. */
+function hasListingConstraint(check: Record<string, unknown>): boolean {
+  return typeof check.expected === 'function'
+    || (check.price !== undefined && check.price !== null)
+    || typeof check.payTo === 'string'
+    || typeof check.network === 'string';
+}
+
+function resolveChecker(opts: SpotCheckOptions): (() => Promise<SpotCheckChecker>) | undefined {
+  const supplied = opts.checker ?? opts.load;
+  if (!supplied) return undefined;
+  if (typeof supplied === 'function') return supplied;
+  return async () => supplied;
+}
+
+/** Map an SDK or CAIP network to the id the checker actually judges, or null to fail closed. */
 function judgedSpotCheckNetwork(network: string | undefined, solana = false): string | null {
   const raw = String(network ?? '').trim();
   if (!raw) return null;
@@ -185,27 +204,30 @@ function installAfterPayWatch(): void {
   }
 }
 
-/** Wrap an X402ClientConfig with the opt-in x402-spotcheck hooks. The input config is not mutated. */
+/** Wrap an X402ClientConfig with opt-in spot-check hooks. The input config is not mutated. */
 export function withSpotCheck(config: X402ClientConfig = {}, opts: SpotCheckOptions = {}): X402ClientConfig {
-  const load = opts.load ?? loadDefault;
-  let mod: Promise<SpotCheckModule | null> | null = null;
-  const getMod = () => (mod ??= load().catch(() => null));
+  const load = resolveChecker(opts);
+  let mod: Promise<SpotCheckChecker | null> | null = null;
+  const getMod = () => (mod ??= load ? load().catch(() => null) : Promise.resolve(null));
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const userBefore = config.onBeforePayment;
   const userComplete = config.onPaymentComplete;
   let lastLog: X402TransactionLog | undefined;
 
-  const report = (d: SpotCheckDecision | { allowed: true; error: string }, req: X402PaymentRequirements, url: string): void => {
+  const report = (d: SpotCheckDecision | { allowed: false; error: string }, req: X402PaymentRequirements, url: string): void => {
     try { opts.onDecision?.(d, req, url); } catch { /* observers never block */ }
   };
 
   const onBeforePayment = async (req: X402PaymentRequirements, url: string): Promise<boolean> => {
     if (userBefore && (await userBefore(req, url)) === false) return false;
     if (opts.prePay === false) return true;
+    const check = { ...(opts.check ?? {}) };
+    const hasLocal = hasListingConstraint(check);
+    if (!load && !hasLocal) {
+      report({ allowed: false, verdict: 'skip', reason_code: 'checker_missing', reason: 'no checker supplied' }, req, url);
+      return false;
+    }
     try {
-      const m = await withTimeout(getMod(), timeoutMs);
-      if (!m || typeof m.checkBeforePay !== 'function') return true;
-      const check = { ...(opts.check ?? {}) };
       const solana = check.solana === true;
       const peerNetwork = judgedSpotCheckNetwork(req.network, solana);
       if (!peerNetwork) {
@@ -239,6 +261,15 @@ export function withSpotCheck(config: X402ClientConfig = {}, opts: SpotCheckOpti
         report({ allowed: false, verdict: 'skip', reason_code: mismatch, reason: mismatch }, req, url);
         return false;
       }
+      if (!load) {
+        report({ allowed: true }, req, url);
+        return true;
+      }
+      const m = await withTimeout(getMod(), timeoutMs);
+      if (!m || typeof m.checkBeforePay !== 'function') {
+        report({ allowed: false, verdict: 'skip', reason_code: 'checker_missing', reason: 'no checker supplied' }, req, url);
+        return false;
+      }
       const { expected: _expected, ...rest } = check;
       const accept = { ...req, network: peerNetwork };
       const d = await withTimeout(Promise.resolve(m.checkBeforePay(url, {
@@ -267,8 +298,8 @@ export function withSpotCheck(config: X402ClientConfig = {}, opts: SpotCheckOpti
       report({ ...(d ?? {}), allowed: true }, req, url);
       return true;
     } catch (e) {
-      report({ allowed: true, error: String((e as Error)?.message ?? e) }, req, url);
-      return true; // fail-open: missing module / checkBeforePay throw / timeout
+      report({ allowed: false, error: String((e as Error)?.message ?? e) }, req, url);
+      return false;
     }
   };
 
@@ -279,7 +310,7 @@ export function withSpotCheck(config: X402ClientConfig = {}, opts: SpotCheckOpti
         if (!m || typeof m.afterPay !== 'function') return;
         const r = await m.afterPay(ref, opts.afterPayOptions ?? {});
         opts.onAfterPay?.(r, log);
-      } catch { /* fail-open: never affects the payment flow */ }
+      } catch { /* after-pay never affects the already-completed payment */ }
     })();
   };
 
@@ -303,7 +334,7 @@ export function withSpotCheck(config: X402ClientConfig = {}, opts: SpotCheckOpti
           if (!txHash) return;
           const r = await m.afterPay({ txHash }, opts.afterPayOptions ?? {});
           opts.onAfterPay?.(r, logFromOutcome(outcome, lastLog, txHash));
-        } catch { /* fail-open: never affects the payment flow */ }
+        } catch { /* after-pay never affects the already-completed payment */ }
       })();
     };
   }

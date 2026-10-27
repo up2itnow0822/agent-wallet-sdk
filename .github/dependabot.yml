@@ -1,0 +1,9 @@
+# Action pins are full commit SHAs. Updates arrive as reviewable PRs that pass
+# the same build/verify policy as any other change.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

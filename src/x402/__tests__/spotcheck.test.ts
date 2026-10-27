@@ -1,7 +1,12 @@
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { X402Client } from '../client.js';
 import { withSpotCheck } from '../spotcheck.js';
 import type { X402PaymentRequirements, X402TransactionLog } from '../types.js';
+
+const SRC = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'spotcheck.ts'), 'utf8');
 
 const REQ: X402PaymentRequirements = {
   scheme: 'exact',
@@ -31,6 +36,18 @@ const fakeMod = (decision: Record<string, unknown>, fits = '') => ({
 });
 
 describe('withSpotCheck', () => {
+  it('does not import a spot-check package', () => {
+    expect(SRC).not.toMatch(/x402-spotcheck/);
+    expect(SRC).not.toMatch(/\bimport\s*\(/);
+  });
+
+  it('accepts a caller-supplied checker object', async () => {
+    const checkBeforePay = vi.fn(async () => ({ allowed: true, verdict: 'pay' }));
+    const cfg = withSpotCheck({}, { checker: { checkBeforePay } });
+    await expect(cfg.onBeforePayment!(REQ, URL_)).resolves.toBe(true);
+    expect(checkBeforePay).toHaveBeenCalled();
+  });
+
   it('keeps the original config and does not mutate it', () => {
     const base = { globalDailyLimit: 5n };
     const out = withSpotCheck(base, { load: async () => fakeMod({ allowed: true }) });
@@ -38,7 +55,7 @@ describe('withSpotCheck', () => {
     expect(base).toEqual({ globalDailyLimit: 5n });
   });
 
-  it('allows when x402-spotcheck allows, passing the selected terms', async () => {
+  it('allows when the caller-supplied checker allows, passing the selected terms', async () => {
     const m = fakeMod({ allowed: true, verdict: 'pay' });
     const cfg = withSpotCheck({}, { load: async () => m, check: { mode: 'local' } });
     await expect(cfg.onBeforePayment!(REQ, URL_)).resolves.toBe(true);
@@ -61,10 +78,15 @@ describe('withSpotCheck', () => {
     expect(m.checkBeforePay).not.toHaveBeenCalled();
   });
 
-  it('fails open when the module is missing, throws, or times out', async () => {
-    await expect(withSpotCheck({}, { load: async () => { throw new Error('not installed'); } }).onBeforePayment!(REQ, URL_)).resolves.toBe(true);
-    await expect(withSpotCheck({}, { load: async () => ({ checkBeforePay: async () => { throw new Error('boom'); } }) }).onBeforePayment!(REQ, URL_)).resolves.toBe(true);
-    await expect(withSpotCheck({}, { timeoutMs: 20, load: async () => ({ checkBeforePay: () => new Promise(() => {}) }) }).onBeforePayment!(REQ, URL_)).resolves.toBe(true);
+  it('fails closed when no checker is supplied', async () => {
+    await expect(withSpotCheck({}).onBeforePayment!(REQ, URL_)).resolves.toBe(false);
+    await expect(withSpotCheck({}, { check: { mode: 'local' } }).onBeforePayment!(REQ, URL_)).resolves.toBe(false);
+  });
+
+  it('fails closed when the checker is missing, throws, or times out', async () => {
+    await expect(withSpotCheck({}, { load: async () => { throw new Error('not installed'); } }).onBeforePayment!(REQ, URL_)).resolves.toBe(false);
+    await expect(withSpotCheck({}, { load: async () => ({ checkBeforePay: async () => { throw new Error('boom'); } }) }).onBeforePayment!(REQ, URL_)).resolves.toBe(false);
+    await expect(withSpotCheck({}, { timeoutMs: 20, load: async () => ({ checkBeforePay: () => new Promise(() => {}) }) }).onBeforePayment!(REQ, URL_)).resolves.toBe(false);
   });
 
   it('prePay: false skips the pre-pay check', async () => {
@@ -127,7 +149,7 @@ describe('withSpotCheck', () => {
     await expect(cfg.onBeforePayment!(SDK_REQ, URL_)).resolves.toBe(false);
   });
 
-  it('denies a network the spot-check package cannot recognize', async () => {
+  it('denies a network the spot-check cannot recognize', async () => {
     const other = { ...SDK_REQ, network: 'ethereum:1' };
     const cfg = withSpotCheck({}, {
       check: { expected: () => ({ price: 0.01, payTo: other.payTo, network: 'ethereum:1' }) },
@@ -180,7 +202,7 @@ describe('withSpotCheck', () => {
     };
     const cfg = withSpotCheck({ onPaymentComplete: userComplete }, {
       afterPay: true,
-      load: async () => ({ afterPay }),
+      load: async () => ({ checkBeforePay: async () => ({ allowed: true }), afterPay }),
       onAfterPay,
     });
     const client = new X402Client(wallet, cfg);
@@ -210,7 +232,7 @@ describe('withSpotCheck', () => {
     };
     const cfg = withSpotCheck({ onPaymentComplete: userComplete }, {
       afterPay: true,
-      load: async () => ({ afterPay }),
+      load: async () => ({ checkBeforePay: async () => ({ allowed: true }), afterPay }),
       onAfterPay,
     });
     const client = new X402Client(wallet, cfg);

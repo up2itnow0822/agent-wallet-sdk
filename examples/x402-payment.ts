@@ -10,42 +10,70 @@
  *   3. Pays via AgentWallet (USDC on Base)
  *   4. Retries the request with the payment receipt
  *   5. Returns the successful response
+ *
+ * Env: AGENT_PRIVATE_KEY, AGENT_ACCOUNT_ADDRESS, RPC_URL (optional),
+ *      deployment identity: AGENT_WALLET_CODE_HASH, or AGENT_WALLET_FACTORY +
+ *      AGENT_WALLET_TOKEN_CONTRACT + AGENT_WALLET_TOKEN_ID (required).
  */
 
 import { createWalletClient, http, type Address } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
-import { base } from 'viem/chains';
 import {
   createWallet,
   createX402Client,
   createX402Fetch,
+  type AgentWalletHandle,
   type X402TransactionLog,
 } from '../src/index.js';
+import {
+  assertInstalledSpendPolicy,
+  exampleDeploymentIdentity,
+  isDirectRun,
+  requireEnv,
+  resolveExampleNetwork,
+} from './_example-safety.js';
 
-// ─── Config ───
+// Safety: Base Sepolia by default; Base mainnet requires AGENT_EXAMPLE_NETWORK=base
+// and AGENT_EXAMPLE_LIVE_ACK. Nothing runs (or signs) on import.
 
-const AGENT_KEY = process.env.AGENT_PRIVATE_KEY as `0x${string}`;
-const AGENT_ACCOUNT = process.env.AGENT_ACCOUNT_ADDRESS as Address;
-const RPC_URL = process.env.BASE_RPC_URL ?? 'https://mainnet.base.org';
+// ─── Setup (lazy: no key is read and no client is created on import) ───
 
-// ─── Setup ───
+let cachedWallet: AgentWalletHandle | undefined;
 
-const walletClient = createWalletClient({
-  account: privateKeyToAccount(AGENT_KEY),
-  chain: base,
-  transport: http(RPC_URL),
-});
+export function exampleWallet(): AgentWalletHandle {
+  if (cachedWallet) return cachedWallet;
+  const network = resolveExampleNetwork();
+  const rpcUrl = process.env.RPC_URL;
+  const walletClient = createWalletClient({
+    account: privateKeyToAccount(requireEnv('AGENT_PRIVATE_KEY') as `0x${string}`),
+    chain: network.chain,
+    transport: http(rpcUrl),
+  });
+  cachedWallet = createWallet({
+    accountAddress: requireEnv('AGENT_ACCOUNT_ADDRESS') as Address,
+    chain: network.chainKey,
+    rpcUrl,
+    walletClient,
+    ...exampleDeploymentIdentity(),
+  });
+  return cachedWallet;
+}
 
-const wallet = createWallet({
-  accountAddress: AGENT_ACCOUNT,
-  chain: 'base',
-  rpcUrl: RPC_URL,
-  walletClient,
-});
+/**
+ * The example wallet, after verifying that the owner installed an on-chain USDC
+ * policy no looser than this example's advertised limits. The in-memory x402
+ * budgets below are a convenience; the durable on-chain policy is the cap.
+ */
+export async function examplePolicyCheckedWallet(limits: { perTx: bigint; perDay: bigint }): Promise<AgentWalletHandle> {
+  const wallet = exampleWallet();
+  await assertInstalledSpendPolicy(wallet, resolveExampleNetwork().usdc, limits);
+  return wallet;
+}
 
 // ─── Example 1: Basic x402 Client ───
 
-async function basicUsage() {
+export async function basicUsage() {
+  const wallet = await examplePolicyCheckedWallet({ perTx: 1_000_000n, perDay: 10_000_000n });
   // Agent automatically pays for API access
   const client = createX402Client(wallet, {
     globalPerRequestMax: 1_000_000n,   // Max $1 USDC per request
@@ -68,10 +96,12 @@ async function basicUsage() {
 
 // ─── Example 2: Drop-in Fetch Replacement ───
 
-async function fetchReplacement() {
+export async function fetchReplacement() {
+  const wallet = await examplePolicyCheckedWallet({ perTx: 5_000_000n, perDay: 50_000_000n });
   // Works as a drop-in replacement for fetch()
   const x402Fetch = createX402Fetch(wallet, {
     globalPerRequestMax: 5_000_000n, // Max $5 per request
+    globalDailyLimit: 50_000_000n,   // Max $50 per day
   });
 
   const response = await x402Fetch('https://api.example.com/premium-data');
@@ -80,7 +110,8 @@ async function fetchReplacement() {
 
 // ─── Example 3: Service-Level Budgets ───
 
-async function serviceBudgets() {
+export async function serviceBudgets() {
+  const wallet = await examplePolicyCheckedWallet({ perTx: 1_000_000n, perDay: 50_000_000n });
   const client = createX402Client(wallet, {
     globalDailyLimit: 50_000_000n, // $50/day total
     serviceBudgets: [
@@ -112,7 +143,7 @@ async function serviceBudgets() {
 
 // ─── Run ───
 
-async function main() {
+export async function main() {
   console.log('=== x402 Payment Examples ===\n');
 
   try {
@@ -134,4 +165,9 @@ async function main() {
   }
 }
 
-main().catch(console.error);
+if (isDirectRun(import.meta.url)) {
+  main().catch((err) => {
+    console.error(err);
+    process.exitCode = 1;
+  });
+}

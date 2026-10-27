@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { encodeAbiParameters, encodeEventTopics, zeroAddress, type Address } from 'viem';
+import { encodeAbiParameters, encodeEventTopics, keccak256, zeroAddress, type Address } from 'viem';
 
 // ─── Mock state ───
 const mockReadFns: Record<string, any> = {};
@@ -7,19 +7,30 @@ const mockWriteFns: Record<string, any> = {};
 const mockWaitForReceipt = vi.fn().mockResolvedValue({ logs: [] });
 const mockWatchEvent = vi.fn().mockReturnValue(() => {});
 const mockGetContractEvents = vi.fn().mockResolvedValue([]);
+const MOCK_CODE = '0x608060405234801561001057600080fd5b50' as const;
+const mockGetCode = vi.fn().mockResolvedValue(MOCK_CODE);
+/** Read RPC chain id; defaults to the chain the client was created for. */
+const mockGetChainId = vi.fn(async (configured?: number) => configured);
 
 vi.mock('viem', async () => {
   const actual = await vi.importActual('viem');
   return {
     ...actual,
-    createPublicClient: () => ({
+    createPublicClient: (opts: { chain?: { id: number } }) => ({
+      getChainId: (...args: any[]) => mockGetChainId(opts?.chain?.id, ...args),
       waitForTransactionReceipt: (...args: any[]) => mockWaitForReceipt(...args),
       watchContractEvent: (...args: any[]) => mockWatchEvent(...args),
       getContractEvents: (...args: any[]) => mockGetContractEvents(...args),
+      getCode: (...args: any[]) => mockGetCode(...args),
+      readContract: (...args: any[]) => mockReadFns.__factoryGetAddress?.(...args),
     }),
     createWalletClient: () => ({}),
     getContract: () => ({
-      read: new Proxy({}, { get: (_, p: string) => (...a: any[]) => mockReadFns[p]?.(...a) }),
+      read: new Proxy({}, { get: (_, p: string) => (...a: any[]) =>
+        mockReadFns[p] ? mockReadFns[p](...a)
+          : p === 'tokenContract' ? Promise.resolve('0x' + 'e'.repeat(40))
+          : p === 'tokenId' ? Promise.resolve(1n)
+          : undefined }),
       write: new Proxy({}, { get: (_, p: string) => (...a: any[]) => mockWriteFns[p]?.(...a) }),
     }),
   };
@@ -44,6 +55,7 @@ const {
   getActivityHistory,
   NATIVE_TOKEN,
   AgentAccountV2Abi,
+  AgentWalletVerificationError,
 } = await import('../src/index.js');
 
 // ─── Constants ───
@@ -59,6 +71,7 @@ function makeWallet() {
     chain: 'base',
     rpcUrl: 'https://rpc.example.com',
     walletClient: {} as any,
+    expectedCodeHash: keccak256(MOCK_CODE),
   });
 }
 
@@ -140,14 +153,39 @@ describe('setOperator', () => {
   });
 });
 
+function executedLog(target: Address, value: bigint, emitter: Address = ACCOUNT, callData: `0x${string}` = '0x') {
+  return {
+    address: emitter,
+    topics: encodeEventTopics({ abi: AgentAccountV2Abi, eventName: 'TransactionExecuted', args: { target: target.toLowerCase() as Address, executor: OPERATOR.toLowerCase() as Address } }),
+    data: encodeAbiParameters([{ type: 'uint256' }, { type: 'bytes' }], [value, callData]),
+  };
+}
+
+function erc20TransferLog(token: Address, from: Address, to: Address, value: bigint) {
+  return {
+    address: token,
+    topics: encodeEventTopics({
+      abi: [{ type: 'event', name: 'Transfer', inputs: [
+        { name: 'from', type: 'address', indexed: true },
+        { name: 'to', type: 'address', indexed: true },
+        { name: 'value', type: 'uint256', indexed: false },
+      ] }] as const,
+      eventName: 'Transfer', args: { from: from.toLowerCase() as Address, to: to.toLowerCase() as Address },
+    }),
+    data: encodeAbiParameters([{ type: 'uint256' }], [value]),
+  };
+}
+
 describe('agentExecute', () => {
   beforeEach(() => {
     mockReadFns.pendingNonce = vi.fn().mockResolvedValue(0n);
-    mockWaitForReceipt.mockResolvedValue({ status: 'success', logs: [] });
+    mockGetCode.mockResolvedValue(MOCK_CODE);
+    mockWaitForReceipt.mockImplementation(async () => ({ status: 'success', logs: [executedLog(OPERATOR, 0n)] }));
   });
 
   it('executes a transaction', async () => {
     mockWriteFns.agentExecute = vi.fn().mockResolvedValue(TX_HASH);
+    mockWaitForReceipt.mockResolvedValue({ status: 'success', logs: [executedLog(OPERATOR, 50000000000000000n)] });
     const result = await agentExecute(makeWallet(), { to: OPERATOR, value: 50000000000000000n });
     expect(result.txHash).toBe(TX_HASH);
     expect(result.executed).toBe(true);
@@ -161,6 +199,7 @@ describe('agentExecute', () => {
 
   it('passes custom data', async () => {
     mockWriteFns.agentExecute = vi.fn().mockResolvedValue(TX_HASH);
+    mockWaitForReceipt.mockResolvedValue({ status: 'success', logs: [executedLog(TOKEN, 0n, ACCOUNT, '0xdeadbeef')] });
     await agentExecute(makeWallet(), { to: TOKEN, value: 0n, data: '0xdeadbeef' });
     expect(mockWriteFns.agentExecute).toHaveBeenCalledWith([TOKEN, 0n, '0xdeadbeef'], expect.objectContaining({ value: 0n, chain: expect.objectContaining({ id: 8453 }) }));
   });
@@ -182,9 +221,113 @@ describe('agentExecute', () => {
     mockWaitForReceipt.mockResolvedValue({ status: 'success', logs: [{
       address: ACCOUNT,
       topics: encodeEventTopics({ abi: AgentAccountV2Abi, eventName: 'TransactionQueued', args: { txId: 7n, to: OPERATOR.toLowerCase() as Address } }),
-      data: encodeAbiParameters([{ type: 'uint256' }, { type: 'address' }, { type: 'uint256' }], [0n, TOKEN.toLowerCase() as Address, 10n]),
+      data: encodeAbiParameters([{ type: 'uint256' }, { type: 'address' }, { type: 'uint256' }], [0n, NATIVE_TOKEN, 0n]),
     }] });
     expect(await agentExecute(makeWallet(), { to: OPERATOR })).toMatchObject({ executed: false, pendingTxId: 7n, txHash: TX_HASH });
+  });
+
+  it('does not mistake a re-entrant token-transfer queue for this call (Codex round 8)', async () => {
+    mockWriteFns.agentExecute = vi.fn().mockResolvedValue(TX_HASH);
+    mockWaitForReceipt.mockResolvedValue({ status: 'success', logs: [{
+      address: ACCOUNT,
+      topics: encodeEventTopics({ abi: AgentAccountV2Abi, eventName: 'TransactionQueued', args: { txId: 8n, to: OPERATOR.toLowerCase() as Address } }),
+      data: encodeAbiParameters([{ type: 'uint256' }, { type: 'address' }, { type: 'uint256' }], [0n, TOKEN.toLowerCase() as Address, 10n]),
+    }, executedLog(OPERATOR, 0n)] });
+    expect(await agentExecute(makeWallet(), { to: OPERATOR })).toMatchObject({ executed: true, txHash: TX_HASH });
+  });
+
+  it('does not report executed from a same-target, same-value event with different calldata (Codex round 3)', async () => {
+    mockWriteFns.agentExecute = vi.fn().mockResolvedValue(TX_HASH);
+    mockWaitForReceipt.mockResolvedValue({ status: 'success', logs: [executedLog(TOKEN, 0n, ACCOUNT, '0xcafebabe')] });
+    await expect(agentExecute(makeWallet(), { to: TOKEN, value: 0n, data: '0xdeadbeef' }))
+      .rejects.toMatchObject({ executionStatus: 'unknown', txHash: TX_HASH });
+  });
+
+  it('matches calldata case-insensitively', async () => {
+    mockWriteFns.agentExecute = vi.fn().mockResolvedValue(TX_HASH);
+    mockWaitForReceipt.mockResolvedValue({ status: 'success', logs: [executedLog(TOKEN, 0n, ACCOUNT, '0xdeadbeef')] });
+    expect(await agentExecute(makeWallet(), { to: TOKEN, value: 0n, data: '0xDEADBEEF' })).toMatchObject({ executed: true });
+  });
+
+  // ── Finding 3 ──
+  it('refuses to send native value to an address without contract code (EOA)', async () => {
+    mockWriteFns.agentExecute = vi.fn().mockResolvedValue(TX_HASH);
+    mockGetCode.mockResolvedValue('0x');
+    await expect(agentExecute(makeWallet(), { to: OPERATOR, value: 10n ** 18n })).rejects.toThrow(/no contract code/);
+    expect(mockWriteFns.agentExecute).not.toHaveBeenCalled();
+  });
+
+  it('refuses EIP-7702 delegated EOAs', async () => {
+    mockWriteFns.agentExecute = vi.fn().mockResolvedValue(TX_HASH);
+    mockGetCode.mockResolvedValue('0xef0100' + '1'.repeat(40));
+    await expect(agentExecute(makeWallet(), { to: OPERATOR, value: 1n })).rejects.toThrow(/7702/);
+    expect(mockWriteFns.agentExecute).not.toHaveBeenCalled();
+  });
+
+  it('refuses code that does not answer AgentAccountV2 views', async () => {
+    mockWriteFns.agentExecute = vi.fn().mockResolvedValue(TX_HASH);
+    mockReadFns.tokenContract = vi.fn().mockRejectedValue(new Error('execution reverted'));
+    try {
+      await expect(agentExecute(makeWallet(), { to: OPERATOR, value: 1n })).rejects.toThrow(/AgentAccountV2 views/);
+      expect(mockWriteFns.agentExecute).not.toHaveBeenCalled();
+    } finally {
+      delete mockReadFns.tokenContract;
+    }
+  });
+
+  it('enforces a configured factory deployment identity', async () => {
+    mockWriteFns.agentExecute = vi.fn().mockResolvedValue(TX_HASH);
+    mockReadFns.__factoryGetAddress = vi.fn().mockResolvedValue(OPERATOR); // factory predicts another address
+    try {
+      const wallet = createWallet({
+        accountAddress: ACCOUNT, chain: 'base', rpcUrl: 'https://rpc.example.com',
+        walletClient: { account: { address: OPERATOR } } as any,
+        deployment: { factoryAddress: FACTORY, tokenContract: ('0x' + 'e'.repeat(40)) as Address, tokenId: 1n },
+      });
+      await expect(agentExecute(wallet, { to: OPERATOR, value: 1n })).rejects.toThrow(/factory CREATE2/);
+      expect(mockWriteFns.agentExecute).not.toHaveBeenCalled();
+    } finally {
+      delete mockReadFns.__factoryGetAddress;
+    }
+  });
+
+  it('does not classify a successful receipt with no wallet event as executed', async () => {
+    mockWriteFns.agentExecute = vi.fn().mockResolvedValue(TX_HASH);
+    mockWaitForReceipt.mockResolvedValue({ status: 'success', logs: [] });
+    await expect(agentExecute(makeWallet(), { to: OPERATOR, value: 5n })).rejects.toMatchObject({ executionStatus: 'unknown' });
+  });
+
+  it('requires a deployment identity before any write (review follow-up)', async () => {
+    mockWriteFns.agentExecute = vi.fn().mockResolvedValue(TX_HASH);
+    const bare = createWallet({ accountAddress: ACCOUNT, chain: 'base', rpcUrl: 'https://rpc.example.com', walletClient: {} as any });
+    await expect(agentExecute(bare, { to: OPERATOR, value: 1n })).rejects.toThrow(/deployment identity required/);
+    expect(mockWriteFns.agentExecute).not.toHaveBeenCalled();
+  });
+
+  it('rejects a spoofing contract whose code hash differs from the approved one', async () => {
+    mockWriteFns.agentExecute = vi.fn().mockResolvedValue(TX_HASH);
+    mockGetCode.mockResolvedValue('0x6080deadbeef');
+    await expect(agentExecute(makeWallet(), { to: OPERATOR, value: 1n })).rejects.toThrow(/code hash/);
+    expect(mockWriteFns.agentExecute).not.toHaveBeenCalled();
+  });
+
+  it('rejects names of built-in object properties as chains', () => {
+    for (const chain of ['constructor', 'toString', '__proto__', 'valueOf']) {
+      expect(() => createWallet({ accountAddress: ACCOUNT, chain: chain as any, walletClient: {} as any })).toThrow(/Unsupported chain/);
+    }
+  });
+
+  it('returns a frozen handle so the verified address and write target cannot diverge', () => {
+    expect(Object.isFrozen(makeWallet())).toBe(true);
+  });
+
+  it('ignores an executed event emitted by another contract or for another target', async () => {
+    mockWriteFns.agentExecute = vi.fn().mockResolvedValue(TX_HASH);
+    mockWaitForReceipt.mockResolvedValue({ status: 'success', logs: [
+      executedLog(OPERATOR, 5n, TOKEN),
+      executedLog(TOKEN, 5n),
+    ] });
+    await expect(agentExecute(makeWallet(), { to: OPERATOR, value: 5n })).rejects.toMatchObject({ executionStatus: 'unknown' });
   });
 });
 
@@ -250,11 +393,114 @@ describe('cancelTransaction', () => {
 });
 
 describe('agentTransferToken', () => {
-  it('transfers tokens', async () => {
+  beforeEach(() => mockGetCode.mockResolvedValue(MOCK_CODE));
+
+  it('transfers tokens and reports executed only with a matching ERC-20 Transfer', async () => {
     mockWriteFns.agentTransferToken = vi.fn().mockResolvedValue(TX_HASH);
-    const hash = await agentTransferToken(makeWallet(), { token: TOKEN, to: OPERATOR, amount: 500n });
-    expect(hash).toBe(TX_HASH);
+    mockWaitForReceipt.mockResolvedValue({ status: 'success', logs: [erc20TransferLog(TOKEN, ACCOUNT, OPERATOR, 500n)] });
+    const result = await agentTransferToken(makeWallet(), { token: TOKEN, to: OPERATOR, amount: 500n });
+    expect(result).toEqual({ status: 'executed', txHash: TX_HASH });
     expect(mockWriteFns.agentTransferToken).toHaveBeenCalledWith([TOKEN, OPERATOR, 500n], expect.objectContaining({ chain: expect.objectContaining({ id: 8453 }) }));
+  });
+
+  // ── Finding 13 ──
+  it('reports a queued over-limit transfer as queued, not paid', async () => {
+    mockWriteFns.agentTransferToken = vi.fn().mockResolvedValue(TX_HASH);
+    mockWaitForReceipt.mockResolvedValue({ status: 'success', logs: [{
+      address: ACCOUNT,
+      topics: encodeEventTopics({ abi: AgentAccountV2Abi, eventName: 'TransactionQueued', args: { txId: 9n, to: OPERATOR.toLowerCase() as Address } }),
+      data: encodeAbiParameters([{ type: 'uint256' }, { type: 'address' }, { type: 'uint256' }], [0n, TOKEN.toLowerCase() as Address, 500n]),
+    }] });
+    expect(await agentTransferToken(makeWallet(), { token: TOKEN, to: OPERATOR, amount: 500n }))
+      .toEqual({ status: 'queued', txHash: TX_HASH, pendingTxId: 9n });
+  });
+
+  it('throws unknown when the receipt lacks a matching Transfer (wrong amount/recipient)', async () => {
+    mockWriteFns.agentTransferToken = vi.fn().mockResolvedValue(TX_HASH);
+    mockWaitForReceipt.mockResolvedValue({ status: 'success', logs: [erc20TransferLog(TOKEN, ACCOUNT, OPERATOR, 499n)] });
+    await expect(agentTransferToken(makeWallet(), { token: TOKEN, to: OPERATOR, amount: 500n }))
+      .rejects.toMatchObject({ executionStatus: 'unknown', txHash: TX_HASH });
+  });
+
+  it('throws reverted for a reverted receipt', async () => {
+    mockWriteFns.agentTransferToken = vi.fn().mockResolvedValue(TX_HASH);
+    mockWaitForReceipt.mockResolvedValue({ status: 'reverted', logs: [] });
+    await expect(agentTransferToken(makeWallet(), { token: TOKEN, to: OPERATOR, amount: 500n }))
+      .rejects.toMatchObject({ executionStatus: 'reverted' });
+  });
+
+  describe('queued events must match the requested transfer (Codex P2)', () => {
+    const queuedLog = (to: Address, token: Address, amount: bigint, value = 0n, txId = 4n) => ({
+      address: ACCOUNT,
+      topics: encodeEventTopics({ abi: AgentAccountV2Abi, eventName: 'TransactionQueued', args: { txId, to: to.toLowerCase() as Address } }),
+      data: encodeAbiParameters([{ type: 'uint256' }, { type: 'address' }, { type: 'uint256' }], [value, token.toLowerCase() as Address, amount]),
+    });
+
+    it('reports executed when an unrelated queued event accompanies a matching Transfer', async () => {
+      mockWriteFns.agentTransferToken = vi.fn().mockResolvedValue(TX_HASH);
+      mockWaitForReceipt.mockResolvedValue({ status: 'success', logs: [
+        queuedLog(FACTORY, TOKEN, 999n),
+        erc20TransferLog(TOKEN, ACCOUNT, OPERATOR, 500n),
+      ] });
+      expect(await agentTransferToken(makeWallet(), { token: TOKEN, to: OPERATOR, amount: 500n }))
+        .toEqual({ status: 'executed', txHash: TX_HASH });
+    });
+
+    it.each([
+      ['recipient', () => queuedLog(FACTORY, TOKEN, 500n)],
+      ['token', () => queuedLog(OPERATOR, FACTORY, 500n)],
+      ['amount', () => queuedLog(OPERATOR, TOKEN, 499n)],
+      ['native value', () => queuedLog(OPERATOR, TOKEN, 500n, 1n)],
+    ])('does not report queued for a queued event with a different %s', async (_field, log) => {
+      mockWriteFns.agentTransferToken = vi.fn().mockResolvedValue(TX_HASH);
+      mockWaitForReceipt.mockResolvedValue({ status: 'success', logs: [log()] });
+      await expect(agentTransferToken(makeWallet(), { token: TOKEN, to: OPERATOR, amount: 500n }))
+        .rejects.toMatchObject({ executionStatus: 'unknown', txHash: TX_HASH });
+    });
+
+    it('agentExecute ignores a queued event for a different native value', async () => {
+      mockWriteFns.agentExecute = vi.fn().mockResolvedValue(TX_HASH);
+      mockReadFns.pendingNonce = vi.fn().mockResolvedValue(0n);
+      mockWaitForReceipt.mockResolvedValue({ status: 'success', logs: [queuedLog(OPERATOR, NATIVE_TOKEN, 0n, 7n)] });
+      await expect(agentExecute(makeWallet(), { to: OPERATOR, value: 1n }))
+        .rejects.toMatchObject({ executionStatus: 'unknown', txHash: TX_HASH });
+    });
+  });
+
+  it('refuses to verify (or write) when the read RPC serves another chain (Codex round 5)', async () => {
+    mockWriteFns.agentTransferToken = vi.fn().mockResolvedValue(TX_HASH);
+    mockGetCode.mockClear();
+    mockGetChainId.mockResolvedValueOnce(1);
+    const err = await agentTransferToken(makeWallet(), { token: TOKEN, to: OPERATOR, amount: 1n }).catch((e) => e);
+    expect(err).toBeInstanceOf(AgentWalletVerificationError);
+    expect(err.message).toMatch(/read RPC serves chain 1/);
+    expect(mockGetCode).not.toHaveBeenCalled();
+    expect(mockWriteFns.agentTransferToken).not.toHaveBeenCalled();
+  });
+
+  it('does not cache a verification whose reads came from a switched network (Codex round 6)', async () => {
+    mockWriteFns.agentTransferToken = vi.fn().mockResolvedValue(TX_HASH);
+    mockGetChainId.mockResolvedValueOnce(8453).mockResolvedValueOnce(1);
+    const wallet = makeWallet();
+    const err = await agentTransferToken(wallet, { token: TOKEN, to: OPERATOR, amount: 1n }).catch((e) => e);
+    expect(err).toBeInstanceOf(AgentWalletVerificationError);
+    expect(err.message).toMatch(/after deployment reads/);
+    expect(mockWriteFns.agentTransferToken).not.toHaveBeenCalled();
+  });
+
+  it('reports an RPC failure during pre-write verification as a typed verification error, without writing', async () => {
+    mockWriteFns.agentTransferToken = vi.fn().mockResolvedValue(TX_HASH);
+    mockGetCode.mockRejectedValueOnce(new Error('rpc unavailable'));
+    const err = await agentTransferToken(makeWallet(), { token: TOKEN, to: OPERATOR, amount: 1n }).catch((e) => e);
+    expect(err).toBeInstanceOf(AgentWalletVerificationError);
+    expect(err.message).toMatch(/rpc unavailable/);
+    expect(mockWriteFns.agentTransferToken).not.toHaveBeenCalled();
+  });
+
+  it('keeps a clearly named submit-only primitive', async () => {
+    const { submitAgentTransferToken } = await import('../src/index.js');
+    mockWriteFns.agentTransferToken = vi.fn().mockResolvedValue(TX_HASH);
+    expect(await submitAgentTransferToken(makeWallet(), { token: TOKEN, to: OPERATOR, amount: 1n })).toBe(TX_HASH);
   });
 });
 
@@ -366,20 +612,42 @@ describe('getWalletHealth', () => {
 });
 
 describe('batchAgentTransfer', () => {
-  it('executes multiple transfers and returns all hashes', async () => {
+  it('confirms and classifies each transfer (review follow-up)', async () => {
     const hash2 = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' as `0x${string}`;
+    mockGetCode.mockResolvedValue(MOCK_CODE);
     mockWriteFns.agentTransferToken = vi.fn()
       .mockResolvedValueOnce(TX_HASH)
       .mockResolvedValueOnce(hash2);
+    mockWaitForReceipt
+      .mockResolvedValueOnce({ status: 'success', logs: [erc20TransferLog(TOKEN, ACCOUNT, OPERATOR, 100n)] })
+      .mockResolvedValueOnce({ status: 'success', logs: [{
+        address: ACCOUNT,
+        topics: encodeEventTopics({ abi: AgentAccountV2Abi, eventName: 'TransactionQueued', args: { txId: 3n, to: ACCOUNT.toLowerCase() as Address } }),
+        data: encodeAbiParameters([{ type: 'uint256' }, { type: 'address' }, { type: 'uint256' }], [0n, TOKEN.toLowerCase() as Address, 200n]),
+      }] });
 
-    const hashes = await batchAgentTransfer(makeWallet(), [
+    const results = await batchAgentTransfer(makeWallet(), [
       { token: TOKEN, to: OPERATOR, amount: 100n },
       { token: TOKEN, to: ACCOUNT, amount: 200n },
     ]);
-    expect(hashes).toHaveLength(2);
-    expect(hashes[0]).toBe(TX_HASH);
-    expect(hashes[1]).toBe(hash2);
-    expect(mockWriteFns.agentTransferToken).toHaveBeenCalledTimes(2);
+    expect(results).toEqual([
+      { status: 'executed', txHash: TX_HASH },
+      { status: 'queued', txHash: hash2, pendingTxId: 3n },
+    ]);
+  });
+
+  it('attaches completed results when a later transfer fails', async () => {
+    mockGetCode.mockResolvedValue(MOCK_CODE);
+    mockWriteFns.agentTransferToken = vi.fn().mockResolvedValue(TX_HASH);
+    mockWaitForReceipt
+      .mockResolvedValueOnce({ status: 'success', logs: [erc20TransferLog(TOKEN, ACCOUNT, OPERATOR, 1n)] })
+      .mockResolvedValueOnce({ status: 'reverted', logs: [] });
+    const err = await batchAgentTransfer(makeWallet(), [
+      { token: TOKEN, to: OPERATOR, amount: 1n },
+      { token: TOKEN, to: OPERATOR, amount: 2n },
+    ]).catch((e) => e);
+    expect(err.executionStatus).toBe('reverted');
+    expect(err.completed).toEqual([{ status: 'executed', txHash: TX_HASH }]);
   });
 
   it('returns empty array for empty batch', async () => {

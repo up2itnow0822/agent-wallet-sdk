@@ -10,6 +10,7 @@ import type { Plugin } from '@elizaos/core';
 import {
   createWallet,
   createX402Client,
+  readDeploymentIdentitySettings,
   USDC_ADDRESSES,
 } from '../index.js';
 import type { AgentWalletConfig } from '../types.js';
@@ -34,6 +35,11 @@ export interface AgentWalletPluginConfig {
   rpcUrl?: string;
   /** Optional daily x402 spend limit in USDC base units (default: 50 USDC = 50_000_000n) */
   x402DailyLimit?: bigint;
+  /** Deployment identity required for writes (see createWallet). */
+  deployment?: AgentWalletConfig['deployment'];
+  expectedCodeHash?: AgentWalletConfig['expectedCodeHash'];
+  /** UNSAFE opt-out of deployment identity. */
+  allowUnverifiedDeployment?: boolean;
 }
 
 const CHAINS = {
@@ -56,6 +62,7 @@ type ConfigIdentity = {
   chain: AgentWalletConfig['chain'];
   rpcUrl: string;
   dailyLimit: bigint;
+  deploymentKey: string;
 };
 
 type AgentSession = {
@@ -78,7 +85,9 @@ function resolveConfig(config: AgentWalletPluginConfig) {
     throw new Error('AgentWallet account address is invalid.');
   }
   const chain = config.chain ?? 'base';
-  const chainInfo = CHAINS[chain];
+  const chainInfo = Object.prototype.hasOwnProperty.call(CHAINS, chain)
+    ? CHAINS[chain as keyof typeof CHAINS]
+    : undefined;
   if (!chainInfo) throw new Error('AgentWallet chain is unsupported.');
   const rpcUrl = config.rpcUrl ?? RPC_URLS[chain] ?? chainInfo.rpcUrls.default.http[0];
   const dailyLimit = config.x402DailyLimit ?? 50_000_000n;
@@ -90,10 +99,18 @@ function resolveConfig(config: AgentWalletPluginConfig) {
   ));
   if (!deployment) throw new Error('AgentWallet has no configured USDC deployment for its chain.');
   return {
+    deployment: config.deployment,
+    expectedCodeHash: config.expectedCodeHash,
+    allowUnverifiedDeployment: config.allowUnverifiedDeployment,
     account, chainInfo, network: deployment[0], token: deployment[1],
     identity: {
       signer: account.address.toLowerCase(), accountAddress: config.accountAddress.toLowerCase(),
       chain, rpcUrl, dailyLimit,
+      deploymentKey: JSON.stringify([
+        config.deployment ? [config.deployment.factoryAddress.toLowerCase(), config.deployment.tokenContract.toLowerCase(), config.deployment.tokenId.toString()] : null,
+        config.expectedCodeHash?.toLowerCase() ?? null,
+        config.allowUnverifiedDeployment === true,
+      ]),
     } satisfies ConfigIdentity,
   };
 }
@@ -103,6 +120,7 @@ function assertIdentity(expected: ConfigIdentity, actual: ConfigIdentity): void 
     expected.signer !== actual.signer || expected.accountAddress !== actual.accountAddress
     || expected.chain !== actual.chain || expected.rpcUrl !== actual.rpcUrl
     || expected.dailyLimit !== actual.dailyLimit
+    || expected.deploymentKey !== actual.deploymentKey
   ) {
     throw new Error(
       'AgentWallet configuration changed for this cache scope. ' +
@@ -119,6 +137,9 @@ function createSession(resolved: ReturnType<typeof resolveConfig>, assertConfigu
     chain: identity.chain,
     rpcUrl: identity.rpcUrl,
     walletClient,
+    deployment: resolved.deployment,
+    expectedCodeHash: resolved.expectedCodeHash,
+    allowUnverifiedDeployment: resolved.allowUnverifiedDeployment,
   });
   // All limits are USDC base units. Never admit registry tokens with other units.
   const client = createX402Client(wallet, {
@@ -174,6 +195,7 @@ function readRuntimeConfig(runtime: any): AgentWalletPluginConfig | null {
     chain: (runtime.getSetting('AGENT_CHAIN') ?? 'base') as AgentWalletPluginConfig['chain'],
     rpcUrl: runtime.getSetting('AGENT_RPC_URL') ?? undefined,
     x402DailyLimit,
+    ...readDeploymentIdentitySettings((k) => runtime.getSetting(k)),
   };
 }
 

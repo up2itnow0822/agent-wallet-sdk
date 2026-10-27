@@ -1,11 +1,13 @@
 {
   "name": "agentwallet-sdk",
-  "version": "7.0.0",
-  "description": "Non-custodial AI agent wallet SDK. ERC-8004 identity & reputation registries, mutual stake escrow, x402 payments, x402 upto billing policy accounting, 17-chain CCTP bridging, ERC-6551 TBA, SpendingPolicy guardrails, Uniswap V3 swap. The agent holds the keys.",
+  "version": "8.0.0",
+  "description": "Non-custodial AI agent wallet SDK. ERC-8004 identity & reputation registries, mutual stake escrow, x402 payments, x402 upto billing policy accounting, CCTP V2 bridging across 10 EVM chains and Solana, ERC-6551 TBA, SpendingPolicy guardrails, Uniswap V3 swap. The agent holds the keys.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
-    "dist"
+    "dist",
+    "!dist/**/__tests__",
+    "!dist/**/*.test.*"
   ],
   "scripts": {
     "build": "tsc",
@@ -49,7 +51,7 @@
   "peerDependencies": {
     "@solana/spl-token": ">=0.4.15",
     "@solana/web3.js": ">=1.87.0",
-    "x402-spotcheck": ">=1.2.0"
+    "@stellar/stellar-sdk": ">=14.0.0"
   },
   "peerDependenciesMeta": {
     "@solana/spl-token": {
@@ -58,7 +60,7 @@
     "@solana/web3.js": {
       "optional": true
     },
-    "x402-spotcheck": {
+    "@stellar/stellar-sdk": {
       "optional": true
     }
   },
@@ -70,8 +72,7 @@
     "globals": "^16.5.0",
     "typescript": "5.9.3",
     "vitest": "4.1.12",
-    "wrangler": "4.152.0",
-    "x402-spotcheck": "github:withgrokbot/x402-spotcheck#v1.6.0"
+    "wrangler": "4.152.0"
   },
   "homepage": "https://github.com/up2itnow0822/agent-wallet-sdk#readme",
   "bugs": {

@@ -16,8 +16,9 @@ import {
   ERC8004Client,
   type UniversalAgentIdentity,
 } from 'agentwallet-sdk';
+import { isDirectRun } from './_example-safety.js';
 
-async function main() {
+export async function main() {
   // ── 1. Resolve any agent by UAID (works across all chains) ─────────────
 
   const resolver = new UAIDResolver();
@@ -75,11 +76,12 @@ async function main() {
   );
 
   if (verification.verified) {
-    console.log(`Agent verified! Trust score: ${verification.trustScore}`);
-    console.log(`Payment address: ${verification.identity?.paymentAddress}`);
-    // Safe to proceed with x402 payment
+    // verified === true only after an independent on-chain ERC-8004 check at one block.
+    console.log(`Agent verified on-chain at block ${verification.blockNumber}`);
+    console.log(`On-chain payment address: ${verification.identity?.paymentAddress}`);
   } else {
-    console.log(`Agent not verified: ${verification.error}`);
+    // A broker's own "verified" flag is reported separately and is NOT proof of identity.
+    console.log(`Agent not verified (broker attested: ${verification.brokerAttested}): ${verification.error}`);
   }
 
   // ── 5. Register your ERC-8004 agent for cross-chain discovery ──────────
@@ -109,4 +111,9 @@ async function main() {
   }
 }
 
-main().catch(console.error);
+if (isDirectRun(import.meta.url)) {
+  main().catch((err) => {
+    console.error(err);
+    process.exitCode = 1;
+  });
+}

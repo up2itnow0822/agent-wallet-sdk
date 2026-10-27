@@ -13,7 +13,7 @@
  */
 // x402 Client — automatic 402 payment handling for AgentWallet (v6: multi-asset)
 import type { Address, Hash } from 'viem';
-import { encodeFunctionData, isAddress, keccak256, toEventHash, toHex } from 'viem';
+import { decodeEventLog, encodeFunctionData, isAddress, keccak256, toEventHash, toHex } from 'viem';
 import type {
   X402PaymentRequired,
   X402PaymentRequirements,
@@ -28,10 +28,12 @@ import {
   x402DebitAmount,
   x402ProtocolFeeAmount,
 } from './fee.js';
-import { agentTransferToken, checkBudget } from '../index.js';
+import { submitAgentTransferToken, checkBudget } from '../index.js';
 import { AgentAccountV2Abi } from '../abi.js';
 import { parseNetworkChainId, resolveAssetAddress } from './multi-asset.js';
 import { toReplayableFetchArgs, withFailClosedRedirect } from './fetch-args.js';
+import { readBoundedText } from '../net/bounded-fetch.js';
+import { AgentWalletVerificationError } from '../wallet-verification-error.js';
 
 /**
  * keccak256("TransactionQueued(uint256,address,uint256,address,uint256)").
@@ -51,6 +53,32 @@ export const X402_TRANSACTION_QUEUED_TOPIC = toEventHash({
 });
 
 const MAX_PAYMENT_REQUIRED_HEADER_BYTES = 64 * 1024;
+/** Maximum 402 JSON body read when no PAYMENT-REQUIRED header is present. */
+const MAX_PAYMENT_REQUIRED_BODY_BYTES = 64 * 1024;
+/** Deadline for reading a 402 challenge body. */
+const X402_CHALLENGE_BODY_TIMEOUT_MS = 10_000;
+/** Maximum payment options accepted from one challenge. */
+const MAX_PAYMENT_OPTIONS = 16;
+/**
+ * Deepest JSON nesting accepted in a 402 challenge (the challenge object is
+ * depth 1; an option's `extra` object is depth 4). Deeper challenges are never
+ * paid. The bound is explicit because recursion limits differ by JS engine:
+ * a depth that one runtime refuses on re-serialization another accepts and
+ * then overflows on after the transfer, while attaching the payment proof.
+ */
+export const X402_MAX_CHALLENGE_DEPTH = 32;
+
+/** True when `value` nests objects/arrays deeper than `max` (iterative; no recursion). */
+function exceedsJsonDepth(value: unknown, max: number): boolean {
+  const stack: Array<[unknown, number]> = [[value, 1]];
+  while (stack.length > 0) {
+    const [node, depth] = stack.pop()!;
+    if (node === null || typeof node !== 'object') continue;
+    if (depth > max) return true;
+    for (const child of Array.isArray(node) ? node : Object.values(node)) stack.push([child, depth + 1]);
+  }
+  return false;
+}
 const MAX_UINT256 = (1n << 256n) - 1n;
 const EVM_TX_HASH = /^0x[0-9a-fA-F]{64}$/;
 
@@ -96,6 +124,8 @@ type SettlementConfirmation = 'confirmed' | 'unknown' | 'reverted' | 'queued';
 
 type PaymentPhase = 'fee' | 'payee';
 type PreparedTransfer = Readonly<{ token: Address; to: Address; amount: bigint; input: `0x${string}` }>;
+/** A submitted payee transfer: its hash plus the transfer its receipt must evidence. */
+type SubmittedPayee = { txHash: Hash; transfer: PreparedTransfer };
 
 type CachedFeePhase = {
   txHash?: Hash;
@@ -133,6 +163,8 @@ type CachedSettlement = {
   status: 'in-flight' | 'unknown' | 'queued' | 'confirmed' | 'reverted';
   /** Submitted transaction hash once execute() returned. */
   txHash?: Hash;
+  /** The payee transfer behind `txHash`; every receipt is classified against it. */
+  payeeTransfer?: PreparedTransfer;
   /** Client-side budget reservation for this settlement; settled or released exactly once. */
   reservationId?: string;
   /**
@@ -352,6 +384,7 @@ export function buildUnkeyedPendingKey(
 type SettlementReceiptLog = {
   address?: string;
   topics?: readonly string[];
+  data?: string;
 };
 
 type SettlementReceipt = {
@@ -370,19 +403,105 @@ type SettlementReplacementEvent = {
   };
 };
 
+const ERC20_TRANSFER_EVENT_ABI = [{
+  type: 'event',
+  name: 'Transfer',
+  inputs: [
+    { name: 'from', type: 'address', indexed: true },
+    { name: 'to', type: 'address', indexed: true },
+    { name: 'value', type: 'uint256', indexed: false },
+  ],
+}] as const;
+
+/** The token, recipient and amount a settlement receipt must evidence. */
+export type X402SettlementTransfer = Readonly<{ token: string; to: string; amount: bigint }>;
+
+/** Outcome a successful outer receipt evidences for one x402 transfer. */
+export type X402ReceiptClassification = 'settled' | 'queued' | 'unknown';
+
+function decodeQueued(log: SettlementReceiptLog) {
+  try {
+    return decodeEventLog({
+      abi: AgentAccountV2Abi,
+      eventName: 'TransactionQueued',
+      topics: log.topics as [`0x${string}`, ...`0x${string}`[]],
+      data: (log.data ?? '0x') as `0x${string}`,
+    }).args as { to: string; value: bigint; token: string; amount: bigint };
+  } catch {
+    return undefined;
+  }
+}
+
+function decodeTransfer(log: SettlementReceiptLog) {
+  try {
+    return decodeEventLog({
+      abi: ERC20_TRANSFER_EVENT_ABI,
+      eventName: 'Transfer',
+      topics: log.topics as [`0x${string}`, ...`0x${string}`[]],
+      data: (log.data ?? '0x') as `0x${string}`,
+    }).args;
+  } catch {
+    return undefined;
+  }
+}
+
+function queuedMatches(log: SettlementReceiptLog, walletAddr: string, transfer: X402SettlementTransfer): boolean {
+  if (log?.topics?.[0] !== X402_TRANSACTION_QUEUED_TOPIC) return false;
+  if (typeof log.address !== 'string' || log.address.toLowerCase() !== walletAddr) return false;
+  const args = decodeQueued(log);
+  return !!args &&
+    args.to.toLowerCase() === transfer.to.toLowerCase() &&
+    args.token.toLowerCase() === transfer.token.toLowerCase() &&
+    args.amount === transfer.amount &&
+    args.value === 0n;
+}
+
+/**
+ * Classify a successful outer receipt against the exact transfer it should
+ * carry. `queued`: the wallet emitted TransactionQueued for THIS transfer
+ * (recipient, token, amount, no native value). `settled`: the token emitted
+ * Transfer(wallet → recipient, amount). Anything else — no matching event, an
+ * unrelated queue, a missing wallet address — is `unknown`, never payment.
+ */
+export function classifyX402SettlementReceipt(
+  receipt: SettlementReceipt | null | undefined,
+  walletAddress: string | undefined,
+  transfer: X402SettlementTransfer | undefined,
+): X402ReceiptClassification {
+  const logs = receipt?.logs;
+  if (!transfer || typeof walletAddress !== 'string' || !Array.isArray(logs)) return 'unknown';
+  const walletAddr = walletAddress.toLowerCase();
+  if (logs.some((log) => queuedMatches(log, walletAddr, transfer))) return 'queued';
+  const tokenAddr = transfer.token.toLowerCase();
+  const moved = logs.some((log) => {
+    if (typeof log?.address !== 'string' || log.address.toLowerCase() !== tokenAddr) return false;
+    const args = decodeTransfer(log);
+    return !!args &&
+      args.from.toLowerCase() === walletAddr &&
+      args.to.toLowerCase() === transfer.to.toLowerCase() &&
+      args.value === transfer.amount;
+  });
+  return moved ? 'settled' : 'unknown';
+}
+
 /**
  * True when the agent wallet emitted TransactionQueued. The outer tx can still
  * be `success` — the spend was parked for owner approval and no tokens moved.
+ * Pass `transfer` to count only a queued entry for that exact transfer.
  */
 export function x402SettlementReceiptIsQueued(
   receipt: SettlementReceipt | null | undefined,
   walletAddress?: string,
+  transfer?: X402SettlementTransfer,
 ): boolean {
   const logs = receipt?.logs;
   if (!Array.isArray(logs) || logs.length === 0) {
     return false;
   }
   const walletAddr = typeof walletAddress === 'string' ? walletAddress.toLowerCase() : '';
+  if (transfer) {
+    return !!walletAddr && logs.some((log) => queuedMatches(log, walletAddr, transfer));
+  }
   return logs.some((log) => {
     if (log?.topics?.[0] !== X402_TRANSACTION_QUEUED_TOPIC) {
       return false;
@@ -524,7 +643,15 @@ export class X402Client {
     }
     // Snapshot and serialize all merchant fields before policy callbacks or
     // transfers. The proof never reads a merchant/callback-owned object again.
-    const paymentRequired = JSON.parse(JSON.stringify(parsedPaymentRequired)) as X402PaymentRequired;
+    let paymentRequired: X402PaymentRequired;
+    try {
+      paymentRequired = JSON.parse(JSON.stringify(parsedPaymentRequired)) as X402PaymentRequired;
+    } catch (err) {
+      // Pathologically deep challenges overflow re-serialization: never pay
+      // from them. Other serialization errors keep their existing failure.
+      if (err instanceof RangeError) return response;
+      throw err;
+    }
 
     // Bind against the final response URL (after redirects). Refuse auto-pay when
     // fetch followed a cross-origin redirect — otherwise a 402 on the redirected
@@ -591,7 +718,13 @@ export class X402Client {
       return reserved.reservationId;
     };
 
-    const termsFingerprint = buildX402PaymentTermsFingerprint(selected);
+    // Explicit merchant intent ids also bind the full call-time request identity
+    // (body, headers, credentials/context), so a merchant cannot replay an old
+    // proof for a different request body or caller: a mismatch is a terms
+    // conflict, never a replay and never a second transfer.
+    const termsFingerprint = explicitIntent
+      ? `${buildX402PaymentTermsFingerprint(selected)}|${encodeX402KeyField(unkeyedRequestFingerprint)}`
+      : buildX402PaymentTermsFingerprint(selected);
     const paymentKey = explicitIntent
       ? buildX402PaymentIntentKey(method, urlStr, explicitIntent)
       : buildUnkeyedPendingKey(method, urlStr, termsFingerprint, unkeyedRequestFingerprint);
@@ -730,6 +863,14 @@ export class X402Client {
     if (entry.deliveryFailed !== false) {
       entry.deliveryFailed = true;
     }
+  }
+
+  /**
+   * Public snapshot used by wrappers BEFORE their first network hop, so the
+   * settled terms and the paid retry use the bytes that were challenged.
+   */
+  snapshotRequestInitForRetry(init?: RequestInit): RequestInit | undefined {
+    return this.snapshotRequestInit(init);
   }
 
   /** Clone mutable request data so retry cannot observe caller-side mutation. */
@@ -1018,11 +1159,14 @@ export class X402Client {
   private async executeReservedSettlement(
     key: string,
     entry: CachedSettlement,
-    execute: (intent: { key: string; termsFingerprint: string }) => Promise<{ txHash: Hash }>,
+    execute: (intent: { key: string; termsFingerprint: string }) => Promise<SubmittedPayee>,
   ): Promise<{ txHash: Hash }> {
     let result: { txHash: Hash };
+    let transfer: PreparedTransfer;
     try {
-      result = await execute({ key, termsFingerprint: entry.termsFingerprint });
+      const submitted = await execute({ key, termsFingerprint: entry.termsFingerprint });
+      result = { txHash: submitted.txHash };
+      transfer = submitted.transfer;
       entry.feePhasePending = false;
       entry.unverifiedReplacement = undefined;
     } catch (error) {
@@ -1052,8 +1196,9 @@ export class X402Client {
     }
 
     entry.txHash = result.txHash;
+    entry.payeeTransfer = transfer;
     try {
-      const settledHash = await this.waitForSettlementReceipt(result.txHash);
+      const settledHash = await this.waitForSettlementReceipt(result.txHash, transfer);
       entry.txHash = settledHash;
       result = { txHash: settledHash };
     } catch (receiptError) {
@@ -1082,7 +1227,7 @@ export class X402Client {
   private async resumePendingFeeSettlement(
     key: string,
     entry: CachedSettlement,
-    execute: (intent: { key: string; termsFingerprint: string }) => Promise<{ txHash: Hash }>,
+    execute: (intent: { key: string; termsFingerprint: string }) => Promise<SubmittedPayee>,
   ): Promise<PaymentResult | null> {
     if (entry.status === 'in-flight') {
       const observed = await this.observeSettledPayment(entry.promise, true);
@@ -1120,7 +1265,7 @@ export class X402Client {
   private async executeUnkeyedPayment(
     key: string,
     termsFingerprint: string,
-    execute: (intent: { key: string; termsFingerprint: string }) => Promise<{ txHash: Hash }>,
+    execute: (intent: { key: string; termsFingerprint: string }) => Promise<SubmittedPayee>,
     authorize: AuthorizeFreshTransfer,
     paymentIdempotencyKey: string,
     retryWindowMs: number = X402_SETTLEMENT_RETRY_WINDOW_MS,
@@ -1261,7 +1406,7 @@ export class X402Client {
   private async settlePayment(
     key: string,
     termsFingerprint: string,
-    execute: (intent: { key: string; termsFingerprint: string }) => Promise<{ txHash: Hash }>,
+    execute: (intent: { key: string; termsFingerprint: string }) => Promise<SubmittedPayee>,
     authorize: AuthorizeFreshTransfer,
     retryWindowMs: number = X402_SETTLEMENT_RETRY_WINDOW_MS,
   ): Promise<PaymentResult | null> {
@@ -1414,7 +1559,7 @@ export class X402Client {
     }
     const confirming = (async (): Promise<SettlementConfirmation> => {
       try {
-        const settledHash = await this.waitForSettlementReceipt(txHash);
+        const settledHash = await this.waitForSettlementReceipt(txHash, entry.payeeTransfer);
         if (this.paymentSettlements.get(key) === entry) {
           if (entry.log) {
             entry.log.txHash = settledHash;
@@ -1493,7 +1638,12 @@ export class X402Client {
    * Treat `replaced` as unknown so the reservation stays and a retry cannot
    * pay again. A hash mismatch without `onReplaced` is also unknown.
    */
-  private async waitForSettlementReceipt(txHash: Hash): Promise<Hash> {
+  /** Classify a receipt against the phase transfer (see classifyX402SettlementReceipt). */
+  private classifyReceipt(receipt: SettlementReceipt | null, transfer: PreparedTransfer | undefined): X402ReceiptClassification {
+    return classifyX402SettlementReceipt(receipt, this.wallet?.address, transfer);
+  }
+
+  private async waitForSettlementReceipt(txHash: Hash, transfer: PreparedTransfer | undefined): Promise<Hash> {
     if (!EVM_TX_HASH.test(txHash)) {
       throw new X402SettlementUnknownError(undefined, 'x402 submission did not return a valid transaction hash');
     }
@@ -1559,7 +1709,7 @@ export class X402Client {
       // Keep the original hash so later reconfirm still observes the replacement
       // relationship. Adopting replacementHash would let a later wait treat the
       // unrelated success receipt as the payment.
-      if (receipt && x402SettlementReceiptIsQueued(receipt, this.wallet?.address)) {
+      if (receipt && this.classifyReceipt(receipt, transfer) === 'queued') {
         throw new X402SettlementQueuedError(replacementOutcomeHash);
       }
       throw new X402SettlementUnknownError(
@@ -1575,8 +1725,16 @@ export class X402Client {
           : `x402 settlement receipt missing (${txHash})`,
       );
     }
-    if (x402SettlementReceiptIsQueued(receipt, this.wallet?.address)) {
+    const classification = this.classifyReceipt(receipt, transfer);
+    if (classification === 'queued') {
       throw new X402SettlementQueuedError(adoptedHash);
+    }
+    if (classification !== 'settled') {
+      // A successful outer receipt is not payment: without this transfer's
+      // token Transfer (or its own queue entry) the outcome stays unknown.
+      throw new X402SettlementUnknownError(txHash,
+        `x402 settlement receipt ${adoptedHash} has no matching token Transfer or queued entry; outcome unknown`,
+      );
     }
     if (!EVM_TX_HASH.test(adoptedHash)) {
       throw new X402SettlementUnknownError(txHash, 'x402 replacement receipt has no valid transaction hash');
@@ -1602,14 +1760,19 @@ export class X402Client {
       }
     }
 
-    // Try JSON body as fallback
+    // Try JSON body as fallback — size- and time-bounded, then shape-validated.
     try {
-      const body = await response.clone().json();
+      const text = await readBoundedText(response.clone(), {
+        timeoutMs: X402_CHALLENGE_BODY_TIMEOUT_MS,
+        maxBytes: MAX_PAYMENT_REQUIRED_BODY_BYTES,
+        label: '402 challenge body',
+      });
+      const body = JSON.parse(text);
       if (this.isValidPaymentRequired(body)) {
         return body as X402PaymentRequired;
       }
     } catch {
-      // Not parseable
+      // Not parseable, too large or too slow: never pay from it
     }
 
     return null;
@@ -1622,10 +1785,13 @@ export class X402Client {
    */
   private isValidPaymentRequired(value: unknown): value is X402PaymentRequired {
     if (!value || typeof value !== 'object') return false;
+    if (exceedsJsonDepth(value, X402_MAX_CHALLENGE_DEPTH)) return false;
     const candidate = value as X402PaymentRequired;
     if (candidate.x402Version !== 1) return false;
     if (!candidate.resource || typeof candidate.resource.url !== 'string') return false;
+    if (candidate.resource.url.length > 2048) return false;
     if (!Array.isArray(candidate.accepts) || candidate.accepts.length === 0) return false;
+    if (candidate.accepts.length > MAX_PAYMENT_OPTIONS) return false;
 
     return candidate.accepts.every(req => (
       req
@@ -1633,7 +1799,12 @@ export class X402Client {
       && typeof req.network === 'string'
       && typeof req.asset === 'string'
       && typeof req.amount === 'string'
+      && req.amount.length <= 78
       && /^\d+$/.test(req.amount)
+      && req.scheme.length <= 64
+      && req.network.length <= 64
+      && req.asset.length <= 128
+      && req.payTo.length <= 128
       && typeof req.payTo === 'string'
       && typeof req.maxTimeoutSeconds === 'number'
       && req.maxTimeoutSeconds > 0
@@ -1687,7 +1858,11 @@ export class X402Client {
     try {
       const requested = new URL(requestUrl);
       const resource = new URL(paymentRequired.resource.url, requested.origin);
-      return resource.origin === requested.origin && resource.pathname === requested.pathname;
+      // The query string is part of the purchased resource: authorization and
+      // proof must name exactly the request that will be retried.
+      return resource.origin === requested.origin
+        && resource.pathname === requested.pathname
+        && resource.search === requested.search;
     } catch {
       return false;
     }
@@ -1781,7 +1956,7 @@ export class X402Client {
       );
     }
     try {
-      entry.txHash = await this.waitForSettlementReceipt(entry.txHash);
+      entry.txHash = await this.waitForSettlementReceipt(entry.txHash, entry.transfer);
       entry.status = 'confirmed';
     } catch (error) {
       if (error instanceof X402SettlementQueuedError) {
@@ -1808,6 +1983,7 @@ export class X402Client {
     intent: { key: string; termsFingerprint: string },
     token: Address,
     feeAmount: bigint,
+    req: X402PaymentRequirements,
   ): Promise<void> {
     const recordedFee = this.feePhases.get(intent.key);
     if (recordedFee && recordedFee.termsFingerprint !== intent.termsFingerprint) {
@@ -1835,7 +2011,15 @@ export class X402Client {
       transfer: this.prepareTransfer(token, X402_PROTOCOL_FEE_COLLECTOR, feeAmount),
     };
     this.feePhases.set(intent.key, pending);
-    pending.txHash = await this.submitTransfer(pending.transfer!, 'fee', intent.key);
+    try {
+      pending.txHash = await this.submitTransfer(pending.transfer!, 'fee', intent.key, req);
+    } catch (error) {
+      // A definite pre-broadcast failure leaves no fee phase to reconcile.
+      if (error instanceof X402PaymentError && this.feePhases.get(intent.key) === pending) {
+        this.feePhases.delete(intent.key);
+      }
+      throw error;
+    }
     await this.confirmProtocolFeePhase(pending, intent.key);
   }
 
@@ -1848,7 +2032,7 @@ export class X402Client {
   private async executePayment(
     req: X402PaymentRequirements,
     intent?: { key: string; termsFingerprint: string },
-  ): Promise<{ txHash: Hash }> {
+  ): Promise<SubmittedPayee> {
     if (req.scheme !== 'exact') {
       throw new X402PaymentError(
         `Unsupported payment scheme "${req.scheme}"; only "exact" transfers are implemented`,
@@ -1931,13 +2115,13 @@ export class X402Client {
           req,
         );
       }
-      await this.settleProtocolFeePhase(intent, resolvedAddress, feeAmount);
+      await this.settleProtocolFeePhase(intent, resolvedAddress, feeAmount, req);
     }
 
     // Execute the ERC20 transfer via AgentWallet (full amount to payee)
-    const txHash = await this.submitTransfer(payeeTransfer, 'payee', intent?.key);
+    const txHash = await this.submitTransfer(payeeTransfer, 'payee', intent?.key, req);
 
-    return { txHash };
+    return { txHash, transfer: payeeTransfer };
   }
 
   private prepareTransfer(token: Address, to: Address, amount: bigint): PreparedTransfer {
@@ -1947,14 +2131,26 @@ export class X402Client {
     return Object.freeze({ token, to, amount, input });
   }
 
-  private async submitTransfer(transfer: PreparedTransfer, phase: PaymentPhase, intentKey?: string): Promise<Hash> {
+  private async submitTransfer(
+    transfer: PreparedTransfer,
+    phase: PaymentPhase,
+    intentKey: string | undefined,
+    req: X402PaymentRequirements,
+  ): Promise<Hash> {
     try {
-      const txHash = await agentTransferToken(this.wallet, {
+      const txHash = await submitAgentTransferToken(this.wallet, {
         token: transfer.token, to: transfer.to, amount: transfer.amount,
       });
       if (!EVM_TX_HASH.test(txHash)) throw new Error('submission returned no valid transaction hash');
       return txHash;
     } catch (cause) {
+      if (cause instanceof AgentWalletVerificationError) {
+        // Verification runs before any write: a definite non-broadcast failure,
+        // so the reservation is released rather than held as unknown.
+        throw new X402PaymentError(
+          `x402 ${phase} not submitted: ${cause.message}`, req, cause,
+        );
+      }
       throw new X402SettlementUnknownError(undefined,
         `x402 ${phase} submission outcome unknown: ${cause instanceof Error ? cause.message : String(cause)}; explicit on-chain reconciliation required`,
         { phase, intentKey, transfer, cause },
@@ -2025,9 +2221,11 @@ export class X402Client {
         ) {
           throw unknown('x402 reconciliation transaction does not match the attempted wallet transfer');
         }
+        // Later reconfirmations of this payee hash classify against its transfer.
+        if (phase === 'payee') entry.payeeTransfer = pending.transfer;
         let settledHash: Hash;
         try {
-          settledHash = await this.waitForSettlementReceipt(txHash);
+          settledHash = await this.waitForSettlementReceipt(txHash, pending.transfer);
         } catch (error) {
           if (error instanceof X402SettlementRevertedError) {
             if (phase === 'fee') this.feePhases.delete(key);

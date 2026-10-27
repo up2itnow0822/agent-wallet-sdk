@@ -57,6 +57,32 @@ export interface AgentWalletConfig {
   accountAddress: Address;
   chain: 'base' | 'base-sepolia' | 'ethereum' | 'arbitrum' | 'polygon' | 'optimism' | 'avalanche' | 'unichain' | 'linea' | 'sonic' | 'worldchain';
   rpcUrl?: string;
+  /**
+   * Deployment identity (recommended). When set, every write first requires
+   * `factory.getAddress(tokenContract, tokenId) === accountAddress` and that the
+   * account reports the same tokenContract/tokenId.
+   */
+  deployment?: {
+    factoryAddress: Address;
+    tokenContract: Address;
+    tokenId: bigint;
+  };
+  /** Optional keccak256 of the approved AgentAccountV2 runtime bytecode. */
+  expectedCodeHash?: Hash;
+  /**
+   * UNSAFE opt-out. Writes require `deployment` or `expectedCodeHash`; set this
+   * only if you accept that any contract answering the AgentAccountV2 views
+   * (including an attacker-deployed one) can receive agent writes and value.
+   */
+  allowUnverifiedDeployment?: boolean;
+}
+
+/** Classified result of a confirmed agentTransferToken call. */
+export interface AgentTransferResult {
+  /** `executed`: a matching ERC-20 Transfer was observed. `queued`: parked for owner approval; no tokens moved. */
+  status: 'executed' | 'queued';
+  txHash: Hash;
+  pendingTxId?: bigint;
 }
 
 /** Event emitted when a transaction exceeds spend limits */

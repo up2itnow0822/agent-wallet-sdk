@@ -14,8 +14,9 @@
  * @module identity/uaid
  */
 
-import type { AgentIdentity, AgentRegistrationFile, SupportedChain } from './erc8004.js';
-import type { Address } from 'viem';
+import { ERC8004Client, KNOWN_REGISTRY_ADDRESSES, type AgentIdentity, type AgentRegistrationFile, type SupportedChain } from './erc8004.js';
+import { isAddress, type Address } from 'viem';
+import { boundedFetch, parseBoundedJson, type BoundedResponse } from '../net/bounded-fetch.js';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -56,9 +57,15 @@ export interface UAIDResolution {
   protocol: UAIDProtocol;
   /** Chain the identity lives on (if applicable) */
   chain?: string;
-  /** Trust score from the registry (0-100) */
+  /** Trust score reported by the broker (0-100). Unauthenticated broker data. */
   trustScore?: number;
-  /** Whether the agent is verified in the HOL registry */
+  /**
+   * The broker's own claim that it verified this agent. This is an
+   * unauthenticated assertion from a network service — NOT proof of identity.
+   * Use UAIDResolver.verify() for independent on-chain verification.
+   */
+  brokerAttested: boolean;
+  /** @deprecated Same value as `brokerAttested` (broker claim, not verification). */
   registryVerified: boolean;
   /** Error message if resolution failed */
   error?: string;
@@ -98,6 +105,36 @@ export interface UAIDResolverConfig {
   timeoutMs?: number;
   /** Cache resolved identities for this many ms (default: 300000 = 5 min) */
   cacheTtlMs?: number;
+  /** Maximum cached resolutions (default: 1000, LRU-evicted). */
+  cacheMaxEntries?: number;
+  /** Maximum broker response size in bytes (default: 256 KiB). */
+  maxResponseBytes?: number;
+  /** RPC URLs used for independent ERC-8004 verification, per chain. */
+  rpcUrls?: Partial<Record<SupportedChain, string>>;
+  /** Additional trusted ERC-8004 identity registries per chain (besides KNOWN_REGISTRY_ADDRESSES). */
+  trustedRegistries?: Partial<Record<SupportedChain, Address[]>>;
+  /**
+   * Override the on-chain lookup used by verify() (e.g. a custom client).
+   * Must read owner and agent wallet at one block from the given registry.
+   */
+  onChainLookup?: (params: { chain: SupportedChain; registry: Address; agentId: bigint }) =>
+    Promise<{ owner: Address; agentWallet: Address; agentURI?: string; blockNumber: bigint }>;
+}
+
+/** Result of UAIDResolver.verify(). */
+export interface UAIDVerification {
+  /** True only when the identity was independently verified on-chain. */
+  verified: boolean;
+  /** Identity built from verified on-chain values (owner, paymentAddress) when verified. */
+  identity: UniversalAgentIdentity | null;
+  /** Broker-reported trust score (unauthenticated). */
+  trustScore: number;
+  protocol: UAIDProtocol;
+  /** The broker's own (unauthenticated) verification claim. */
+  brokerAttested: boolean;
+  /** Block at which the on-chain binding was read. */
+  blockNumber?: bigint;
+  error?: string;
 }
 
 /** Parameters for registering an ERC-8004 identity as a UAID */
@@ -121,6 +158,12 @@ export interface RegisterUAIDParams {
 const DEFAULT_BROKER_URL = 'https://hol.org/registry/api/v1';
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_CACHE_TTL_MS = 300_000; // 5 minutes
+const DEFAULT_CACHE_MAX_ENTRIES = 1_000;
+const DEFAULT_MAX_RESPONSE_BYTES = 256 * 1024;
+const MAX_UAID_LENGTH = 512;
+const MAX_FIELD_LENGTH = 2_048;
+const MAX_SEARCH_RESULTS = 100;
+const MAX_ERROR_TEXT = 256;
 
 /** EVM chain IDs for UAID protocol mapping */
 const EVM_CHAIN_IDS: Record<SupportedChain, number> = {
@@ -139,6 +182,101 @@ interface CacheEntry {
   expiresAt: number;
 }
 
+// ─── Validation helpers ──────────────────────────────────────────────────────
+
+const CHAIN_BY_ID: Record<number, SupportedChain> = Object.fromEntries(
+  Object.entries(EVM_CHAIN_IDS).map(([chain, id]) => [id, chain as SupportedChain]),
+) as Record<number, SupportedChain>;
+
+function str(value: unknown, field: string, max = MAX_FIELD_LENGTH): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'string') throw new Error(`broker field ${field} must be a string`);
+  if (value.length > max) throw new Error(`broker field ${field} is too long`);
+  return value;
+}
+
+function idString(value: unknown, field: string): string | undefined {
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) return String(value);
+  return str(value, field, 128);
+}
+
+/** Canonical UAID: trimmed, bounded, parseable. Returns null otherwise. */
+function canonicalUAID(uaid: unknown): string | null {
+  if (typeof uaid !== 'string') return null;
+  const trimmed = uaid.trim();
+  if (trimmed.length === 0 || trimmed.length > MAX_UAID_LENGTH) return null;
+  return UAIDResolver.parseUAID(trimmed) ? trimmed : null;
+}
+
+const EVM_AID = /^(eip155:\d{1,20}):(0x[0-9a-fA-F]{40})$/;
+
+/**
+ * True when two UAIDs name the same agent: protocol, uid and nativeId match
+ * exactly; the aid matches exactly, except that an EVM `eip155:<chain>:<addr>`
+ * aid compares its address case-insensitively (checksum spelling only).
+ */
+function sameUAID(a: string, b: string): boolean {
+  const x = UAIDResolver.parseUAID(a);
+  const y = UAIDResolver.parseUAID(b);
+  if (!x || !y) return false;
+  if (x.protocol !== y.protocol || x.uid !== y.uid || x.nativeId !== y.nativeId) return false;
+  if (x.aid === y.aid) return true;
+  const ex = EVM_AID.exec(x.aid);
+  const ey = EVM_AID.exec(y.aid);
+  return !!ex && !!ey && ex[1] === ey[1] && ex[2].toLowerCase() === ey[2].toLowerCase();
+}
+
+/** Strictly validate one broker agent record against the UAID it must describe. */
+function validateBrokerAgent(raw: unknown, expectedUaid: string): {
+  identity: UniversalAgentIdentity; protocol: UAIDProtocol; chain?: string; trustScore?: number; brokerAttested: boolean;
+} {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('broker record is not an object');
+  const d = raw as Record<string, unknown>;
+  const parsed = UAIDResolver.parseUAID(expectedUaid);
+  if (!parsed) throw new Error('requested UAID is malformed');
+
+  const returnedUaid = str(d.uaid, 'uaid', MAX_UAID_LENGTH);
+  if (returnedUaid !== undefined && !sameUAID(returnedUaid, expectedUaid)) {
+    throw new Error('broker returned a record for a different UAID');
+  }
+  const protocol = str(d.protocol, 'protocol', 64) ?? parsed.protocol;
+  if (protocol !== parsed.protocol) throw new Error('broker protocol does not match the UAID');
+  const agentId = idString(d.agentId ?? d.nativeId, 'agentId') ?? '';
+  if (parsed.protocol === 'erc8004' && agentId !== '' && agentId !== parsed.uid) {
+    throw new Error('broker agentId does not match the UAID uid');
+  }
+  const trustRaw = d.trustScore;
+  let trustScore: number | undefined;
+  if (trustRaw !== undefined && trustRaw !== null) {
+    if (typeof trustRaw !== 'number' || !Number.isFinite(trustRaw) || trustRaw < 0 || trustRaw > 100) {
+      throw new Error('broker trustScore must be a number in [0, 100]');
+    }
+    trustScore = trustRaw;
+  }
+  if (d.verified !== undefined && typeof d.verified !== 'boolean') throw new Error('broker verified must be boolean');
+  const registrationFile = d.registrationFile;
+  if (registrationFile !== undefined && registrationFile !== null && (typeof registrationFile !== 'object' || Array.isArray(registrationFile))) {
+    throw new Error('broker registrationFile must be an object');
+  }
+  const chain = str(d.chain, 'chain', 128);
+  return {
+    identity: {
+      agentId: agentId || parsed.uid,
+      owner: str(d.owner ?? d.controller, 'owner', 128) ?? '',
+      agentURI: str(d.agentURI ?? d.metadataUri, 'agentURI') ?? '',
+      paymentAddress: str(d.paymentAddress ?? d.agentWallet, 'paymentAddress', 128) ?? '',
+      registrationFile: (registrationFile ?? null) as AgentRegistrationFile | null,
+      protocol,
+      chain: chain ?? '',
+      uaid: expectedUaid,
+    },
+    protocol,
+    chain,
+    trustScore,
+    brokerAttested: d.verified === true,
+  };
+}
+
 // ─── Client ──────────────────────────────────────────────────────────────────
 
 export class UAIDResolver {
@@ -146,13 +284,55 @@ export class UAIDResolver {
   private readonly apiKey?: string;
   private readonly timeoutMs: number;
   private readonly cacheTtlMs: number;
+  private readonly cacheMaxEntries: number;
+  private readonly maxResponseBytes: number;
+  private readonly config: UAIDResolverConfig;
+  /** Insertion-ordered Map used as an LRU: oldest entries are evicted first. */
   private readonly cache = new Map<string, CacheEntry>();
 
   constructor(config: UAIDResolverConfig = {}) {
     this.brokerUrl = (config.brokerUrl ?? DEFAULT_BROKER_URL).replace(/\/+$/, '');
     this.apiKey = config.apiKey;
     this.timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-    this.cacheTtlMs = config.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
+    const nonNegative = (v: number | undefined, d: number, name: string) => {
+      const n = v ?? d;
+      if (!Number.isFinite(n) || n < 0) throw new Error(`UAIDResolver: ${name} must be a finite non-negative number`);
+      return n;
+    };
+    this.cacheTtlMs = nonNegative(config.cacheTtlMs, DEFAULT_CACHE_TTL_MS, 'cacheTtlMs');
+    this.cacheMaxEntries = Math.floor(nonNegative(config.cacheMaxEntries, DEFAULT_CACHE_MAX_ENTRIES, 'cacheMaxEntries'));
+    this.maxResponseBytes = nonNegative(config.maxResponseBytes, DEFAULT_MAX_RESPONSE_BYTES, 'maxResponseBytes');
+    this.timeoutMs = nonNegative(config.timeoutMs, DEFAULT_TIMEOUT_MS, 'timeoutMs');
+    this.config = { ...config };
+  }
+
+  /** Current number of cached resolutions (bounded by cacheMaxEntries). */
+  get cacheSize(): number {
+    return this.cache.size;
+  }
+
+  private cacheGet(key: string): UAIDResolution | undefined {
+    const entry = this.cache.get(key);
+    if (!entry) return undefined;
+    this.cache.delete(key);
+    if (entry.expiresAt <= Date.now()) return undefined; // expired entries are removed, not kept
+    this.cache.set(key, entry); // refresh LRU position
+    return entry.result;
+  }
+
+  private cacheSet(key: string, result: UAIDResolution): void {
+    if (this.cacheMaxEntries === 0 || this.cacheTtlMs <= 0) return;
+    const now = Date.now();
+    for (const [k, v] of this.cache) {
+      if (v.expiresAt <= now) this.cache.delete(k);
+    }
+    this.cache.delete(key);
+    while (this.cache.size >= this.cacheMaxEntries) {
+      const oldest = this.cache.keys().next().value;
+      if (oldest === undefined) break;
+      this.cache.delete(oldest);
+    }
+    this.cache.set(key, { result, expiresAt: now + this.cacheTtlMs });
   }
 
   // ── Core resolution ──────────────────────────────────────────────────────
@@ -177,53 +357,42 @@ export class UAIDResolver {
    * ```
    */
   async resolve(uaid: string): Promise<UAIDResolution> {
-    // Check cache
-    const cached = this.cache.get(uaid);
-    if (cached && cached.expiresAt > Date.now()) {
-      return cached.result;
+    const key = canonicalUAID(uaid);
+    if (!key) {
+      return {
+        resolved: false, uaid: String(uaid).slice(0, MAX_UAID_LENGTH), identity: null, protocol: 'unknown',
+        brokerAttested: false, registryVerified: false, error: 'Malformed or oversized UAID',
+      };
     }
+    const cached = this.cacheGet(key);
+    if (cached) return cached;
 
     try {
-      const response = await this.brokerRequest('GET', `/agents/resolve?uaid=${encodeURIComponent(uaid)}`);
+      const response = await this.brokerRequest('GET', `/agents/resolve?uaid=${encodeURIComponent(key)}`);
 
       if (!response.ok) {
-        const result: UAIDResolution = {
-          resolved: false, uaid, identity: null, protocol: 'unknown',
-          registryVerified: false, error: `Registry returned ${response.status}`,
+        return {
+          resolved: false, uaid: key, identity: null, protocol: 'unknown',
+          brokerAttested: false, registryVerified: false, error: `Registry returned ${response.status}`,
         };
-        return result;
       }
 
-      const data = await response.json();
-
-      const identity: UniversalAgentIdentity = {
-        agentId: String(data.agentId ?? data.nativeId ?? ''),
-        owner: data.owner ?? data.controller ?? '',
-        agentURI: data.agentURI ?? data.metadataUri ?? '',
-        paymentAddress: data.paymentAddress ?? data.agentWallet ?? '',
-        registrationFile: data.registrationFile ?? null,
-        protocol: data.protocol ?? 'unknown',
-        chain: data.chain ?? '',
-        uaid,
-      };
-
-      const result: UAIDResolution = {
-        resolved: true, uaid, identity,
-        protocol: data.protocol ?? 'unknown',
-        chain: data.chain,
-        trustScore: data.trustScore,
-        registryVerified: data.verified ?? false,
-      };
-
-      // Cache the result
-      this.cache.set(uaid, { result, expiresAt: Date.now() + this.cacheTtlMs });
+      const record = validateBrokerAgent(parseBoundedJson(response.text, 'broker response'), key);
+      const result: UAIDResolution = Object.freeze({
+        resolved: true, uaid: key, identity: Object.freeze(record.identity),
+        protocol: record.protocol,
+        chain: record.chain,
+        trustScore: record.trustScore,
+        brokerAttested: record.brokerAttested,
+        registryVerified: record.brokerAttested,
+      });
+      this.cacheSet(key, result);
       return result;
-
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
       return {
-        resolved: false, uaid, identity: null, protocol: 'unknown',
-        registryVerified: false, error: `Resolution failed: ${message}`,
+        resolved: false, uaid: key, identity: null, protocol: 'unknown',
+        brokerAttested: false, registryVerified: false, error: `Resolution failed: ${message.slice(0, MAX_ERROR_TEXT)}`,
       };
     }
   }
@@ -248,26 +417,22 @@ export class UAIDResolver {
       const response = await this.brokerRequest('GET', `/agents/search?${params}`);
       if (!response.ok) return [];
 
-      const data = await response.json();
-      const results: UAIDResolution[] = (data.agents ?? []).map((agent: Record<string, unknown>) => ({
-        resolved: true,
-        uaid: agent.uaid as string,
-        identity: {
-          agentId: String(agent.agentId ?? agent.nativeId ?? ''),
-          owner: (agent.owner ?? agent.controller ?? '') as string,
-          agentURI: (agent.agentURI ?? agent.metadataUri ?? '') as string,
-          paymentAddress: (agent.paymentAddress ?? agent.agentWallet ?? '') as string,
-          registrationFile: (agent.registrationFile ?? null) as AgentRegistrationFile | null,
-          protocol: (agent.protocol ?? 'unknown') as UAIDProtocol,
-          chain: (agent.chain ?? '') as string,
-          uaid: agent.uaid as string,
-        },
-        protocol: (agent.protocol ?? 'unknown') as UAIDProtocol,
-        chain: agent.chain as string | undefined,
-        trustScore: agent.trustScore as number | undefined,
-        registryVerified: (agent.verified ?? false) as boolean,
-      }));
-
+      const data = parseBoundedJson(response.text, 'broker search response') as { agents?: unknown };
+      if (!data || typeof data !== 'object' || !Array.isArray(data.agents)) return [];
+      const limit = Math.min(options?.limit ?? MAX_SEARCH_RESULTS, MAX_SEARCH_RESULTS);
+      const results: UAIDResolution[] = [];
+      for (const agent of data.agents.slice(0, limit)) {
+        const key = canonicalUAID((agent as { uaid?: unknown } | null)?.uaid);
+        if (!key) continue;
+        try {
+          const record = validateBrokerAgent(agent, key);
+          results.push({
+            resolved: true, uaid: key, identity: record.identity,
+            protocol: record.protocol, chain: record.chain, trustScore: record.trustScore,
+            brokerAttested: record.brokerAttested, registryVerified: record.brokerAttested,
+          });
+        } catch { /* skip malformed broker entries */ }
+      }
       return results;
     } catch {
       return [];
@@ -282,8 +447,10 @@ export class UAIDResolver {
    * Useful when you already have an on-chain identity and want to work
    * with the universal format (e.g., for cross-chain discovery).
    */
-  erc8004ToUniversal(identity: AgentIdentity, chain: SupportedChain): UniversalAgentIdentity {
+  erc8004ToUniversal(identity: AgentIdentity, chain: SupportedChain, registryAddress?: Address): UniversalAgentIdentity {
     const chainId = EVM_CHAIN_IDS[chain];
+    const registry = registryAddress ?? KNOWN_REGISTRY_ADDRESSES[chain]?.identity;
+    if (!registry) throw new Error(`UAIDResolver: no ERC-8004 identity registry known for ${chain}`);
     return {
       agentId: identity.agentId.toString(),
       owner: identity.owner,
@@ -292,7 +459,7 @@ export class UAIDResolver {
       registrationFile: identity.registrationFile,
       protocol: 'erc8004',
       chain: `eip155:${chainId}`,
-      uaid: `uaid:aid:eip155:${chainId}:${identity.owner};uid=${identity.agentId};proto=erc8004`,
+      uaid: `uaid:aid:eip155:${chainId}:${registry};uid=${identity.agentId};proto=erc8004`,
     };
   }
 
@@ -302,9 +469,12 @@ export class UAIDResolver {
    * This creates the identifier — it does NOT register with the HOL registry.
    * Use registerERC8004Agent() to make the agent discoverable cross-chain.
    */
-  buildERC8004UAID(agentId: bigint, chain: SupportedChain, ownerAddress: Address): string {
+  buildERC8004UAID(agentId: bigint, chain: SupportedChain, registryAddress?: Address): string {
     const chainId = EVM_CHAIN_IDS[chain];
-    return `uaid:aid:eip155:${chainId}:${ownerAddress};uid=${agentId};proto=erc8004`;
+    const registry = registryAddress ?? KNOWN_REGISTRY_ADDRESSES[chain]?.identity;
+    if (!registry) throw new Error(`UAIDResolver: no ERC-8004 identity registry known for ${chain}`);
+    // The aid names the identity REGISTRY (as registerERC8004Agent and verify() expect).
+    return `uaid:aid:eip155:${chainId}:${registry};uid=${agentId};proto=erc8004`;
   }
 
   /**
@@ -324,7 +494,12 @@ export class UAIDResolver {
     }
 
     const chainId = EVM_CHAIN_IDS[params.chain];
-    const uaid = `uaid:aid:eip155:${chainId}:${params.registryAddress ?? '0x8004A169FB4a3325136EB29fA0ceB6D2e539a432'};uid=${params.agentId};proto=erc8004`;
+    // The same chain-specific registry verify() trusts; never a cross-chain default.
+    const registry = params.registryAddress ?? KNOWN_REGISTRY_ADDRESSES[params.chain]?.identity;
+    if (!chainId || !registry) {
+      throw new Error(`UAIDResolver: no ERC-8004 identity registry known for chain "${String(params.chain)}"; pass registryAddress`);
+    }
+    const uaid = `uaid:aid:eip155:${chainId}:${registry};uid=${params.agentId};proto=erc8004`;
 
     const response = await this.brokerRequest('POST', '/agents/register', {
       uaid,
@@ -334,16 +509,20 @@ export class UAIDResolver {
       name: params.name,
       description: params.description,
       capabilities: params.capabilities ?? [],
-      registryAddress: params.registryAddress ?? '0x8004A169FB4a3325136EB29fA0ceB6D2e539a432',
+      registryAddress: registry,
     });
 
     if (!response.ok) {
-      const errorBody = await response.text().catch(() => '');
-      throw new Error(`UAIDResolver: Registration failed (${response.status}): ${errorBody}`);
+      throw new Error(`UAIDResolver: Registration failed (${response.status}): ${response.text.slice(0, MAX_ERROR_TEXT)}`);
     }
 
-    const data = await response.json();
-    return data.uaid ?? uaid;
+    const data = parseBoundedJson(response.text, 'broker registration response') as { uaid?: unknown } | null;
+    const returned = data && typeof data === 'object' ? canonicalUAID(data.uaid) : null;
+    if (!returned) return uaid;
+    if (!sameUAID(returned, uaid)) {
+      throw new Error('UAIDResolver: broker returned a UAID for a different agent');
+    }
+    return returned;
   }
 
   // ── Verification ──────────────────────────────────────────────────────────
@@ -358,30 +537,76 @@ export class UAIDResolver {
    * @param uaid - Universal Agent Identifier to verify
    * @returns Verification result
    */
-  async verify(uaid: string): Promise<{
-    verified: boolean;
-    identity: UniversalAgentIdentity | null;
-    trustScore: number;
-    protocol: UAIDProtocol;
-    error?: string;
-  }> {
+  async verify(uaid: string): Promise<UAIDVerification> {
     const resolution = await this.resolve(uaid);
 
     if (!resolution.resolved || !resolution.identity) {
       return {
-        verified: false,
-        identity: null,
-        trustScore: 0,
-        protocol: resolution.protocol,
-        error: resolution.error ?? 'Agent not found in registry',
+        verified: false, identity: null, trustScore: 0, protocol: resolution.protocol,
+        brokerAttested: false, error: resolution.error ?? 'Agent not found in registry',
       };
     }
-
-    return {
-      verified: resolution.registryVerified,
-      identity: resolution.identity,
+    const base = {
       trustScore: resolution.trustScore ?? 0,
       protocol: resolution.protocol,
+      brokerAttested: resolution.brokerAttested,
+    };
+    const unverified = (error: string): UAIDVerification => ({ verified: false, identity: null, ...base, error });
+
+    const parsed = UAIDResolver.parseUAID(resolution.uaid);
+    if (!parsed || parsed.protocol !== 'erc8004') {
+      return unverified(`No independent verification is available for protocol "${parsed?.protocol ?? 'unknown'}"; broker claims are not proof of identity.`);
+    }
+    // ERC-8004 UAID aid: eip155:<chainId>:<identity registry>
+    const m = /^eip155:(\d+):(0x[0-9a-fA-F]{40})$/.exec(parsed.aid);
+    if (!m) return unverified('ERC-8004 UAID must be eip155:<chainId>:<registry address>');
+    const chain = CHAIN_BY_ID[Number(m[1])];
+    if (!chain) return unverified(`Unsupported ERC-8004 chain id ${m[1]}`);
+    const registry = m[2] as Address;
+    const trusted = [KNOWN_REGISTRY_ADDRESSES[chain]?.identity, ...(this.config.trustedRegistries?.[chain] ?? [])]
+      .filter((a): a is Address => typeof a === 'string')
+      .map((a) => a.toLowerCase());
+    if (!trusted.includes(registry.toLowerCase())) return unverified(`Registry ${registry} is not a trusted ERC-8004 identity registry on ${chain}`);
+    if (!/^\d{1,78}$/.test(parsed.uid)) return unverified('ERC-8004 uid must be a decimal token id');
+    const agentId = BigInt(parsed.uid);
+
+    let binding: { owner: Address; agentWallet: Address; agentURI?: string; blockNumber: bigint };
+    try {
+      binding = this.config.onChainLookup
+        ? await this.config.onChainLookup({ chain, registry, agentId })
+        : await new ERC8004Client({ chain, registryAddress: registry, rpcUrl: this.config.rpcUrls?.[chain] }).readAgentBinding(agentId);
+    } catch (err) {
+      return unverified(`On-chain verification failed: ${(err as Error).message.slice(0, MAX_ERROR_TEXT)}`);
+    }
+    if (!isAddress(binding.owner, { strict: false }) || !isAddress(binding.agentWallet, { strict: false })) {
+      return unverified('On-chain lookup returned invalid addresses');
+    }
+    if (/^0x0{40}$/i.test(binding.owner) || /^0x0{40}$/i.test(binding.agentWallet)) {
+      return unverified('On-chain owner or agent wallet is the zero address (unset); refusing to verify a payment address');
+    }
+    const brokerOwner = resolution.identity.owner;
+    const brokerWallet = resolution.identity.paymentAddress;
+    if (brokerOwner && brokerOwner.toLowerCase() !== binding.owner.toLowerCase()) {
+      return unverified('Broker owner does not match the on-chain owner');
+    }
+    if (brokerWallet && brokerWallet.toLowerCase() !== binding.agentWallet.toLowerCase()) {
+      return unverified('Broker payment address does not match the on-chain agent wallet');
+    }
+    return {
+      verified: true,
+      // Only on-chain values are returned as verified. Broker-supplied
+      // metadata (agentURI, registrationFile) is not carried over; resolve the
+      // registration file through ERC8004Client with your own trusted resolver.
+      identity: Object.freeze({
+        ...resolution.identity,
+        owner: binding.owner,
+        paymentAddress: binding.agentWallet,
+        agentURI: typeof binding.agentURI === 'string' ? binding.agentURI : '',
+        registrationFile: null,
+        chain: `eip155:${m[1]}`,
+      }),
+      blockNumber: binding.blockNumber,
+      ...base,
     };
   }
 
@@ -393,9 +618,12 @@ export class UAIDResolver {
    * Format: `uaid:aid:<identifier>;uid=<unique-id>;proto=<protocol>[;nativeId=<id>]`
    */
   static parseUAID(uaid: string): ParsedUAID | null {
-    if (!uaid.startsWith('uaid:')) return null;
+    if (typeof uaid !== 'string' || uaid.length > MAX_UAID_LENGTH || !uaid.startsWith('uaid:')) return null;
 
     const parts = uaid.split(';');
+    for (const prefix of ['uaid:aid:', 'uid=', 'proto=', 'nativeId=']) {
+      if (parts.filter((p) => p.startsWith(prefix)).length > 1) return null; // ambiguous
+    }
     const aidPart = parts.find(p => p.startsWith('uaid:aid:'));
     const uidPart = parts.find(p => p.startsWith('uid='));
     const protoPart = parts.find(p => p.startsWith('proto='));
@@ -419,7 +647,7 @@ export class UAIDResolver {
 
   // ── Private ───────────────────────────────────────────────────────────────
 
-  private async brokerRequest(method: string, path: string, body?: unknown): Promise<Response> {
+  private async brokerRequest(method: string, path: string, body?: unknown): Promise<BoundedResponse> {
     const url = `${this.brokerUrl}${path}`;
     const headers: Record<string, string> = {
       'Accept': 'application/json',
@@ -431,19 +659,11 @@ export class UAIDResolver {
     if (body) {
       headers['Content-Type'] = 'application/json';
     }
-
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
-
-    try {
-      return await fetch(url, {
-        method,
-        headers,
-        body: body ? JSON.stringify(body) : undefined,
-        signal: controller.signal,
-      });
-    } finally {
-      clearTimeout(timeout);
-    }
+    // One deadline covers the request AND the body; the body is size-capped.
+    return boundedFetch(url, {
+      method,
+      headers,
+      body: body ? JSON.stringify(body) : undefined,
+    }, { timeoutMs: this.timeoutMs, maxBytes: this.maxResponseBytes });
   }
 }

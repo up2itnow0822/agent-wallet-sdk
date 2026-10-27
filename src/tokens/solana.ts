@@ -11,7 +11,7 @@
  *   - Raydium: https://docs.raydium.io/raydium/token-pairs-and-liquidity
  */
 
-import { parseAmount } from './decimals.js';
+import { parseExactAmount, assertTokenDecimals } from './decimals.js';
 
 // ─── Well-known Solana token mint addresses ───────────────────────────────────
 //
@@ -72,6 +72,58 @@ export const SOLANA_TOKEN_DECIMALS: Record<SolanaTokenSymbol, number> = {
   WBTC:    8,
   WETH:    8,
 };
+
+/** Mainnet mint → pinned decimals. RPC mint data is compared against this, never trusted over it. */
+const PINNED_MAINNET_MINT_DECIMALS: ReadonlyMap<string, number> = new Map(
+  (Object.keys(SOLANA_TOKENS) as SolanaTokenSymbol[])
+    .filter(symbol => SOLANA_TOKENS[symbol] !== null)
+    .map(symbol => [SOLANA_TOKENS[symbol] as string, SOLANA_TOKEN_DECIMALS[symbol]] as const),
+);
+
+/** Genesis hashes that identify public Solana clusters. */
+export const SOLANA_CLUSTER_GENESIS_HASHES = {
+  'mainnet-beta': '5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d',
+  devnet: 'EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG',
+  testnet: '4uhcVJyU9pJkvQyS88uRDiswHXSCkY3zQawwpjk2NsNY',
+} as const;
+
+export type SolanaCluster = keyof typeof SOLANA_CLUSTER_GENESIS_HASHES;
+
+/** Minimal @solana/web3.js Connection surface used to sign and submit. */
+interface SolanaSendConnection {
+  getLatestBlockhash(commitment?: string): Promise<{ blockhash: string; lastValidBlockHeight: number }>;
+  getGenesisHash(): Promise<string>;
+  sendRawTransaction(raw: unknown): Promise<string>;
+  confirmTransaction(
+    strategy: { signature: string; blockhash: string; lastValidBlockHeight: number },
+    commitment?: string,
+  ): Promise<{ value?: { err?: unknown } } | undefined>;
+}
+
+/** Minimal legacy Transaction surface used to sign and submit. */
+interface SolanaSignableTransaction {
+  recentBlockhash?: string;
+  lastValidBlockHeight?: number;
+  feePayer?: unknown;
+  sign(...signers: unknown[]): void;
+  serialize(): unknown;
+}
+
+/** Thrown before signing when a Solana transfer cannot be bound to a pinned scale or cluster. */
+export class SolanaTransferSafetyError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SolanaTransferSafetyError';
+  }
+}
+
+export interface SendSplTokenOptions {
+  /**
+   * Caller-pinned mint decimals. Required for string amounts of mints that are
+   * not in SOLANA_TOKENS on mainnet-beta. Must match the mint account.
+   */
+  expectedDecimals?: number;
+}
 
 // ─── Dynamic import helper ────────────────────────────────────────────────────
 
@@ -151,6 +203,13 @@ export interface SolanaWalletConfig {
   privateKeyBase58?: string;
   /** Keypair bytes (Uint8Array of 64 bytes) */
   keypairBytes?: Uint8Array;
+  /**
+   * Cluster the RPC must serve. Checked by genesis hash before every signed
+   * transfer. Defaults to 'mainnet-beta'.
+   */
+  cluster?: SolanaCluster;
+  /** Override for private/local clusters: the exact genesis hash the RPC must report. */
+  expectedGenesisHash?: string;
 }
 
 export interface SolBalanceResult {
@@ -191,6 +250,39 @@ export class SolanaWallet {
     const { Connection } = await loadSolanaWeb3();
     this._connection = new Connection(this.rpcUrl, 'confirmed');
     return this._connection;
+  }
+
+  /** The cluster this wallet is bound to. */
+  get cluster(): SolanaCluster | 'custom' {
+    return this.config.expectedGenesisHash ? 'custom' : (this.config.cluster ?? 'mainnet-beta');
+  }
+
+  private expectedGenesisHash(): string {
+    if (this.config.expectedGenesisHash) return this.config.expectedGenesisHash;
+    const cluster = this.config.cluster ?? 'mainnet-beta';
+    const hash = SOLANA_CLUSTER_GENESIS_HASHES[cluster];
+    if (!hash) throw new SolanaTransferSafetyError(`unknown Solana cluster "${String(cluster)}"`);
+    return hash;
+  }
+
+  /**
+   * Verify the RPC serves the configured cluster before EVERY signed transfer.
+   * Never cached: the transaction signs over the blockhash this RPC returns,
+   * so an endpoint that later serves another cluster must be caught each time.
+   */
+  private async assertCluster(connection: any): Promise<void> {
+    const expected = this.expectedGenesisHash();
+    let actual: unknown;
+    try {
+      actual = await connection.getGenesisHash();
+    } catch (err) {
+      throw new SolanaTransferSafetyError(`could not verify Solana cluster: ${(err as Error).message}`);
+    }
+    if (actual !== expected) {
+      throw new SolanaTransferSafetyError(
+        `Solana RPC genesis hash ${String(actual)} does not match the configured cluster (${expected})`,
+      );
+    }
   }
 
   private async getKeypair() {
@@ -297,14 +389,16 @@ export class SolanaWallet {
    * @param amount - Lamports (bigint) OR SOL amount as string (e.g. "1.5")
    */
   async sendSol(to: string, amount: string | bigint): Promise<SolanaTxResult> {
-    const lamports = parseAmount(amount, 9);
-    if (lamports <= 0n) {
-      throw new Error('SolanaWallet: transfer amount must be greater than zero.');
+    let lamports: bigint;
+    try {
+      lamports = parseExactAmount(amount, 9);
+    } catch (err) {
+      throw new SolanaTransferSafetyError(`SolanaWallet: ${(err as Error).message}`);
     }
 
-    const { PublicKey, SystemProgram, Transaction, sendAndConfirmTransaction } =
-      await loadSolanaWeb3();
+    const { PublicKey, SystemProgram, Transaction } = await loadSolanaWeb3();
     const connection = await this.getConnection();
+    await this.assertCluster(connection);
     const keypair = await this.getKeypair();
 
     const transaction = new Transaction().add(
@@ -315,8 +409,7 @@ export class SolanaWallet {
       })
     );
 
-    const signature = await sendAndConfirmTransaction(connection, transaction, [keypair]);
-    return { signature };
+    return { signature: await this.signAndSend(connection, transaction, keypair) };
   }
 
   /**
@@ -331,23 +424,52 @@ export class SolanaWallet {
     to: string,
     amount: string | bigint,
     mintAddress: string,
+    options: SendSplTokenOptions = {},
   ): Promise<SolanaTxResult> {
+    // 1. Pin the token scale without consulting the RPC.
+    const pinned = this.pinnedDecimals(mintAddress, options);
+
+    // 2. Convert/validate the amount against the pinned scale before any network call.
+    let rawAmount: bigint;
+    try {
+      if (typeof amount === 'bigint') {
+        rawAmount = parseExactAmount(amount, pinned ?? 0);
+      } else {
+        if (pinned === undefined || pinned === null) {
+          throw new Error(
+            'string amounts for this mint require options.expectedDecimals ' +
+              '(or pass raw base units as a bigint); RPC mint decimals never choose the scale',
+          );
+        }
+        rawAmount = parseExactAmount(amount, pinned);
+      }
+    } catch (err) {
+      throw new SolanaTransferSafetyError(`SolanaWallet: ${(err as Error).message}`);
+    }
+
     const { PublicKey } = await loadSolanaWeb3();
     const splToken = await loadSplToken();
     const connection = await this.getConnection();
+    await this.assertCluster(connection);
     const keypair = await this.getKeypair();
 
     const mintPubkey = new PublicKey(mintAddress);
     const toPubkey = new PublicKey(to);
 
-    // Get mint info for decimals
-    const mintInfo = await splToken.getMint(connection, mintPubkey);
-    const { decimals } = mintInfo;
-
-    const rawAmount = parseAmount(amount, decimals);
-    if (rawAmount <= 0n) {
-      throw new Error('SolanaWallet: transfer amount must be greater than zero.');
+    // 3. Compare the RPC's mint decimals with the pinned scale; mismatch fails closed.
+    let mintDecimals: number;
+    try {
+      const mintInfo = await splToken.getMint(connection, mintPubkey);
+      mintDecimals = assertTokenDecimals(mintInfo?.decimals, 'mint decimals');
+    } catch (err) {
+      throw new SolanaTransferSafetyError(`SolanaWallet: could not read mint: ${(err as Error).message}`);
     }
+    if ((pinned !== undefined && pinned !== null) && mintDecimals !== pinned) {
+      throw new SolanaTransferSafetyError(
+        `SolanaWallet: mint reports ${mintDecimals} decimals but ${pinned} are pinned for this transfer`,
+      );
+    }
+    const decimals = pinned ?? mintDecimals;
 
     // Get sender's associated token account
     const fromAta = await splToken.getAssociatedTokenAddress(
@@ -374,16 +496,76 @@ export class SolanaWallet {
       );
     }
 
-    // Transfer instruction
+    // TransferChecked makes the token program reject a decimals/mint mismatch on-chain.
     instructions.push(
-      splToken.createTransferInstruction(fromAta, toAta, keypair.publicKey, rawAmount)
+      splToken.createTransferCheckedInstruction(
+        fromAta,
+        mintPubkey,
+        toAta,
+        keypair.publicKey,
+        rawAmount,
+        decimals,
+      )
     );
 
-    const { Transaction, sendAndConfirmTransaction } = await loadSolanaWeb3();
+    const { Transaction } = await loadSolanaWeb3();
     const transaction = new Transaction().add(...instructions);
+    return { signature: await this.signAndSend(connection, transaction, keypair) };
+  }
 
-    const signature = await sendAndConfirmTransaction(connection, transaction, [keypair]);
-    return { signature };
+  /**
+   * Bind the signed transfer to the configured cluster: fetch the recent
+   * blockhash FIRST, then prove the cluster by genesis hash, then sign locally
+   * with that blockhash and submit the raw bytes. A transaction signed over a
+   * blockhash from the configured cluster cannot execute on any other cluster,
+   * so an endpoint that switches clusters at any point cannot redirect it.
+   */
+  private async signAndSend(
+    connection: SolanaSendConnection,
+    transaction: SolanaSignableTransaction,
+    keypair: { publicKey: unknown },
+  ): Promise<string> {
+    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
+    if (typeof blockhash !== 'string' || blockhash.length === 0) {
+      throw new SolanaTransferSafetyError('Solana RPC returned no recent blockhash');
+    }
+    await this.assertCluster(connection);
+    transaction.recentBlockhash = blockhash;
+    transaction.lastValidBlockHeight = lastValidBlockHeight;
+    transaction.feePayer = keypair.publicKey;
+    transaction.sign(keypair);
+    const signature: string = await connection.sendRawTransaction(transaction.serialize());
+    const confirmation = await connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, 'confirmed');
+    const value = confirmation?.value;
+    if (!value || typeof value !== 'object' || !('err' in value)) {
+      // No confirmation result: the outcome is unknown, never success.
+      throw Object.assign(
+        new Error(`Solana transaction ${signature} has no confirmation result; outcome unknown — reconcile the signature before any retry`),
+        { signature, outcome: 'unknown' as const },
+      );
+    }
+    if (value.err !== null) {
+      throw Object.assign(
+        new Error(`Solana transaction ${signature} failed: ${JSON.stringify(value.err)}`),
+        { signature, outcome: 'failed' as const },
+      );
+    }
+    return signature;
+  }
+
+  private pinnedDecimals(mintAddress: string, options: SendSplTokenOptions): number | undefined {
+    const expected =
+      (options.expectedDecimals !== undefined && options.expectedDecimals !== null)
+        ? assertTokenDecimals(options.expectedDecimals, 'expectedDecimals')
+        : undefined;
+    const known =
+      this.cluster === 'mainnet-beta' ? PINNED_MAINNET_MINT_DECIMALS.get(mintAddress) : undefined;
+    if ((known !== undefined && known !== null) && (expected !== undefined && expected !== null) && known !== expected) {
+      throw new SolanaTransferSafetyError(
+        `SolanaWallet: expectedDecimals ${expected} does not match pinned decimals ${known} for ${mintAddress}`,
+      );
+    }
+    return known ?? expected;
   }
 
   /**

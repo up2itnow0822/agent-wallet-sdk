@@ -20,6 +20,14 @@ export type UniswapFeeTier = 100 | 500 | 3000 | 10000;
 /** Chains supported for Uniswap V3 swap */
 export type SwapChain = 'base' | 'arbitrum' | 'optimism' | 'polygon';
 
+/** EVM chain ids the swap clients must be bound to. */
+export const SWAP_CHAIN_IDS: Record<SwapChain, number> = {
+  base: 8453,
+  arbitrum: 42161,
+  optimism: 10,
+  polygon: 137,
+};
+
 export interface SwapQuote {
   tokenIn: Address;
   tokenOut: Address;
@@ -41,6 +49,19 @@ export interface SwapOptions {
   deadlineSecs?: number;
   /** Retained for API compatibility; fee-bearing execution is disabled. */
   feeWallet?: Address;
+  /**
+   * REQUIRED for swap(): the caller's absolute minimum acceptable output, in
+   * tokenOut base units, derived from a source independent of the swap RPC
+   * (oracle, second RPC, user intent). The on-chain minimum is never below it.
+   */
+  minAmountOut?: bigint;
+  /**
+   * Optional independent reference output (e.g. from a price oracle). When set,
+   * the RPC quote must be within maxQuoteDeviationBps of it.
+   */
+  referenceAmountOut?: bigint;
+  /** Allowed |quote - reference| / reference in bps (default 100 = 1%). */
+  maxQuoteDeviationBps?: number;
 }
 
 export interface SwapResult {

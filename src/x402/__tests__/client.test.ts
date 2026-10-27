@@ -1,5 +1,5 @@
 // [MAX-ADDED] Tests for x402 Client — protocol parsing and payment selection
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import {
   X402Client,
   X402BudgetExceededError,
@@ -23,6 +23,7 @@ import {
   X402SettlementBacklogError,
 } from '../client.js';
 import { USDC_ADDRESSES } from '../types.js';
+import { stubReceiptEvidence } from './receipt-evidence.js';
 import type { X402PaymentRequired, X402PaymentRequirements } from '../types.js';
 
 type X402ClientPaymentInternals = {
@@ -41,6 +42,13 @@ const mockWallet = walletOnChain(8453, {
     waitForTransactionReceipt: async () => ({ status: 'success' }),
   },
 });
+
+// These are protocol state-machine tests: like executePayment above, the
+// chain-evidence layer is stubbed. A successful receipt counts as settled
+// unless the wallet emitted TransactionQueued. Receipt classification against
+// the exact transfer (Transfer / matching queue entry) is covered by
+// funds-safety.test.ts and the classifyX402SettlementReceipt tests below.
+beforeEach(() => { stubReceiptEvidence(); });
 
 afterEach(() => {
   vi.useRealTimers();
@@ -1753,7 +1761,7 @@ describe('X402Client retry idempotency', () => {
       const unkeyed = {
         x402Version: 1,
         resource: {
-          url: requested.pathname,
+          url: requested.pathname + requested.search,
           description: 'Data API',
           mimeType: 'application/json',
         },
@@ -1831,7 +1839,7 @@ describe('X402Client retry idempotency', () => {
       const unkeyed = {
         x402Version: 1,
         resource: {
-          url: requested.pathname,
+          url: requested.pathname + requested.search,
           description: 'Data API',
           mimeType: 'application/json',
         },
@@ -2415,7 +2423,7 @@ describe('X402Client retry idempotency', () => {
         headers: {
           'payment-required': btoa(JSON.stringify({
             x402Version: 1,
-            resource: { url: new URL(requested).pathname, description: 'Data API', mimeType: 'application/json' },
+            resource: { url: new URL(requested).pathname + new URL(requested).search, description: 'Data API', mimeType: 'application/json' },
             accepts: [
               { scheme: 'exact', network: 'base:8453', asset, amount: '1000000', payTo, maxTimeoutSeconds: 30, extra: { nonce } },
             ],
@@ -2463,7 +2471,7 @@ describe('X402Client retry idempotency', () => {
           'payment-required': btoa(JSON.stringify({
             x402Version: 1,
             resource: {
-              url: new URL(requested).pathname,
+              url: new URL(requested).pathname + new URL(requested).search,
               description: 'Data API',
               mimeType: 'application/json',
             },
@@ -2535,7 +2543,7 @@ describe('X402Client retry idempotency', () => {
         headers: {
           'payment-required': btoa(JSON.stringify({
             x402Version: 1,
-            resource: { url: new URL(requested).pathname, description: 'Data API', mimeType: 'application/json' },
+            resource: { url: new URL(requested).pathname + new URL(requested).search, description: 'Data API', mimeType: 'application/json' },
             accepts: [
               { scheme: 'exact', network: 'base:8453', asset, amount: '1000000', payTo, maxTimeoutSeconds: 30, extra: { nonce } },
             ],

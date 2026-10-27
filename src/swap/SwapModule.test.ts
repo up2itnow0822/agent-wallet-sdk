@@ -17,7 +17,7 @@ const ROUTER_ABI = parseAbi([
 ]);
 const TOKEN_ABI = parseAbi(['function approve(address spender,uint256 amount) returns (bool)']);
 
-function harness(options: { accountAddress?: Address; feeBps?: number; allowance?: bigint } = {}) {
+function harness(options: { accountAddress?: Address; feeBps?: number; allowance?: bigint; rpcChainId?: number } = {}) {
   let allowance = options.allowance ?? MAX_UINT256;
   const sent: { to: Address; data: Hex }[] = [];
   const readContract = vi.fn(async ({ functionName }: { functionName: string }) => {
@@ -32,13 +32,14 @@ function harness(options: { accountAddress?: Address; feeBps?: number; allowance
     sent.push(args);
     return args.to === TOKEN_IN ? APPROVAL_HASH : SWAP_HASH;
   });
+  const getChainId = vi.fn(async () => options.rpcChainId ?? 8453);
   const module = new SwapModule(
-    { readContract, waitForTransactionReceipt } as unknown as PublicClient,
+    { readContract, waitForTransactionReceipt, getChainId } as unknown as PublicClient,
     { account: { address: OWNER }, chain: { id: 8453 }, sendTransaction } as unknown as WalletClient,
     options.accountAddress ?? OWNER,
     { feeBps: options.feeBps ?? 0 },
   );
-  return { module, sent, readContract, waitForTransactionReceipt, sendTransaction };
+  return { module, sent, readContract, waitForTransactionReceipt, sendTransaction, getChainId };
 }
 
 afterEach(() => vi.restoreAllMocks());
@@ -46,20 +47,20 @@ afterEach(() => vi.restoreAllMocks());
 describe('swap execution safety', () => {
   it('rejects fee-bearing execution before any quote, approval, or fee transaction', async () => {
     const { module, sent, readContract } = harness({ feeBps: 875, allowance: 0n });
-    await expect(module.swap(TOKEN_IN, TOKEN_OUT, 100_000n)).rejects.toThrow(/fee.*atomic/i);
+    await expect(module.swap(TOKEN_IN, TOKEN_OUT, 100_000n, { minAmountOut: 1n })).rejects.toThrow(/fee.*atomic/i);
     expect(sent).toEqual([]);
     expect(readContract).not.toHaveBeenCalled();
   });
 
   it('rejects fee-bearing execution even when rounding would make its fee zero', async () => {
     const { module, sent } = harness({ feeBps: 875 });
-    await expect(module.swap(TOKEN_IN, TOKEN_OUT, 1n)).rejects.toThrow(/fee.*atomic/i);
+    await expect(module.swap(TOKEN_IN, TOKEN_OUT, 1n, { minAmountOut: 1n })).rejects.toThrow(/fee.*atomic/i);
     expect(sent).toEqual([]);
   });
 
   it('rejects AgentAccount execution rather than spending from its operator EOA', async () => {
     const { module, sent, readContract } = harness({ accountAddress: ACCOUNT });
-    await expect(module.swap(TOKEN_IN, TOKEN_OUT, 100_000n)).rejects.toThrow(/EOA.*accountAddress/i);
+    await expect(module.swap(TOKEN_IN, TOKEN_OUT, 100_000n, { minAmountOut: 1n })).rejects.toThrow(/EOA.*accountAddress/i);
     expect(sent).toEqual([]);
     expect(readContract).not.toHaveBeenCalled();
   });
@@ -67,7 +68,7 @@ describe('swap execution safety', () => {
   it('puts the requested expiry in SwapRouter02 multicall calldata', async () => {
     vi.spyOn(Date, 'now').mockReturnValue(1_800_000_000_000);
     const { module, sent } = harness();
-    const result = await module.swap(TOKEN_IN, TOKEN_OUT, 100_000n, { deadlineSecs: 45, slippageBps: 100 });
+    const result = await module.swap(TOKEN_IN, TOKEN_OUT, 100_000n, { minAmountOut: 1n, deadlineSecs: 45, slippageBps: 100 });
     expect(result.txHash).toBe(SWAP_HASH);
     expect(result.feeTxHash).toBeUndefined();
     expect(sent).toHaveLength(1);
@@ -85,7 +86,7 @@ describe('swap execution safety', () => {
     const { module, sent, waitForTransactionReceipt } = harness({ allowance: 0n });
     let confirm!: (receipt: { status: string }) => void;
     waitForTransactionReceipt.mockImplementationOnce(() => new Promise((resolve) => { confirm = resolve; }));
-    const swap = module.swap(TOKEN_IN, TOKEN_OUT, 100_000n);
+    const swap = module.swap(TOKEN_IN, TOKEN_OUT, 100_000n, { minAmountOut: 1n });
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     const approval = decodeFunctionData({ abi: TOKEN_ABI, data: sent[0].data });
     expect(approval.args?.[1]).toBe(100_000n);
@@ -98,7 +99,7 @@ describe('swap execution safety', () => {
 
   it('allows a trade after the approval is confirmed and allowance covers the input', async () => {
     const { module, sent } = harness({ allowance: 0n });
-    const result = await module.swap(TOKEN_IN, TOKEN_OUT, 100_000n);
+    const result = await module.swap(TOKEN_IN, TOKEN_OUT, 100_000n, { minAmountOut: 1n });
     expect(result.approvalTxHash).toBe(APPROVAL_HASH);
     expect(result.approvalRequired).toBe(true);
     expect(sent).toHaveLength(2);
@@ -108,34 +109,34 @@ describe('swap execution safety', () => {
   it('does not submit a trade after reverted approval', async () => {
     const { module, sent, waitForTransactionReceipt } = harness({ allowance: 0n });
     waitForTransactionReceipt.mockResolvedValueOnce({ status: 'reverted' });
-    await expect(module.swap(TOKEN_IN, TOKEN_OUT, 100_000n)).rejects.toThrow(/approval.*revert/i);
+    await expect(module.swap(TOKEN_IN, TOKEN_OUT, 100_000n, { minAmountOut: 1n })).rejects.toThrow(/approval.*revert/i);
     expect(sent).toHaveLength(1);
   });
 
   it('does not submit a trade when approval confirmation is unknown', async () => {
     const { module, sent, waitForTransactionReceipt } = harness({ allowance: 0n });
     waitForTransactionReceipt.mockRejectedValueOnce(new Error('RPC timeout'));
-    await expect(module.swap(TOKEN_IN, TOKEN_OUT, 100_000n)).rejects.toThrow('RPC timeout');
+    await expect(module.swap(TOKEN_IN, TOKEN_OUT, 100_000n, { minAmountOut: 1n })).rejects.toThrow('RPC timeout');
     expect(sent).toHaveLength(1);
   });
 
   it.each([0n, -1n, MAX_UINT256 + 1n])('rejects invalid input %s before RPC or signing', async (amount) => {
     const { module, sent, readContract } = harness();
-    await expect(module.swap(TOKEN_IN, TOKEN_OUT, amount)).rejects.toThrow(/amount/i);
+    await expect(module.swap(TOKEN_IN, TOKEN_OUT, amount, { minAmountOut: 1n })).rejects.toThrow(/amount/i);
     expect(sent).toEqual([]);
     expect(readContract).not.toHaveBeenCalled();
   });
 
   it.each([-1, 10_000, 1.5, Number.NaN, Number.POSITIVE_INFINITY])('rejects invalid slippage %s before RPC or signing', async (slippageBps) => {
     const { module, sent, readContract } = harness();
-    await expect(module.swap(TOKEN_IN, TOKEN_OUT, 100_000n, { slippageBps })).rejects.toThrow(/slippage/i);
+    await expect(module.swap(TOKEN_IN, TOKEN_OUT, 100_000n, { minAmountOut: 1n, slippageBps })).rejects.toThrow(/slippage/i);
     expect(sent).toEqual([]);
     expect(readContract).not.toHaveBeenCalled();
   });
 
   it.each([0, -1, 0.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER])('rejects invalid expiry %s before RPC or signing', async (deadlineSecs) => {
     const { module, sent, readContract } = harness();
-    await expect(module.swap(TOKEN_IN, TOKEN_OUT, 100_000n, { deadlineSecs })).rejects.toThrow(/deadline/i);
+    await expect(module.swap(TOKEN_IN, TOKEN_OUT, 100_000n, { minAmountOut: 1n, deadlineSecs })).rejects.toThrow(/deadline/i);
     expect(sent).toEqual([]);
     expect(readContract).not.toHaveBeenCalled();
   });
@@ -143,7 +144,7 @@ describe('swap execution safety', () => {
   it('rejects a quote with zero minimum output before approving', async () => {
     const { module, sent, readContract } = harness({ allowance: 0n });
     readContract.mockResolvedValue([1n, 0n, 0, 100_000n]);
-    await expect(module.swap(TOKEN_IN, TOKEN_OUT, 100_000n, { slippageBps: 50 })).rejects.toThrow(/minimum output/i);
+    await expect(module.swap(TOKEN_IN, TOKEN_OUT, 100_000n, { minAmountOut: 1n, slippageBps: 50 })).rejects.toThrow(/minimum output/i);
     expect(sent).toEqual([]);
   });
 });
@@ -156,5 +157,103 @@ describe('swap arithmetic validation', () => {
     expect(calcProtocolFee(100_000n, 875)).toBe(875n);
     expect(() => applySlippage(1n, -1)).toThrow(/slippage/i);
     expect(() => calcDeadline(0)).toThrow(/deadline/i);
+  });
+});
+
+describe('swap output floor and chain binding (finding 11)', () => {
+  it('requires a caller-supplied absolute minAmountOut before any RPC', async () => {
+    const { module, sent, readContract } = harness();
+    await expect(module.swap(TOKEN_IN, TOKEN_OUT, 100_000n)).rejects.toThrow(/minAmountOut is required/);
+    expect(readContract).not.toHaveBeenCalled();
+    expect(sent).toEqual([]);
+  });
+
+  it('refuses a manipulated (too-low) RPC quote before approving or swapping', async () => {
+    const { module, sent, readContract } = harness({ allowance: 0n });
+    readContract.mockImplementation(async ({ functionName }: { functionName: string }) =>
+      functionName === 'allowance' ? 0n : [10n, 0n, 0, 100_000n]); // RPC claims near-zero output
+    await expect(module.swap(TOKEN_IN, TOKEN_OUT, 100_000n, { minAmountOut: 190_000n }))
+      .rejects.toThrow(/below the caller's minAmountOut/);
+    expect(sent).toEqual([]);
+  });
+
+  it('never signs a router minimum below the caller floor', async () => {
+    const { module, sent } = harness();
+    await module.swap(TOKEN_IN, TOKEN_OUT, 100_000n, { minAmountOut: 199_500n, slippageBps: 500 });
+    const outer = decodeFunctionData({ abi: ROUTER_ABI, data: sent[0].data });
+    const inner = decodeFunctionData({ abi: ROUTER_ABI, data: (outer.args as readonly [bigint, readonly Hex[]])[1][0] });
+    expect(inner.args?.[0]).toMatchObject({ amountOutMinimum: 199_500n });
+  });
+
+  it('rejects a quote that deviates from an independent reference', async () => {
+    const { module, sent } = harness();
+    await expect(module.swap(TOKEN_IN, TOKEN_OUT, 100_000n, {
+      minAmountOut: 1n, referenceAmountOut: 300_000n, maxQuoteDeviationBps: 100,
+    })).rejects.toThrow(/deviates/);
+    expect(sent).toEqual([]);
+  });
+
+  it('rejects a chainless read client whose RPC serves another network, before any quote (Codex round 4)', async () => {
+    const { module, sent, readContract } = harness({ rpcChainId: 1 });
+    await expect(module.swap(TOKEN_IN, TOKEN_OUT, 100_000n, { minAmountOut: 1n })).rejects.toThrow(/RPC serves chain 1/);
+    expect(readContract).not.toHaveBeenCalled();
+    expect(sent).toEqual([]);
+  });
+
+  it('fails closed when the read client cannot report its network', async () => {
+    const { module, sent, getChainId } = harness();
+    getChainId.mockRejectedValueOnce(new Error('rpc down'));
+    await expect(module.swap(TOKEN_IN, TOKEN_OUT, 100_000n, { minAmountOut: 1n })).rejects.toThrow(/could not read the publicClient network/);
+    expect(sent).toEqual([]);
+  });
+
+  it('rejects a wallet client bound to another chain', async () => {
+    const { module, sent } = harness();
+    (module as unknown as { walletClient: { chain: { id: number } } }).walletClient.chain = { id: 1 };
+    await expect(module.swap(TOKEN_IN, TOKEN_OUT, 100_000n, { minAmountOut: 1n })).rejects.toThrow(/chain/);
+    expect(sent).toEqual([]);
+  });
+});
+
+describe('swap re-checks the read chain after its reads, before each write (Codex post-merge #98)', () => {
+  // A load-balanced read RPC: answers the listed chains in order, then `after`.
+  const chains = (getChainId: ReturnType<typeof vi.fn>, first: number[], after: number) => {
+    const queue = [...first];
+    getChainId.mockImplementation(async () => (queue.length ? queue.shift()! : after));
+  };
+
+  it('does not swap when the chain moved during the quote reads', async () => {
+    const { module, sent, getChainId } = harness();
+    chains(getChainId, [8453], 1);
+    await expect(module.swap(TOKEN_IN, TOKEN_OUT, 100_000n, { minAmountOut: 1n })).rejects.toThrow(/RPC serves chain 1/);
+    expect(sent).toEqual([]);
+  });
+
+  it('does not approve when the chain moved during the allowance read', async () => {
+    const { module, sent, getChainId } = harness({ allowance: 0n });
+    chains(getChainId, [8453, 8453], 1);
+    await expect(module.swap(TOKEN_IN, TOKEN_OUT, 100_000n, { minAmountOut: 1n })).rejects.toThrow(/RPC serves chain 1/);
+    expect(sent).toEqual([]);
+  });
+
+  it('does not swap when the chain moved during the confirmed-allowance read', async () => {
+    const { module, sent, getChainId } = harness({ allowance: 0n });
+    chains(getChainId, [8453, 8453, 8453], 1);
+    await expect(module.swap(TOKEN_IN, TOKEN_OUT, 100_000n, { minAmountOut: 1n })).rejects.toThrow(/RPC serves chain 1/);
+    expect(sent.map((t) => t.to)).toEqual([TOKEN_IN]); // the approval only
+  });
+
+  it('checks the read chain when ensureApproval is called on its own', async () => {
+    const { module, sent, readContract } = harness({ allowance: 0n, rpcChainId: 1 });
+    await expect(module.ensureApproval(TOKEN_IN, ACCOUNT, 100_000n)).rejects.toThrow(/RPC serves chain 1/);
+    expect(readContract).not.toHaveBeenCalled();
+    expect(sent).toEqual([]);
+  });
+
+  it('still approves and swaps on a stable chain', async () => {
+    const { module, sent } = harness({ allowance: 0n });
+    const r = await module.swap(TOKEN_IN, TOKEN_OUT, 100_000n, { minAmountOut: 1n });
+    expect(r.approvalRequired).toBe(true);
+    expect(sent.map((t) => t.to)).toHaveLength(2);
   });
 });
