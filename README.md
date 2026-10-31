@@ -17,7 +17,7 @@ package owned by an unrelated maintainer and is not part of this SDK.
 | Area | Public surface | Source |
 | --- | --- | --- |
 | Smart-wallet client | `createWallet`, policy writes, budget reads | [`src/index.ts`](src/index.ts) |
-| x402 | Client, middleware, budget tracking, multi-asset helpers | [`src/x402/`](src/x402/) |
+| x402 | Client, middleware, budget tracking, multi-asset helpers, fail-closed `withSpotCheck` | [`src/x402/`](src/x402/) |
 | Local policy | `SpendingPolicy` (reserve/commit/release), `UptoBillingPolicy` | [`src/policy/`](src/policy/) |
 | Spend outcomes | `classifySpendAttempt`, `classifySpendError`, `isEvmTxHash` | [`src/outcomes/`](src/outcomes/) |
 | Tokens | Registry, decimals, transfers, optional Solana helpers | [`src/tokens/`](src/tokens/) |
@@ -97,6 +97,8 @@ peer dependency, version 14 or later:
 ```bash
 npm install @stellar/stellar-sdk
 ```
+
+x402 auto-pay can wrap client config with `withSpotCheck`. When that wrapper is used, a missing, throwing, timed-out, or rejecting check refuses the payment (unpaid 402, no transfer). Unconfigured clients keep the existing auto-pay path. The wrapper is opt-in and recommended for production. No extra peer is required.
 
 ## Connect to an existing smart wallet
 
