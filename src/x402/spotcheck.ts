@@ -4,9 +4,11 @@
  *
  * withSpotCheck(config, opts) returns a new X402ClientConfig whose
  * onBeforePayment snapshots the selected terms, then runs the caller's hook
- * on a separate object. Payment proceeds only after an explicit listing match
- * and/or checker allow against that snapshot. A missing checker, empty
- * listing, mismatch, throw, timeout, or unrecognized network declines.
+ * and the whole spot check under one monotonic deadline. Payment proceeds
+ * only after an explicit listing match and/or checker allow against that
+ * snapshot, and only if the deadline is still open when the decision is
+ * accepted. A missing checker, empty listing, mismatch, throw, timeout,
+ * hang, late allow, or unrecognized network declines.
  *
  * A checker allows only when allowed === true and verdict === 'allow'.
  * Static listing fields apply together with expected(); conflicts refuse.
@@ -35,6 +37,12 @@ export interface SpotCheckChecker {
   ) => Promise<SpotCheckDecision | null | undefined> | SpotCheckDecision | null | undefined;
 }
 
+export interface SpotCheckClock {
+  now(): number;
+  setTimeout(callback: () => void, ms: number): unknown;
+  clearTimeout(id: unknown): void;
+}
+
 export interface SpotCheckOptions {
   /** Listing constraints and extra fields forwarded to a supplied checker. */
   check?: Record<string, unknown>;
@@ -44,6 +52,8 @@ export interface SpotCheckOptions {
   checker?: SpotCheckChecker | (() => Promise<SpotCheckChecker>);
   /** Loader for a caller-supplied checker (same as a function `checker`). */
   load?: () => Promise<SpotCheckChecker>;
+  /** Injectable monotonic clock. Tests supply a fake; production uses performance.now(). */
+  clock?: SpotCheckClock;
 }
 
 interface Listing {
@@ -53,6 +63,14 @@ interface Listing {
 }
 
 const DEFAULT_TIMEOUT_MS = 2000;
+const MAX_TIMEOUT_MS = 60_000;
+const SPOT_CHECK_TIMEOUT = 'spot-check timeout';
+
+const DEFAULT_CLOCK: SpotCheckClock = {
+  now: () => performance.now(),
+  setTimeout: (callback, ms) => setTimeout(callback, ms),
+  clearTimeout: (id) => { clearTimeout(id as ReturnType<typeof setTimeout>); },
+};
 const CAIP_BY_KEY = new Map<string, string>();
 const CAIP_BY_NAME = new Map<string, string>();
 const AMBIGUOUS_NAMES = new Set<string>();
@@ -77,25 +95,58 @@ function cloneRequirements(req: X402PaymentRequirements): X402PaymentRequirement
 
 function requireTimeoutMs(value: unknown): number {
   if (value === undefined) return DEFAULT_TIMEOUT_MS;
-  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
-    throw new Error('withSpotCheck: timeoutMs must be a finite number greater than 0');
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0 || value > MAX_TIMEOUT_MS) {
+    throw new Error('withSpotCheck: timeoutMs must be a finite number greater than 0 and at most 60000');
   }
   return value;
 }
 
-function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+function runUnderDeadline<T>(
+  work: (signal: AbortSignal) => Promise<T>,
+  timeoutMs: number,
+  clock: SpotCheckClock,
+): Promise<T> {
+  const deadlineAt = clock.now() + timeoutMs;
+  const controller = new AbortController();
   return new Promise<T>((resolve, reject) => {
-    if (ms <= 0) {
-      reject(new Error('spot-check timeout'));
+    let settled = false;
+    const remain = deadlineAt - clock.now();
+    if (remain <= 0) {
+      controller.abort();
+      reject(new Error(SPOT_CHECK_TIMEOUT));
       return;
     }
-    const t = setTimeout(() => reject(new Error('spot-check timeout')), ms);
-    p.then((v) => { clearTimeout(t); resolve(v); }, (e) => { clearTimeout(t); reject(e); });
+    const timer: { id?: unknown } = {};
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      clock.clearTimeout(timer.id);
+      fn();
+    };
+    timer.id = clock.setTimeout(() => {
+      finish(() => {
+        controller.abort();
+        reject(new Error(SPOT_CHECK_TIMEOUT));
+      });
+    }, remain);
+    Promise.resolve()
+      .then(() => work(controller.signal))
+      .then(
+        (value) => {
+          finish(() => {
+            if (clock.now() >= deadlineAt) {
+              controller.abort();
+              reject(new Error(SPOT_CHECK_TIMEOUT));
+              return;
+            }
+            resolve(value);
+          });
+        },
+        (err) => {
+          finish(() => reject(err));
+        },
+      );
   });
-}
-
-function withDeadline<T>(p: Promise<T>, deadline: number): Promise<T> {
-  return withTimeout(p, deadline - Date.now());
 }
 
 function nonEmptyString(value: unknown): value is string {
@@ -221,61 +272,58 @@ export function withSpotCheck(config: X402ClientConfig = {}, opts: SpotCheckOpti
   let loaded: Promise<SpotCheckChecker | null> | null = null;
   const getChecker = () => (loaded ??= load ? load().catch(() => null) : Promise.resolve(null));
   const timeoutMs = requireTimeoutMs(opts.timeoutMs);
+  const clock = opts.clock ?? DEFAULT_CLOCK;
   const userBefore = config.onBeforePayment;
 
   const onBeforePayment = async (req: X402PaymentRequirements, url: string): Promise<boolean> => {
     const snapshot = cloneRequirements(req);
-    const deadline = Date.now() + timeoutMs;
-    if (userBefore && (await userBefore(req, url)) === false) return false;
-    const check = { ...(opts.check ?? {}) };
-    if (!load && !hasListingConstraint(check)) return false;
-
     try {
-      const judgedNetwork = judgedSpotCheckNetwork(snapshot.network);
-      if (!judgedNetwork) return false;
+      return await runUnderDeadline(async (signal) => {
+        if (userBefore && (await userBefore(req, url)) === false) return false;
+        const check = { ...(opts.check ?? {}) };
+        if (!load && !hasListingConstraint(check)) return false;
 
-      const staticListing = listingFromFields(check);
-      let listing: Listing | undefined;
-      if (typeof check.expected === 'function') {
-        listing = await withDeadline(
-          listingFromExpected(
+        const judgedNetwork = judgedSpotCheckNetwork(snapshot.network);
+        if (!judgedNetwork) return false;
+
+        const staticListing = listingFromFields(check);
+        let listing: Listing | undefined;
+        if (typeof check.expected === 'function') {
+          listing = await listingFromExpected(
             check.expected as (
               url: string,
               req: X402PaymentRequirements,
             ) => Listing | undefined | null | Promise<Listing | undefined | null>,
             url,
             cloneRequirements(snapshot),
-          ),
-          deadline,
-        );
-        if (!listing || !listingHasField(listing)) return false;
-        if (listingHasField(staticListing)) {
-          listing = mergeListings(staticListing, listing);
-          if (!listing) return false;
+          );
+          if (!listing || !listingHasField(listing)) return false;
+          if (listingHasField(staticListing)) {
+            listing = mergeListings(staticListing, listing);
+            if (!listing) return false;
+          }
+        } else if (listingHasField(staticListing)) {
+          listing = staticListing;
         }
-      } else if (listingHasField(staticListing)) {
-        listing = staticListing;
-      }
 
-      if (listing && listingMismatch(snapshot, listing, judgedNetwork)) return false;
-      if (!load) {
-        await withDeadline(Promise.resolve(undefined), deadline);
-        return true;
-      }
+        if (listing && listingMismatch(snapshot, listing, judgedNetwork)) return false;
+        if (!load) return true;
 
-      const checker = await withDeadline(getChecker(), deadline);
-      if (!checker || typeof checker.checkBeforePay !== 'function') return false;
+        const checker = await getChecker();
+        if (!checker || typeof checker.checkBeforePay !== 'function') return false;
 
-      const { expected: _expected, ...rest } = check;
-      const accept = { ...snapshot, network: judgedNetwork };
-      const d = await withDeadline(Promise.resolve(checker.checkBeforePay(url, {
-        ...rest,
-        ...(listing?.price !== undefined && listing.price !== null ? { price: listing.price } : {}),
-        ...(listing && nonEmptyString(listing.payTo) ? { payTo: listing.payTo } : {}),
-        ...(listing && nonEmptyString(listing.network) ? { network: judgedNetwork } : {}),
-        accepts: [accept],
-      })), deadline);
-      return checkerAllows(d);
+        const { expected: _expected, ...rest } = check;
+        const accept = { ...snapshot, network: judgedNetwork };
+        const d = await checker.checkBeforePay(url, {
+          ...rest,
+          signal,
+          ...(listing?.price !== undefined && listing.price !== null ? { price: listing.price } : {}),
+          ...(listing && nonEmptyString(listing.payTo) ? { payTo: listing.payTo } : {}),
+          ...(listing && nonEmptyString(listing.network) ? { network: judgedNetwork } : {}),
+          accepts: [accept],
+        });
+        return checkerAllows(d);
+      }, timeoutMs, clock);
     } catch {
       return false;
     }

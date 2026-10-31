@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { X402Client } from '../client.js';
 import { judgedSpotCheckNetwork, withSpotCheck } from '../spotcheck.js';
-import type { SpotCheckOptions } from '../spotcheck.js';
+import type { SpotCheckClock, SpotCheckOptions } from '../spotcheck.js';
 import { USDC_ADDRESSES } from '../types.js';
 import type { X402PaymentRequired } from '../types.js';
 import { stubReceiptEvidence } from './receipt-evidence.js';
@@ -57,6 +57,35 @@ function mockMerchant(required: X402PaymentRequired = challenge()) {
 
 function executeSpy() {
   return vi.spyOn(X402Client.prototype as any, 'executePayment').mockResolvedValue({ txHash: TX_HASH });
+}
+
+function createFakeClock(): SpotCheckClock & { advance(ms: number): void; jump(ms: number): void } {
+  let nowMs = 0;
+  const timers = new Map<number, { at: number; fn: () => void }>();
+  let nextId = 1;
+  return {
+    now: () => nowMs,
+    setTimeout(fn, ms) {
+      const id = nextId++;
+      timers.set(id, { at: nowMs + ms, fn });
+      return id;
+    },
+    clearTimeout(id) {
+      timers.delete(id as number);
+    },
+    advance(ms) {
+      nowMs += ms;
+      for (const [id, timer] of [...timers]) {
+        if (timer.at <= nowMs) {
+          timers.delete(id);
+          timer.fn();
+        }
+      }
+    },
+    jump(ms) {
+      nowMs += ms;
+    },
+  };
 }
 
 async function pay(
@@ -234,14 +263,103 @@ describe('withSpotCheck fail-closed contract', () => {
   });
 
   it('fails closed when load and checkBeforePay together exceed one timeout budget', async () => {
-    const hang = (ms: number) => new Promise((resolve) => { setTimeout(resolve, ms); });
+    const clock = createFakeClock();
     const { result, spy } = await pay({
       timeoutMs: 40,
+      clock,
       load: async () => {
-        await hang(25);
-        return { checkBeforePay: async () => { await hang(25); return { allowed: true }; } };
+        clock.advance(25);
+        return {
+          checkBeforePay: async () => {
+            clock.advance(25);
+            return { allowed: true, verdict: 'allow' };
+          },
+        };
       },
     });
+    expect(result.status).toBe(402);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when a caller hook never returns and the deadline fires', async () => {
+    const clock = createFakeClock();
+    let hookStarted!: () => void;
+    const started = new Promise<void>((resolve) => { hookStarted = resolve; });
+    const payment = pay(
+      {
+        timeoutMs: 40,
+        clock,
+        checker: { checkBeforePay: async () => ({ allowed: true, verdict: 'allow' }) },
+      },
+      {
+        config: {
+          onBeforePayment: () => {
+            hookStarted();
+            return new Promise(() => undefined);
+          },
+        },
+      },
+    );
+    await started;
+    clock.advance(40);
+    const { result, spy } = await payment;
+    expect(result.status).toBe(402);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when a checker returns allow after the deadline', async () => {
+    const clock = createFakeClock();
+    const { result, spy } = await pay({
+      timeoutMs: 40,
+      clock,
+      checker: {
+        checkBeforePay: async () => {
+          clock.advance(50);
+          return { allowed: true, verdict: 'allow' };
+        },
+      },
+    });
+    expect(result.status).toBe(402);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when an explicit allow arrives after a blocked event loop', async () => {
+    const clock = createFakeClock();
+    const { result, spy } = await pay({
+      timeoutMs: 40,
+      clock,
+      checker: {
+        checkBeforePay: async () => {
+          clock.jump(50);
+          return { allowed: true, verdict: 'allow' };
+        },
+      },
+    });
+    expect(result.status).toBe(402);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('aborts the checker signal when the shared deadline fires', async () => {
+    const clock = createFakeClock();
+    let signal: AbortSignal | undefined;
+    let checkStarted!: () => void;
+    const started = new Promise<void>((resolve) => { checkStarted = resolve; });
+    const payment = pay({
+      timeoutMs: 40,
+      clock,
+      checker: {
+        checkBeforePay: (_url, opts) => {
+          signal = opts.signal as AbortSignal;
+          checkStarted();
+          return new Promise(() => undefined);
+        },
+      },
+    });
+    await started;
+    expect(signal?.aborted).toBe(false);
+    clock.advance(40);
+    const { result, spy } = await payment;
+    expect(signal?.aborted).toBe(true);
     expect(result.status).toBe(402);
     expect(spy).not.toHaveBeenCalled();
   });
@@ -306,16 +424,20 @@ describe('withSpotCheck fail-closed contract', () => {
     expect(spy).not.toHaveBeenCalled();
   });
 
-  it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY])(
+  it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY, 60_001, 2 ** 31])(
     'rejects invalid timeoutMs %s at wrap time',
     (timeoutMs) => {
       const spy = executeSpy();
       expect(() => withSpotCheck({}, { timeoutMs })).toThrow(
-        'withSpotCheck: timeoutMs must be a finite number greater than 0',
+        'withSpotCheck: timeoutMs must be a finite number greater than 0 and at most 60000',
       );
       expect(spy).not.toHaveBeenCalled();
     },
   );
+
+  it('accepts timeoutMs of 60000 at wrap time', () => {
+    expect(() => withSpotCheck({}, { timeoutMs: 60_000 })).not.toThrow();
+  });
 
   it('fails closed when listing-only expected exceeds the timeout budget', async () => {
     const hang = (ms: number) => new Promise((resolve) => { setTimeout(resolve, ms); });
@@ -371,6 +493,28 @@ describe('withSpotCheck fail-closed contract', () => {
     expect(spy).not.toHaveBeenCalled();
   });
 
+  it('fails closed when static network conflicts with expected network', async () => {
+    const { result, spy } = await pay({
+      check: {
+        network: 'ethereum:1',
+        expected: () => ({ payTo: PAY_TO, network: 'base:8453', price: AMOUNT }),
+      },
+    });
+    expect(result.status).toBe(402);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when static price conflicts with expected price', async () => {
+    const { result, spy } = await pay({
+      check: {
+        price: '2000000',
+        expected: () => ({ payTo: PAY_TO, network: 'base:8453', price: AMOUNT }),
+      },
+    });
+    expect(result.status).toBe(402);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
   it('does not patch X402Client after a wrapped payment or skip a later refuse', async () => {
     mockMerchant();
     const spy = executeSpy();
@@ -392,8 +536,8 @@ describe('withSpotCheck fail-closed contract', () => {
   });
 
   it('exposes no fail-open or prePay skip flag', () => {
-    const keys: Array<keyof SpotCheckOptions> = ['check', 'timeoutMs', 'checker', 'load'];
-    expect(keys).toHaveLength(4);
+    const keys: Array<keyof SpotCheckOptions> = ['check', 'timeoutMs', 'checker', 'load', 'clock'];
+    expect(keys).toHaveLength(5);
     expect(withSpotCheck.toString()).not.toMatch(/failOpen|prePay/);
   });
 

@@ -102,6 +102,7 @@ export type {
   X402ClientConfig,
   X402Fetch,
   SpotCheckChecker,
+  SpotCheckClock,
   SpotCheckDecision,
   SpotCheckOptions,
 } from './x402/index.js';
