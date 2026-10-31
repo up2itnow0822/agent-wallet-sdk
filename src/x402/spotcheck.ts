@@ -3,9 +3,13 @@
  * Fail-closed pre-pay listing and checker dispatch for x402 clients.
  *
  * withSpotCheck(config, opts) returns a new X402ClientConfig whose
- * onBeforePayment first runs the caller's hook, then allows payment only
- * after an explicit listing match and/or checker allow. A missing checker,
- * empty listing, mismatch, throw, timeout, or unrecognized network declines.
+ * onBeforePayment snapshots the selected terms, then runs the caller's hook
+ * on a separate object. Payment proceeds only after an explicit listing match
+ * and/or checker allow against that snapshot. A missing checker, empty
+ * listing, mismatch, throw, timeout, or unrecognized network declines.
+ *
+ * A checker allows only when allowed === true and verdict === 'allow'.
+ * Static listing fields apply together with expected(); conflicts refuse.
  *
  * Nothing is imported at runtime. There is no fail-open path and no flag
  * that defaults to skipping the check.
@@ -13,10 +17,11 @@
 import { USDC_ADDRESSES } from './types.js';
 import type { X402ClientConfig, X402PaymentRequirements } from './types.js';
 
-const SPOT_CHECK_VERDICT_SKIP = 'skip';
+const SPOT_CHECK_VERDICT_ALLOW = 'allow';
 
 export interface SpotCheckDecision {
   allowed: boolean;
+  /** Must be `allow` (with allowed === true) for a checker to authorize payment. */
   verdict?: string;
   reason?: string;
   reason_code?: string;
@@ -66,6 +71,18 @@ for (const key of Object.keys(USDC_ADDRESSES)) {
   }
 }
 
+function cloneRequirements(req: X402PaymentRequirements): X402PaymentRequirements {
+  return JSON.parse(JSON.stringify(req)) as X402PaymentRequirements;
+}
+
+function requireTimeoutMs(value: unknown): number {
+  if (value === undefined) return DEFAULT_TIMEOUT_MS;
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+    throw new Error('withSpotCheck: timeoutMs must be a finite number greater than 0');
+  }
+  return value;
+}
+
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     if (ms <= 0) {
@@ -104,7 +121,7 @@ function hasListingConstraint(check: Record<string, unknown>): boolean {
 }
 
 function checkerAllows(d: SpotCheckDecision | null | undefined): boolean {
-  return !!d && d.allowed === true && d.verdict !== SPOT_CHECK_VERDICT_SKIP;
+  return !!d && d.allowed === true && d.verdict === SPOT_CHECK_VERDICT_ALLOW;
 }
 
 function resolveChecker(opts: SpotCheckOptions): (() => Promise<SpotCheckChecker>) | undefined {
@@ -139,6 +156,37 @@ function atomicEqual(listingPrice: unknown, amount: string): boolean {
   }
 }
 
+function listingsConflict(left: Listing, right: Listing): boolean {
+  if (nonEmptyString(left.payTo) && nonEmptyString(right.payTo)
+    && left.payTo.toLowerCase() !== right.payTo.toLowerCase()) {
+    return true;
+  }
+  if (nonEmptyString(left.network) && nonEmptyString(right.network)) {
+    const want = judgedSpotCheckNetwork(left.network);
+    const got = judgedSpotCheckNetwork(right.network);
+    if (!want || !got || want !== got) return true;
+  }
+  if (left.price !== undefined && left.price !== null
+    && right.price !== undefined && right.price !== null) {
+    try {
+      const a = typeof left.price === 'bigint' ? left.price : BigInt(String(left.price).trim());
+      const b = typeof right.price === 'bigint' ? right.price : BigInt(String(right.price).trim());
+      return a !== b;
+    } catch {
+      return true;
+    }
+  }
+  return false;
+}
+
+function mergeListings(staticListing: Listing, expectedListing: Listing): Listing | undefined {
+  if (listingsConflict(staticListing, expectedListing)) return undefined;
+  return {
+    ...expectedListing,
+    ...listingFromFields(staticListing),
+  };
+}
+
 function listingMismatch(
   req: X402PaymentRequirements,
   listing: Listing,
@@ -164,7 +212,7 @@ async function listingFromExpected(
 ): Promise<Listing | undefined> {
   const listing = await expected(url, req);
   if (!listing || typeof listing !== 'object') return undefined;
-  return listing;
+  return listingFromFields(listing);
 }
 
 /** Wrap an X402ClientConfig with fail-closed spot-check hooks. The input config is not mutated. */
@@ -172,19 +220,21 @@ export function withSpotCheck(config: X402ClientConfig = {}, opts: SpotCheckOpti
   const load = resolveChecker(opts);
   let loaded: Promise<SpotCheckChecker | null> | null = null;
   const getChecker = () => (loaded ??= load ? load().catch(() => null) : Promise.resolve(null));
-  const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const timeoutMs = requireTimeoutMs(opts.timeoutMs);
   const userBefore = config.onBeforePayment;
 
   const onBeforePayment = async (req: X402PaymentRequirements, url: string): Promise<boolean> => {
+    const snapshot = cloneRequirements(req);
+    const deadline = Date.now() + timeoutMs;
     if (userBefore && (await userBefore(req, url)) === false) return false;
     const check = { ...(opts.check ?? {}) };
     if (!load && !hasListingConstraint(check)) return false;
 
-    const deadline = Date.now() + timeoutMs;
     try {
-      const judgedNetwork = judgedSpotCheckNetwork(req.network);
+      const judgedNetwork = judgedSpotCheckNetwork(snapshot.network);
       if (!judgedNetwork) return false;
 
+      const staticListing = listingFromFields(check);
       let listing: Listing | undefined;
       if (typeof check.expected === 'function') {
         listing = await withDeadline(
@@ -194,24 +244,30 @@ export function withSpotCheck(config: X402ClientConfig = {}, opts: SpotCheckOpti
               req: X402PaymentRequirements,
             ) => Listing | undefined | null | Promise<Listing | undefined | null>,
             url,
-            req,
+            cloneRequirements(snapshot),
           ),
           deadline,
         );
         if (!listing || !listingHasField(listing)) return false;
-      } else {
-        const staticListing = listingFromFields(check);
-        if (listingHasField(staticListing)) listing = staticListing;
+        if (listingHasField(staticListing)) {
+          listing = mergeListings(staticListing, listing);
+          if (!listing) return false;
+        }
+      } else if (listingHasField(staticListing)) {
+        listing = staticListing;
       }
 
-      if (listing && listingMismatch(req, listing, judgedNetwork)) return false;
-      if (!load) return true;
+      if (listing && listingMismatch(snapshot, listing, judgedNetwork)) return false;
+      if (!load) {
+        await withDeadline(Promise.resolve(undefined), deadline);
+        return true;
+      }
 
       const checker = await withDeadline(getChecker(), deadline);
       if (!checker || typeof checker.checkBeforePay !== 'function') return false;
 
       const { expected: _expected, ...rest } = check;
-      const accept = { ...req, network: judgedNetwork };
+      const accept = { ...snapshot, network: judgedNetwork };
       const d = await withDeadline(Promise.resolve(checker.checkBeforePay(url, {
         ...rest,
         ...(listing?.price !== undefined && listing.price !== null ? { price: listing.price } : {}),

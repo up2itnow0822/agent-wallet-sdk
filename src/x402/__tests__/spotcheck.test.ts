@@ -91,12 +91,20 @@ describe('withSpotCheck fail-closed contract', () => {
     expect(spy).toHaveBeenCalledTimes(1);
   });
 
-  it('pays when the supplied checker returns allowed true', async () => {
+  it('pays when the supplied checker returns an explicit allow', async () => {
     const { result, spy } = await pay({
-      checker: { checkBeforePay: async () => ({ allowed: true }) },
+      checker: { checkBeforePay: async () => ({ allowed: true, verdict: 'allow' }) },
     });
     expect(result.status).toBe(200);
     expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails closed when the checker returns allowed true without a verdict', async () => {
+    const { result, spy } = await pay({
+      checker: { checkBeforePay: async () => ({ allowed: true }) },
+    });
+    expect(result.status).toBe(402);
+    expect(spy).not.toHaveBeenCalled();
   });
 
   it('fails closed when the checker returns a non-allow', async () => {
@@ -107,13 +115,16 @@ describe('withSpotCheck fail-closed contract', () => {
     expect(spy).not.toHaveBeenCalled();
   });
 
-  it('fails closed when the checker returns allowed true with verdict skip', async () => {
-    const { result, spy } = await pay({
-      checker: { checkBeforePay: async () => ({ allowed: true, verdict: 'skip' }) },
-    });
-    expect(result.status).toBe(402);
-    expect(spy).not.toHaveBeenCalled();
-  });
+  it.each(['deny', 'error', 'unknown', 'skip'] as const)(
+    'fails closed when the checker returns allowed true with verdict %s',
+    async (verdict) => {
+      const { result, spy } = await pay({
+        checker: { checkBeforePay: async () => ({ allowed: true, verdict }) },
+      });
+      expect(result.status).toBe(402);
+      expect(spy).not.toHaveBeenCalled();
+    },
+  );
 
   it('pays a listed base-sepolia:84532 requirement', async () => {
     const required = challenge({
@@ -161,7 +172,7 @@ describe('withSpotCheck fail-closed contract', () => {
   it('fails closed when listing payTo mismatches even if the checker allows', async () => {
     const { result, spy } = await pay({
       check: { payTo: OTHER_PAY_TO, network: 'base:8453', price: AMOUNT },
-      checker: { checkBeforePay: async () => ({ allowed: true }) },
+      checker: { checkBeforePay: async () => ({ allowed: true, verdict: 'allow' }) },
     });
     expect(result.status).toBe(402);
     expect(spy).not.toHaveBeenCalled();
@@ -236,7 +247,7 @@ describe('withSpotCheck fail-closed contract', () => {
   });
 
   it('does not invoke the checker when the caller onBeforePayment returns false', async () => {
-    const checkBeforePay = vi.fn(async () => ({ allowed: true }));
+    const checkBeforePay = vi.fn(async () => ({ allowed: true, verdict: 'allow' }));
     const { result, spy } = await pay(
       { checker: { checkBeforePay } },
       { config: { onBeforePayment: () => false } },
@@ -266,14 +277,118 @@ describe('withSpotCheck fail-closed contract', () => {
   });
 
   it('fails closed on an unrecognized network', async () => {
+    const spy = executeSpy();
     const hook = withSpotCheck({}, {
-      checker: { checkBeforePay: async () => ({ allowed: true }) },
+      checker: { checkBeforePay: async () => ({ allowed: true, verdict: 'allow' }) },
     }).onBeforePayment;
     const allowed = await hook!(
       challenge({ network: 'not-a-chain' }).accepts[0],
       URL,
     );
     expect(allowed).toBe(false);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when a hook rewrites terms that would otherwise match the listing', async () => {
+    const { result, spy } = await pay({
+      check: { payTo: PAY_TO, network: 'base:8453', price: AMOUNT },
+    }, {
+      config: {
+        onBeforePayment: (req) => {
+          req.amount = AMOUNT;
+          req.payTo = PAY_TO;
+          return true;
+        },
+      },
+      required: challenge({ amount: '9999999' }),
+    });
+    expect(result.status).toBe(402);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY])(
+    'rejects invalid timeoutMs %s at wrap time',
+    (timeoutMs) => {
+      const spy = executeSpy();
+      expect(() => withSpotCheck({}, { timeoutMs })).toThrow(
+        'withSpotCheck: timeoutMs must be a finite number greater than 0',
+      );
+      expect(spy).not.toHaveBeenCalled();
+    },
+  );
+
+  it('fails closed when listing-only expected exceeds the timeout budget', async () => {
+    const hang = (ms: number) => new Promise((resolve) => { setTimeout(resolve, ms); });
+    const { result, spy } = await pay({
+      timeoutMs: 40,
+      check: {
+        expected: async () => {
+          await hang(50);
+          return { payTo: PAY_TO, network: 'base:8453', price: AMOUNT };
+        },
+      },
+    });
+    expect(result.status).toBe(402);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when a slow caller hook exhausts the listing-only deadline', async () => {
+    const hang = (ms: number) => new Promise((resolve) => { setTimeout(resolve, ms); });
+    const { result, spy } = await pay({
+      timeoutMs: 40,
+      check: { payTo: PAY_TO, network: 'base:8453', price: AMOUNT },
+    }, {
+      config: {
+        onBeforePayment: async () => {
+          await hang(50);
+          return true;
+        },
+      },
+    });
+    expect(result.status).toBe(402);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('pays when static listing fields and expected listings agree', async () => {
+    const { result, spy } = await pay({
+      check: {
+        payTo: PAY_TO,
+        expected: () => ({ network: 'base:8453', price: AMOUNT }),
+      },
+    });
+    expect(result.status).toBe(200);
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails closed when static payTo conflicts with expected payTo', async () => {
+    const { result, spy } = await pay({
+      check: {
+        payTo: OTHER_PAY_TO,
+        expected: () => ({ payTo: PAY_TO, network: 'base:8453', price: AMOUNT }),
+      },
+    });
+    expect(result.status).toBe(402);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('does not patch X402Client after a wrapped payment or skip a later refuse', async () => {
+    mockMerchant();
+    const spy = executeSpy();
+    const fetchBefore = X402Client.prototype.fetch;
+    const settleBefore = X402Client.prototype.settle402AndRetry;
+    const client = new X402Client(walletOnChain(8453), withSpotCheck({}, {
+      check: { payTo: PAY_TO, network: 'base:8453', price: AMOUNT },
+    }));
+    const first = await client.fetch(URL);
+    expect(first.status).toBe(200);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(X402Client.prototype.fetch).toBe(fetchBefore);
+    expect(X402Client.prototype.settle402AndRetry).toBe(settleBefore);
+
+    mockMerchant(challenge({ payTo: OTHER_PAY_TO }));
+    const second = await client.fetch(URL);
+    expect(second.status).toBe(402);
+    expect(spy).toHaveBeenCalledTimes(1);
   });
 
   it('exposes no fail-open or prePay skip flag', () => {

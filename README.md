@@ -98,7 +98,7 @@ peer dependency, version 14 or later:
 npm install @stellar/stellar-sdk
 ```
 
-x402 auto-pay can wrap client config with `withSpotCheck`. When that wrapper is used, a missing, throwing, timed-out, or rejecting check refuses the payment (unpaid 402, no transfer). Unconfigured clients keep the existing auto-pay path. No extra peer is required.
+x402 auto-pay can wrap client config with `withSpotCheck`. When that wrapper is used, a missing, throwing, timed-out, or rejecting check refuses the payment (unpaid 402, no transfer). Unconfigured clients keep the existing auto-pay path. The wrapper is opt-in and recommended for production. No extra peer is required.
 
 ## Connect to an existing smart wallet
 
