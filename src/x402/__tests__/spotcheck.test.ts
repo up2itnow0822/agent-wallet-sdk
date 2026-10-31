@@ -59,7 +59,15 @@ function executeSpy() {
   return vi.spyOn(X402Client.prototype as any, 'executePayment').mockResolvedValue({ txHash: TX_HASH });
 }
 
-async function pay(opts: SpotCheckOptions, config = {}, chainId = 8453, required?: X402PaymentRequired) {
+async function pay(
+  opts: SpotCheckOptions,
+  extras: {
+    config?: ConstructorParameters<typeof X402Client>[1];
+    chainId?: number;
+    required?: X402PaymentRequired;
+  } = {},
+) {
+  const { config = {}, chainId = 8453, required } = extras;
   mockMerchant(required ?? challenge());
   const spy = executeSpy();
   const client = new X402Client(walletOnChain(chainId), withSpotCheck(config, opts));
@@ -114,7 +122,14 @@ describe('withSpotCheck fail-closed contract', () => {
     });
     const { result, spy } = await pay({
       check: { payTo: PAY_TO, network: 'base-sepolia:84532', price: AMOUNT },
-    }, { supportedNetworks: ['base-sepolia:84532'], supportedAssets: { 'base-sepolia:84532': [USDC_ADDRESSES['base-sepolia:84532']] } }, 84532, required);
+    }, {
+      config: {
+        supportedNetworks: ['base-sepolia:84532'],
+        supportedAssets: { 'base-sepolia:84532': [USDC_ADDRESSES['base-sepolia:84532']] },
+      },
+      chainId: 84532,
+      required,
+    });
     expect(result.status).toBe(200);
     expect(spy).toHaveBeenCalledTimes(1);
   });
@@ -147,6 +162,23 @@ describe('withSpotCheck fail-closed contract', () => {
     const { result, spy } = await pay({
       check: { payTo: OTHER_PAY_TO, network: 'base:8453', price: AMOUNT },
       checker: { checkBeforePay: async () => ({ allowed: true }) },
+    });
+    expect(result.status).toBe(402);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when listing matches but the checker returns a non-allow', async () => {
+    const { result, spy } = await pay({
+      check: { payTo: PAY_TO, network: 'base:8453', price: AMOUNT },
+      checker: { checkBeforePay: async () => ({ allowed: false }) },
+    });
+    expect(result.status).toBe(402);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when checkBeforePay returns null', async () => {
+    const { result, spy } = await pay({
+      checker: { checkBeforePay: async () => null },
     });
     expect(result.status).toBe(402);
     expect(spy).not.toHaveBeenCalled();
@@ -207,7 +239,7 @@ describe('withSpotCheck fail-closed contract', () => {
     const checkBeforePay = vi.fn(async () => ({ allowed: true }));
     const { result, spy } = await pay(
       { checker: { checkBeforePay } },
-      { onBeforePayment: () => false },
+      { config: { onBeforePayment: () => false } },
     );
     expect(result.status).toBe(402);
     expect(spy).not.toHaveBeenCalled();
@@ -221,7 +253,14 @@ describe('withSpotCheck fail-closed contract', () => {
     });
     const { result, spy } = await pay({
       check: { payTo: PAY_TO, network: 'ethereum:1', price: AMOUNT },
-    }, { supportedNetworks: ['ethereum:1'], supportedAssets: { 'ethereum:1': [USDC_ADDRESSES['ethereum:1']] } }, 1, required);
+    }, {
+      config: {
+        supportedNetworks: ['ethereum:1'],
+        supportedAssets: { 'ethereum:1': [USDC_ADDRESSES['ethereum:1']] },
+      },
+      chainId: 1,
+      required,
+    });
     expect(result.status).toBe(200);
     expect(spy).toHaveBeenCalledTimes(1);
   });
@@ -239,7 +278,7 @@ describe('withSpotCheck fail-closed contract', () => {
 
   it('exposes no fail-open or prePay skip flag', () => {
     const keys: Array<keyof SpotCheckOptions> = ['check', 'timeoutMs', 'checker', 'load'];
-    expect(keys).toEqual(expect.arrayContaining(['check', 'timeoutMs', 'checker', 'load']));
+    expect(keys).toHaveLength(4);
     expect(withSpotCheck.toString()).not.toMatch(/failOpen|prePay/);
   });
 
