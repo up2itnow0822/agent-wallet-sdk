@@ -440,12 +440,13 @@ describe('withSpotCheck fail-closed contract', () => {
   });
 
   it('fails closed when listing-only expected exceeds the timeout budget', async () => {
-    const hang = (ms: number) => new Promise((resolve) => { setTimeout(resolve, ms); });
+    const clock = createFakeClock();
     const { result, spy } = await pay({
       timeoutMs: 40,
+      clock,
       check: {
         expected: async () => {
-          await hang(50);
+          clock.advance(50);
           return { payTo: PAY_TO, network: 'base:8453', price: AMOUNT };
         },
       },
@@ -455,14 +456,15 @@ describe('withSpotCheck fail-closed contract', () => {
   });
 
   it('fails closed when a slow caller hook exhausts the listing-only deadline', async () => {
-    const hang = (ms: number) => new Promise((resolve) => { setTimeout(resolve, ms); });
+    const clock = createFakeClock();
     const { result, spy } = await pay({
       timeoutMs: 40,
+      clock,
       check: { payTo: PAY_TO, network: 'base:8453', price: AMOUNT },
     }, {
       config: {
         onBeforePayment: async () => {
-          await hang(50);
+          clock.advance(50);
           return true;
         },
       },
