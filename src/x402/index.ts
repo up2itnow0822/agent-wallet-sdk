@@ -47,6 +47,8 @@ export {
 } from './fee.js';
 export { createX402Client, createX402Fetch, wrapWithX402 } from './middleware.js';
 export type { X402Fetch } from './middleware.js';
+export { judgedSpotCheckNetwork, withSpotCheck } from './spotcheck.js';
+export type { SpotCheckChecker, SpotCheckClock, SpotCheckDecision, SpotCheckOptions } from './spotcheck.js';
 export type {
   X402PaymentRequired,
   X402PaymentRequirements,

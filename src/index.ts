@@ -59,6 +59,8 @@ export {
   createX402Client,
   createX402Fetch,
   wrapWithX402,
+  judgedSpotCheckNetwork,
+  withSpotCheck,
   USDC_ADDRESSES,
   DEFAULT_SUPPORTED_NETWORKS,
   X402_PROTOCOL_FEE_BPS,
@@ -99,6 +101,10 @@ export type {
   X402TransactionLog,
   X402ClientConfig,
   X402Fetch,
+  SpotCheckChecker,
+  SpotCheckClock,
+  SpotCheckDecision,
+  SpotCheckOptions,
 } from './x402/index.js';
 
 const CHAINS: Record<string, Chain> = {
