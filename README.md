@@ -1,5 +1,7 @@
 # AgentWallet SDK
 
+Paused for security maintenance. Do not use in production.
+
 [![npm](https://img.shields.io/npm/v/agentwallet-sdk?style=flat-square)](https://www.npmjs.com/package/agentwallet-sdk)
 [![CI](https://github.com/up2itnow0822/agent-wallet-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/up2itnow0822/agent-wallet-sdk/actions/workflows/ci.yml)
 

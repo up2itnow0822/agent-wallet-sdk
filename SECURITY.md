@@ -1,5 +1,7 @@
 # Security policy — agentwallet-sdk
 
+Paused for security maintenance. Do not use in production.
+
 ## Review scope
 
 Security fixes in this repository target the current 8.x source. Published
