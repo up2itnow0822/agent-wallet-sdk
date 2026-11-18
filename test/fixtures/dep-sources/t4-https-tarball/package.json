@@ -1,0 +1,8 @@
+{
+  "name": "dep-sources-fixture",
+  "version": "0.0.0",
+  "private": true,
+  "dependencies": {
+    "foo": "https://example.com/foo/-/foo-1.0.0.tgz"
+  }
+}

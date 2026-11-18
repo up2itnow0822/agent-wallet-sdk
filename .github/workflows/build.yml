@@ -25,7 +25,10 @@ jobs:
         with:
           node-version: "22"
           cache: npm
+      - name: Check dependency sources
+        run: node scripts/check-dependency-sources.mjs
       - run: npm ci --ignore-scripts
+      - run: npm run security
       - run: npm run build
       - run: npm test
       - run: npm run lint
