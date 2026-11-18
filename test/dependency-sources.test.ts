@@ -144,6 +144,17 @@ describe('dependency source check (T0–T10, replay 79592d6)', () => {
     expect(result.stderr).toContain('F1:');
     expect(result.stderr).toContain('dependencies.picomatch');
   });
+
+  it.each([
+    ['p7', 'dependencies.foo'],
+    ['dot-path', 'dependencies.foo'],
+    ['abs-path', 'dependencies.foo'],
+  ] as const)('%s: path spec fails as non-registry', (name, key) => {
+    const result = fixture(name);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('F2:');
+    expect(result.stderr).toContain(key);
+  });
 });
 
 describe('dependency source check wiring', () => {
