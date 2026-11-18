@@ -130,6 +130,20 @@ describe('dependency source check (T0–T10, replay 79592d6)', () => {
     expect(result.stderr).toContain('F4:');
     expect(result.stderr).toContain('node_modules/picomatch');
   });
+
+  it('p1: lockfile-only resolved alias fails F4', () => {
+    const result = fixture('p1-lockfile-only-alias');
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('F4:');
+    expect(result.stderr).toContain('node_modules/picomatch');
+  });
+
+  it('p5: root lock npm: alias fails', () => {
+    const result = fixture('p5-root-lock-npm-alias');
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('F1:');
+    expect(result.stderr).toContain('dependencies.picomatch');
+  });
 });
 
 describe('dependency source check wiring', () => {

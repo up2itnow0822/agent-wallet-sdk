@@ -14,6 +14,12 @@ const MANIFEST_FIELDS = [
   'peerDependencies',
   'overrides',
 ];
+const LOCK_SPEC_FIELDS = [
+  'dependencies',
+  'devDependencies',
+  'optionalDependencies',
+  'peerDependencies',
+];
 const NPMJS_HOST = 'registry.npmjs.org';
 const ALLOWLIST_REL = 'scripts/dependency-sources-allowlist.json';
 
@@ -175,11 +181,31 @@ function nameFromNodeModulesPath(lockKey) {
   const index = lockKey.lastIndexOf(marker);
   if (index === -1) return null;
   const rest = lockKey.slice(index + marker.length);
+  if (!rest) return null;
   if (rest.startsWith('@')) {
     const [scope, name] = rest.split('/');
     return name ? `${scope}/${name}` : rest;
   }
   return rest.split('/')[0] ?? rest;
+}
+
+function resolvedPathnameMatchesImplied(resolved, implied) {
+  try {
+    const pathname = decodeURIComponent(new URL(resolved).pathname);
+    return pathname.startsWith(`/${implied}/-/`);
+  } catch {
+    return false;
+  }
+}
+
+function isAbsoluteUrl(value) {
+  if (typeof value !== 'string' || value.length === 0) return false;
+  try {
+    const url = new URL(value);
+    return Boolean(url.protocol);
+  } catch {
+    return false;
+  }
 }
 
 function parseNpmrc(text) {
@@ -212,21 +238,25 @@ function note(code, id, detail) {
   findings.push({ code, id, detail });
 }
 
+function noteSpecs(container, fields, idPrefix) {
+  for (const field of fields) {
+    if (!(field in container)) continue;
+    const specs = [];
+    walkStringSpecs(container[field], field, specs);
+    for (const { key, spec } of specs) {
+      const code = classifyManifestSpec(spec);
+      if (code === 'F1') note('F1', `${idPrefix}${key}`, `${key} uses npm: alias`);
+      else if (code === 'F2') note('F2', `${idPrefix}${key}`, `${key} uses a non-registry spec`);
+    }
+  }
+}
+
 const packageJsonPath = join(root, 'package.json');
 if (!existsSync(packageJsonPath)) failClosed('F7: package.json is missing');
 const manifest = parseJsonFile(packageJsonPath, 'package.json');
 const globs = workspaceGlobs(manifest);
 
-for (const field of MANIFEST_FIELDS) {
-  if (!(field in manifest)) continue;
-  const specs = [];
-  walkStringSpecs(manifest[field], field, specs);
-  for (const { key, spec } of specs) {
-    const code = classifyManifestSpec(spec);
-    if (code === 'F1') note('F1', `package.json:${key}`, `${key} uses npm: alias`);
-    else if (code === 'F2') note('F2', `package.json:${key}`, `${key} uses a non-registry spec`);
-  }
-}
+noteSpecs(manifest, MANIFEST_FIELDS, 'package.json:');
 
 const lockPath = join(root, 'package-lock.json');
 if (!existsSync(lockPath)) {
@@ -246,7 +276,10 @@ if (!existsSync(lockPath)) {
         note('F7', `package-lock.json:${lockKey}`, `${lockKey} is not an object`);
         continue;
       }
-      if (lockKey === '') continue;
+      if (lockKey === '') {
+        noteSpecs(meta, LOCK_SPEC_FIELDS, 'package-lock.json:');
+        continue;
+      }
 
       const workspaceRecord = isDeclaredWorkspacePath(lockKey, globs);
       const workspaceLink =
@@ -266,7 +299,12 @@ if (!existsSync(lockPath)) {
       }
 
       const implied = nameFromNodeModulesPath(lockKey);
-      if (implied && typeof meta.name === 'string' && meta.name.length > 0 && meta.name !== implied) {
+      if (!implied) continue;
+      const nameFieldMismatch =
+        typeof meta.name === 'string' && meta.name.length > 0 && meta.name !== implied;
+      const resolvedNameMismatch =
+        !workspaceExempt && isAbsoluteUrl(meta.resolved) && !resolvedPathnameMatchesImplied(meta.resolved, implied);
+      if (nameFieldMismatch || resolvedNameMismatch) {
         note('F4', `package-lock.json:${lockKey}:name`, `${lockKey} name`);
       }
     }
