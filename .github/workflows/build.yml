@@ -29,4 +29,4 @@ jobs:
       - run: npm run build
       - run: npm test
       - run: npm run lint
-      - run: npm audit --audit-level=high
+      - run: node scripts/security-check.mjs

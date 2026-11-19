@@ -1,0 +1,45 @@
+{
+  "auditReportVersion": 2,
+  "vulnerabilities": {
+    "minimatch": {
+      "name": "minimatch",
+      "severity": "moderate",
+      "isDirect": false,
+      "via": [
+        {
+          "source": 1244623,
+          "name": "minimatch",
+          "dependency": "minimatch",
+          "title": "minimatch has potential denial of service via globparts amplification",
+          "url": "https://github.com/advisories/GHSA-g3hv-75wg-m249",
+          "severity": "moderate",
+          "range": ">=7.0.0 <11.0.1"
+        }
+      ],
+      "effects": ["eslint"],
+      "range": "7.0.0 - 11.0.0",
+      "nodes": ["node_modules/minimatch"],
+      "fixAvailable": true
+    },
+    "eslint": {
+      "name": "eslint",
+      "severity": "moderate",
+      "isDirect": true,
+      "via": ["minimatch"],
+      "effects": [],
+      "range": "*",
+      "nodes": ["node_modules/eslint"],
+      "fixAvailable": true
+    }
+  },
+  "metadata": {
+    "vulnerabilities": {
+      "info": 0,
+      "low": 0,
+      "moderate": 2,
+      "high": 0,
+      "critical": 0,
+      "total": 2
+    }
+  }
+}
