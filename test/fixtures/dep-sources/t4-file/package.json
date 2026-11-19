@@ -1,0 +1,8 @@
+{
+  "name": "dep-sources-fixture",
+  "version": "0.0.0",
+  "private": true,
+  "dependencies": {
+    "foo": "file:../x"
+  }
+}

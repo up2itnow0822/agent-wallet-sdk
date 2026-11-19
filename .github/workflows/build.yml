@@ -25,7 +25,20 @@ jobs:
         with:
           node-version: "22"
           cache: npm
+      - name: Reject unvalidated lockfiles
+        run: |
+          if [ -f pnpm-lock.yaml ]; then
+            echo "F7: pnpm-lock.yaml is present and not validated" >&2
+            exit 1
+          fi
+          if [ -f yarn.lock ]; then
+            echo "F7: yarn.lock is present and not validated" >&2
+            exit 1
+          fi
+      - name: Check dependency sources
+        run: node scripts/check-dependency-sources.mjs
       - run: npm ci --ignore-scripts
+      - run: npm run security
       - run: npm run build
       - run: npm test
       - run: npm run lint

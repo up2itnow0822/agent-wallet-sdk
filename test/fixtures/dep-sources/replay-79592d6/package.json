@@ -1,0 +1,9 @@
+{
+  "name": "dep-sources-fixture",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Reproduces up2itnow0822/agentpay-mcp@79592d6 picomatch npm: override and node_modules/picomatch name mismatch",
+  "overrides": {
+    "picomatch": "npm:@ryotsu/picomatch@4.0.7-a"
+  }
+}

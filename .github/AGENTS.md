@@ -6,7 +6,11 @@ Maintainers own the verification workflows for the SDK.
 
 ## Local contracts
 
-- The `build` and `verify` jobs run build, tests, lint and dependency audit.
+- The `build` and `verify` jobs reject unvalidated `pnpm-lock.yaml` /
+  `yarn.lock`, run the dependency-source check before `npm ci`, then
+  `npm run security`, then build, tests, lint and the existing dependency
+  audit. They never fall back to a plain install. The source check must not
+  skip or replace `npm audit`.
 - PR-controlled filenames, bodies and metadata are data, never executable
   shell or JavaScript interpolation. Pass commit SHAs through validated inputs.
 - PR code runs with read-only permissions and checkout credentials removed.

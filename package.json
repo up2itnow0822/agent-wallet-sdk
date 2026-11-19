@@ -16,7 +16,8 @@
     "test": "vitest run",
     "deploy": "wrangler deploy",
     "preview": "wrangler dev",
-    "lint": "eslint src/"
+    "lint": "eslint src/",
+    "security": "node scripts/check-dependency-sources.mjs"
   },
   "keywords": [
     "agent-wallet",
