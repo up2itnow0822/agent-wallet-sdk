@@ -1,0 +1,35 @@
+{
+  "auditReportVersion": 2,
+  "vulnerabilities": {
+    "pkg-a": {
+      "name": "pkg-a",
+      "severity": "high",
+      "isDirect": false,
+      "via": ["pkg-b"],
+      "effects": ["pkg-b"],
+      "range": "*",
+      "nodes": ["node_modules/pkg-a"],
+      "fixAvailable": false
+    },
+    "pkg-b": {
+      "name": "pkg-b",
+      "severity": "high",
+      "isDirect": false,
+      "via": ["pkg-a"],
+      "effects": ["pkg-a"],
+      "range": "*",
+      "nodes": ["node_modules/pkg-b"],
+      "fixAvailable": false
+    }
+  },
+  "metadata": {
+    "vulnerabilities": {
+      "info": 0,
+      "low": 0,
+      "moderate": 0,
+      "high": 2,
+      "critical": 0,
+      "total": 2
+    }
+  }
+}

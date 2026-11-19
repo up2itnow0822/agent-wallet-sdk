@@ -1,0 +1,17 @@
+{
+  "ghsa_id": "GHSA-fc5q-39xc-vjpf",
+  "cve_id": "CVE-2026-112366",
+  "severity": "high",
+  "withdrawn_at": null,
+  "vulnerabilities": [
+    {
+      "package": {
+        "ecosystem": "npm",
+        "name": "picomatch"
+      },
+      "vulnerable_version_range": "<= 4.0.7",
+      "first_patched_version": null,
+      "vulnerable_functions": []
+    }
+  ]
+}

@@ -1,0 +1,55 @@
+{
+  "auditReportVersion": 2,
+  "vulnerabilities": {
+    "picomatch": {
+      "name": "picomatch",
+      "severity": "high",
+      "isDirect": false,
+      "via": [
+        {
+          "source": 1110944,
+          "name": "picomatch",
+          "dependency": "picomatch",
+          "title": "picomatch ReDoS via single-branch repeated extglobs",
+          "url": "https://github.com/advisories/GHSA-fc5q-39xc-vjpf",
+          "severity": "high",
+          "range": "<=4.0.7"
+        }
+      ],
+      "effects": ["vite"],
+      "range": "<=4.0.7",
+      "nodes": ["node_modules/picomatch"],
+      "fixAvailable": false
+    },
+    "vite": {
+      "name": "vite",
+      "severity": "high",
+      "isDirect": false,
+      "via": ["picomatch"],
+      "effects": ["vitest"],
+      "range": "*",
+      "nodes": ["node_modules/vite"],
+      "fixAvailable": false
+    },
+    "vitest": {
+      "name": "vitest",
+      "severity": "high",
+      "isDirect": true,
+      "via": ["vite"],
+      "effects": [],
+      "range": "*",
+      "nodes": ["node_modules/vitest"],
+      "fixAvailable": false
+    }
+  },
+  "metadata": {
+    "vulnerabilities": {
+      "info": 0,
+      "low": 0,
+      "moderate": 0,
+      "high": 3,
+      "critical": 0,
+      "total": 3
+    }
+  }
+}

@@ -21,5 +21,6 @@ Maintainers own the verification workflows for the SDK.
 ## Verification
 
 Run `npm test -- test/security-scan.test.ts` for scanner changes,
+`npm test -- test/security-check.test.ts` for the dependency-audit gate,
 `npm test -- test/workflow-security.test.ts` for workflow pins, and the root
 verification commands for changes to job behavior.

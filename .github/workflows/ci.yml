@@ -32,4 +32,4 @@ jobs:
       - name: Lint source
         run: npm run lint
       - name: Audit dependencies
-        run: npm audit --audit-level=high
+        run: node scripts/security-check.mjs
