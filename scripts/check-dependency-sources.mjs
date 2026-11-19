@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
  * Fail-closed dependency source guard. Node built-ins only; no network.
- * Reads package.json, package-lock.json, .npmrc, and the allowlist from disk.
+ * Reads package.json, package-lock.json, npm-shrinkwrap.json, .npmrc, and the
+ * allowlist from disk. Unvalidated pnpm-lock.yaml / yarn.lock fail closed.
  * No --skip flag and no environment bypass.
  */
 import { readFileSync, existsSync } from 'node:fs';
@@ -258,57 +259,84 @@ const globs = workspaceGlobs(manifest);
 
 noteSpecs(manifest, MANIFEST_FIELDS, 'package.json:');
 
-const lockPath = join(root, 'package-lock.json');
-if (!existsSync(lockPath)) {
-  note('F7', 'package-lock.json', 'package-lock.json is missing');
-} else {
-  const lockfile = parseJsonFile(lockPath, 'package-lock.json');
+if (manifest.publishConfig && typeof manifest.publishConfig === 'object' && !Array.isArray(manifest.publishConfig)) {
+  for (const [key, value] of Object.entries(manifest.publishConfig)) {
+    if (!isRegistryNpmrcKey(key)) continue;
+    if (!isNpmjsHttpsUrl(value)) {
+      note('F6', `package.json:publishConfig.${key}`, `publishConfig.${key}`);
+    }
+  }
+}
+
+for (const name of ['pnpm-lock.yaml', 'yarn.lock']) {
+  if (existsSync(join(root, name))) {
+    note('F7', name, `${name} is present and not validated`);
+  }
+}
+
+function checkLockDocument(lockfile, fileLabel) {
   const version = lockfile?.lockfileVersion;
   if (typeof version !== 'number' || version < 2) {
-    note('F7', 'package-lock.json:lockfileVersion', 'package-lock.json lockfileVersion');
+    note('F7', `${fileLabel}:lockfileVersion`, `${fileLabel} lockfileVersion`);
   }
   const packages = lockfile?.packages;
   if (!packages || typeof packages !== 'object' || Array.isArray(packages)) {
-    note('F7', 'package-lock.json:packages', 'package-lock.json packages');
-  } else {
-    for (const [lockKey, meta] of Object.entries(packages)) {
-      if (!meta || typeof meta !== 'object') {
-        note('F7', `package-lock.json:${lockKey}`, `${lockKey} is not an object`);
-        continue;
-      }
-      if (lockKey === '') {
-        noteSpecs(meta, LOCK_SPEC_FIELDS, 'package-lock.json:');
-        continue;
-      }
+    note('F7', `${fileLabel}:packages`, `${fileLabel} packages`);
+    return;
+  }
+  for (const [lockKey, meta] of Object.entries(packages)) {
+    if (!meta || typeof meta !== 'object') {
+      note('F7', `${fileLabel}:${lockKey}`, `${lockKey} is not an object`);
+      continue;
+    }
+    if (lockKey === '') {
+      noteSpecs(meta, LOCK_SPEC_FIELDS, `${fileLabel}:`);
+      continue;
+    }
 
-      const workspaceRecord = isDeclaredWorkspacePath(lockKey, globs);
-      const workspaceLink =
-        meta.link === true &&
-        typeof meta.resolved === 'string' &&
-        !meta.resolved.includes('://') &&
-        isDeclaredWorkspacePath(meta.resolved, globs);
-      const workspaceExempt = workspaceRecord || workspaceLink;
+    const workspaceRecord = isDeclaredWorkspacePath(lockKey, globs);
+    const workspaceLink =
+      meta.link === true &&
+      typeof meta.resolved === 'string' &&
+      !meta.resolved.includes('://') &&
+      isDeclaredWorkspacePath(meta.resolved, globs);
+    const workspaceExempt = workspaceRecord || workspaceLink;
 
-      if (!workspaceExempt) {
-        if (!isNpmjsHttpsUrl(meta.resolved)) {
-          note('F3', `package-lock.json:${lockKey}:resolved`, `${lockKey} resolved`);
-        }
-        if (typeof meta.integrity !== 'string' || meta.integrity.length === 0) {
-          note('F5', `package-lock.json:${lockKey}:integrity`, `${lockKey} integrity`);
-        }
+    if (!workspaceExempt) {
+      if (!isNpmjsHttpsUrl(meta.resolved)) {
+        note('F3', `${fileLabel}:${lockKey}:resolved`, `${lockKey} resolved`);
       }
-
-      const implied = nameFromNodeModulesPath(lockKey);
-      if (!implied) continue;
-      const nameFieldMismatch =
-        typeof meta.name === 'string' && meta.name.length > 0 && meta.name !== implied;
-      const resolvedNameMismatch =
-        !workspaceExempt && isAbsoluteUrl(meta.resolved) && !resolvedPathnameMatchesImplied(meta.resolved, implied);
-      if (nameFieldMismatch || resolvedNameMismatch) {
-        note('F4', `package-lock.json:${lockKey}:name`, `${lockKey} name`);
+      if (typeof meta.integrity !== 'string' || meta.integrity.length === 0) {
+        note('F5', `${fileLabel}:${lockKey}:integrity`, `${lockKey} integrity`);
       }
     }
+
+    const implied = nameFromNodeModulesPath(lockKey);
+    if (!implied) continue;
+    const nameFieldMismatch =
+      typeof meta.name === 'string' && meta.name.length > 0 && meta.name !== implied;
+    const resolvedNameMismatch =
+      !workspaceExempt && isAbsoluteUrl(meta.resolved) && !resolvedPathnameMatchesImplied(meta.resolved, implied);
+    if (nameFieldMismatch || resolvedNameMismatch) {
+      note('F4', `${fileLabel}:${lockKey}:name`, `${lockKey} name`);
+    }
   }
+}
+
+const lockPath = join(root, 'package-lock.json');
+const shrinkPath = join(root, 'npm-shrinkwrap.json');
+const hasLock = existsSync(lockPath);
+const hasShrink = existsSync(shrinkPath);
+if (!hasLock && !hasShrink) {
+  note('F7', 'package-lock.json', 'package-lock.json is missing');
+} else {
+  const lockfile = hasLock ? parseJsonFile(lockPath, 'package-lock.json') : null;
+  const shrinkwrap = hasShrink ? parseJsonFile(shrinkPath, 'npm-shrinkwrap.json') : null;
+  if (hasLock && hasShrink && JSON.stringify(lockfile) !== JSON.stringify(shrinkwrap)) {
+    note('F7', 'npm-shrinkwrap.json', 'package-lock.json and npm-shrinkwrap.json differ');
+  }
+  if (hasLock) checkLockDocument(lockfile, 'package-lock.json');
+  if (hasShrink) checkLockDocument(shrinkwrap, 'npm-shrinkwrap.json');
 }
 
 const npmrcPath = join(root, '.npmrc');

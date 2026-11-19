@@ -12,11 +12,13 @@ Maintainers own deterministic CI utilities. They do not sign transactions.
   locations rather than potentially sensitive source text.
 - The pattern scan is a heuristic and must not be described as a complete audit.
 - `check-dependency-sources.mjs` is a fail-closed, offline check of
-  package.json, package-lock.json and `.npmrc`. It rejects `npm:` aliases,
-  non-registry specs, non-npmjs lock resolutions, lock name/path mismatches,
-  missing integrity, and non-npmjs `.npmrc` registries. There is no skip flag
-  and no environment bypass. `scripts/dependency-sources-allowlist.json` ships
-  empty and every allowlisted entry is printed.
+  package.json, package-lock.json, npm-shrinkwrap.json and `.npmrc`. It
+  rejects `npm:` aliases, non-registry specs, non-https or non-npmjs
+  registries (including `publishConfig`), lock name/path mismatches, missing
+  integrity, unvalidated `pnpm-lock.yaml`/`yarn.lock`, and a shrinkwrap that
+  differs from the lockfile. There is no skip flag and no environment bypass.
+  `scripts/dependency-sources-allowlist.json` ships empty and every
+  allowlisted entry is printed.
 
 ## Verification
 

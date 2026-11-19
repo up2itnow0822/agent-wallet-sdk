@@ -155,6 +155,57 @@ describe('dependency source check (T0–T10, replay 79592d6)', () => {
     expect(result.stderr).toContain('F2:');
     expect(result.stderr).toContain(key);
   });
+
+  it('http-publishconfig: http registry in publishConfig fails', () => {
+    const result = fixture('http-publishconfig');
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('F6:');
+    expect(result.stderr).toContain('publishConfig.registry');
+  });
+
+  it('http-npmrc: http registry.npmjs.org in .npmrc fails', () => {
+    const result = fixture('http-npmrc');
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('F6:');
+    expect(result.stderr).toContain('.npmrc registry');
+  });
+
+  it('http-npmrc-scoped: http scoped registry in .npmrc fails', () => {
+    const result = fixture('http-npmrc-scoped');
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('F6:');
+    expect(result.stderr).toContain('.npmrc @foo:registry');
+  });
+
+  it('http-lock-resolved: http registry.npmjs.org resolved URL fails', () => {
+    const result = fixture('http-lock-resolved');
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('F3:');
+    expect(result.stderr).toContain('node_modules/leftpad');
+  });
+
+  it('shrinkwrap-evil: npm-shrinkwrap.json is validated and must match package-lock.json', () => {
+    const result = fixture('shrinkwrap-evil');
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('F7:');
+    expect(result.stderr).toContain('npm-shrinkwrap.json');
+    expect(result.stderr).toContain('F3:');
+    expect(result.stderr).toContain('node_modules/leftpad');
+  });
+
+  it('alt-lock-pnpm: unvalidated pnpm-lock.yaml fails', () => {
+    const result = fixture('alt-lock-pnpm');
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('F7:');
+    expect(result.stderr).toContain('pnpm-lock.yaml');
+  });
+
+  it('alt-lock-yarn: unvalidated yarn.lock fails', () => {
+    const result = fixture('alt-lock-yarn');
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('F7:');
+    expect(result.stderr).toContain('yarn.lock');
+  });
 });
 
 describe('dependency source check wiring', () => {
@@ -211,6 +262,19 @@ describe('dependency source check wiring', () => {
         expect(commands.slice(index + 1)).toContain('npm run security');
         expect(commands.slice(index + 1).some((command) => command.startsWith('npm audit'))).toBe(true);
       }
+    }
+  });
+
+  it('build and verify refuse unvalidated pnpm/yarn lockfiles before install', () => {
+    for (const file of ['build.yml', 'ci.yml']) {
+      const src = readFileSync(join(WORKFLOWS, file), 'utf8');
+      expect(src).toContain('pnpm-lock.yaml');
+      expect(src).toContain('yarn.lock');
+      expect(src).not.toMatch(/pnpm install/);
+      expect(src).not.toMatch(/yarn install/);
+      expect(src).not.toMatch(/npm ci\s*\|\|/);
+      expect(src.indexOf('pnpm-lock.yaml')).toBeLessThan(src.indexOf('npm ci'));
+      expect(src.indexOf('yarn.lock')).toBeLessThan(src.indexOf('npm ci'));
     }
   });
 });
